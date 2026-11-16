@@ -295,9 +295,11 @@ def test_evaluator_tempo_parity_and_provenance(tmp_path: Path, monkeypatch) -> N
         captured_kwargs["notes"] = notes
         return 90.0, True
 
+    from app.transcription.basic_pitch_provider import BasicPitchProvider
+
     monkeypatch.setattr(mod, "estimate_tempo", fake_estimate_tempo)
     monkeypatch.setattr(
-        mod.BasicPitchProvider,
+        BasicPitchProvider,
         "transcribe",
         lambda self, *a, **kw: type(
             "Tx",

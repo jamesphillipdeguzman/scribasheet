@@ -6,6 +6,7 @@ import { App } from "@/App";
 import { ProjectStudioPage } from "@/features/projects/ProjectStudioPage";
 import { api, ApiError } from "@/services/api";
 import { midiToNoteName, formatDuration, formatBytes } from "@/lib/utils";
+import { computePianoEnvelopeParams } from "@/features/editor/midiSynth";
 
 vi.mock("@/features/auth/AuthContext", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/features/auth/AuthContext")>();
@@ -76,5 +77,15 @@ describe("ScribaSheet Frontend", () => {
     render(<App />);
     expect(screen.getByText(/Page Not Found/i)).toBeInTheDocument();
     window.history.pushState({}, "", "/");
+  });
+
+  it("computes velocity-sensitive piano envelope with sustain and damper release", () => {
+    const soft = computePianoEnvelopeParams(60, 0.8, 40, 0.7);
+    const loud = computePianoEnvelopeParams(60, 0.8, 100, 0.7);
+    expect(loud.peakGain).toBeGreaterThan(soft.peakGain);
+    expect(loud.filterCutoffHz).toBeGreaterThan(soft.filterCutoffHz);
+    expect(soft.holdEndSec).toBeCloseTo(0.8, 3);
+    expect(soft.sustainGain).toBeGreaterThan(soft.peakGain * 0.3);
+    expect(soft.releaseSec).toBeGreaterThanOrEqual(0.14);
   });
 });

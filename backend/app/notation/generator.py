@@ -600,26 +600,29 @@ def render_score_wav(score: ScoreData, sample_rate: int = 22050) -> bytes:
 
     for n in score.notes:
         start_idx = max(0, int(n.onset_sec * sample_rate))
-        end_idx = min(num_samples, int(n.offset_sec * sample_rate))
-        length = end_idx - start_idx
-        if length <= 10:
+        note_off_idx = min(num_samples, int(n.offset_sec * sample_rate))
+        hold_len = note_off_idx - start_idx
+        if hold_len <= 10:
             continue
+        release_samples = int(0.15 * sample_rate)
+        end_idx = min(num_samples, note_off_idx + release_samples)
+        length = end_idx - start_idx
         t = np.arange(length, dtype=np.float32) / sample_rate
         freq = 440.0 * (2.0 ** ((n.pitch_midi - 69) / 12.0))
-        # Warm piano-like harmonic synthesis with ADSR envelope
+        # Warm piano-like harmonic synthesis with attack, gentle string decay, and damper release
         wave = (
             0.65 * np.sin(2.0 * np.pi * freq * t)
             + 0.25 * np.sin(2.0 * np.pi * 2.0 * freq * t)
             + 0.10 * np.sin(2.0 * np.pi * 3.0 * freq * t)
         )
-        attack = min(int(0.012 * sample_rate), length // 3)
-        release = min(int(0.08 * sample_rate), length // 2)
-        env = np.ones(length, dtype=np.float32)
+        attack = min(int(0.008 * sample_rate), hold_len // 3)
+        env = np.exp(-t * 0.45).astype(np.float32)
         if attack > 0:
-            env[:attack] = np.linspace(0.0, 1.0, attack, dtype=np.float32)
-        if release > 0:
-            env[-release:] = np.linspace(1.0, 0.0, release, dtype=np.float32)
-        amp = (n.velocity / 127.0) * 0.22
+            env[:attack] *= np.linspace(0.0, 1.0, attack, dtype=np.float32)
+        tail_len = end_idx - note_off_idx
+        if tail_len > 0:
+            env[hold_len:] *= np.linspace(1.0, 0.0, tail_len, dtype=np.float32)
+        amp = (max(1, n.velocity) / 127.0) * 0.24
         mix[start_idx:end_idx] += wave * env * amp
 
     peak = float(np.max(np.abs(mix))) if len(mix) > 0 else 0.0

@@ -43,12 +43,18 @@ from app.notation.generator import (
 from app.schemas.transcription import TranscriptionSettings
 from app.storage.service import sanitize_filename
 from app.transcription.basic_pitch_provider import (
-    BasicPitchProvider,
     TranscriptionInferenceError,
     resolve_onnx_model_path,
     verify_onnx_cpu_runtime,
 )
 from app.transcription.note_refiner import NoteRefinerConfig, refine_detected_notes
+from app.transcription.provider_factory import (
+    get_target_sample_rate_for_engine,
+    get_transcription_provider,
+    is_fallback_allowed,
+    resolve_requested_engine,
+    transcribe_with_provider,
+)
 from app.transcription.versioning import build_transcription_provenance
 
 logging.basicConfig(
@@ -144,12 +150,25 @@ class RealTranscriptionHandler:
         self._api_origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
         self._client = http_client or httpx.Client(timeout=120.0)
         self._owns_client = http_client is None
-        self._provider = BasicPitchProvider()
+        self.requested_engine = resolve_requested_engine()
+        self.allow_fallback = is_fallback_allowed()
+        self._provider = get_transcription_provider(self.requested_engine)
 
-        # Fail fast if ONNX model or CPUExecutionProvider is missing
-        model_path = resolve_onnx_model_path()
-        verify_onnx_cpu_runtime(model_path)
-        logger.info("Initialized RealTranscriptionHandler (model=%s, device=CPU)", model_path.name)
+        if self.requested_engine == "basic_pitch" or self.allow_fallback:
+            model_path = resolve_onnx_model_path()
+            verify_onnx_cpu_runtime(model_path)
+            bp_info = model_path.name
+        else:
+            bp_info = "not-initialized"
+
+        device = getattr(self._provider, "device", "cpu").upper()
+        logger.info(
+            "Initialized RealTranscriptionHandler (engine=%s, model=%s, device=%s, allow_fallback=%s)",
+            self.requested_engine,
+            "transkun-2.0" if self.requested_engine == "transkun" else bp_info,
+            device,
+            self.allow_fallback,
+        )
 
     def _check_cancelled(self, job_id: str, cancel_event: threading.Event | None) -> None:
         if cancel_event and cancel_event.is_set():
@@ -173,11 +192,18 @@ class RealTranscriptionHandler:
 
         settings = TranscriptionSettings(**(job.get("settings") or {}))
         safe_name = sanitize_filename(job.get("source_filename") or "input_audio.wav")
+        job_engine_raw = job.get("engine")
+        requested_engine = (
+            resolve_requested_engine(job_engine_raw)
+            if job_engine_raw in ("basic_pitch", "transkun")
+            else self.requested_engine
+        )
+        target_sr = get_target_sample_rate_for_engine(requested_engine)
 
         with tempfile.TemporaryDirectory(prefix=f"scriba_job_{job_id[:8]}_") as tmpdir:
             tmp_path = Path(tmpdir)
             local_source = tmp_path / safe_name
-            processed_wav = tmp_path / "normalized_22050_mono.wav"
+            processed_wav = tmp_path / f"normalized_{target_sr}_mono.wav"
 
             # 1. Download source audio (5%)
             self._check_cancelled(job_id, cancel_event)
@@ -199,27 +225,47 @@ class RealTranscriptionHandler:
             report_progress("validating", 15, "Validating Audio", "Inspecting audio stream metadata.")
             probe_media(local_source)
 
-            # 3. Preprocess to 22.05 kHz mono WAV (25%)
+            # 3. Preprocess to target mono WAV (25%)
             self._check_cancelled(job_id, cancel_event)
             prep_profile_name = (
                 "piano"
                 if "piano" in settings.instrument.lower()
                 else ("vocal" if "vocal" in settings.instrument.lower() else "general")
             )
-            report_progress("preprocessing", 25, "Preprocessing Audio", f"Normalizing audio ({prep_profile_name} profile) to 22.05 kHz mono WAV.")
-            proc_meta = preprocess_to_wav(local_source, processed_wav, target_sr=22050, profile=prep_profile_name)
+            report_progress(
+                "preprocessing",
+                25,
+                "Preprocessing Audio",
+                f"Normalizing audio ({prep_profile_name} profile, {target_sr} Hz) to mono WAV.",
+            )
+            proc_meta = preprocess_to_wav(
+                local_source, processed_wav, target_sr=target_sr, profile=prep_profile_name
+            )
 
-            # 4. Load AI model & run Basic Pitch ONNX inference (35% -> 60%)
+            # 4. Load AI model & run transcription inference (35% -> 60%)
             self._check_cancelled(job_id, cancel_event)
-            report_progress("transcribing", 35, "Initializing Transcription Model", "Initializing Basic Pitch ONNX CPU runtime.")
-            model_path = resolve_onnx_model_path()
-            verify_onnx_cpu_runtime(model_path)
+            report_progress(
+                "transcribing",
+                35,
+                "Initializing Transcription Model",
+                f"Initializing {requested_engine} CPU runtime.",
+            )
+            if requested_engine == "basic_pitch":
+                verify_onnx_cpu_runtime(resolve_onnx_model_path())
 
             self._check_cancelled(job_id, cancel_event)
-            report_progress("transcribing", 60, "Running Basic Pitch Inference", "Detecting musical notes on CPU.")
+            report_progress(
+                "transcribing",
+                60,
+                "Running AI Transcription",
+                f"Detecting musical notes on CPU using {requested_engine}.",
+            )
             program, _ = get_instrument_program_and_clef(settings.instrument)
-            t_out = self._provider.transcribe(
+            exec_res = transcribe_with_provider(
                 processed_wav,
+                engine=requested_engine,
+                allow_fallback=self.allow_fallback,
+                provider=self._provider if requested_engine == self.requested_engine else None,
                 onset_threshold=settings.onset_threshold,
                 frame_threshold=settings.frame_threshold,
                 min_note_length_ms=settings.min_note_length_ms,
@@ -229,6 +275,7 @@ class RealTranscriptionHandler:
                 transpose_semitones=settings.transpose_semitones,
                 concert_pitch_hz=settings.concert_pitch_hz,
             )
+            t_out = exec_res.output
 
             if not t_out.notes:
                 raise TranscriptionInferenceError(
@@ -278,6 +325,10 @@ class RealTranscriptionHandler:
                 quantization=settings.quantization,
                 analysis={
                     "engine": t_out.engine,
+                    "requested_engine": exec_res.requested_engine,
+                    "actual_engine": exec_res.actual_engine,
+                    "fallback_used": exec_res.fallback_used,
+                    "fallback_reason": exec_res.fallback_reason,
                     "model": t_out.metadata.get("model"),
                     "raw_note_count": len(t_out.notes),
                     "note_count": len(refined_notes),
@@ -357,8 +408,13 @@ class RealTranscriptionHandler:
                 score_json=score_data.model_dump(),
                 duration_seconds=proc_meta.duration_seconds,
                 metadata_json={
-                    "handler": "real_basic_pitch_onnx",
+                    "handler": f"real_{exec_res.actual_engine}",
                     "engine": t_out.engine,
+                    "requested_engine": exec_res.requested_engine,
+                    "actual_engine": exec_res.actual_engine,
+                    "fallback_used": exec_res.fallback_used,
+                    "fallback_reason": exec_res.fallback_reason,
+                    "model": t_out.metadata.get("model"),
                     "note_count": len(score_data.notes),
                     "chord_count": len(score_data.chords),
                     "tempo_bpm": tempo_bpm,
