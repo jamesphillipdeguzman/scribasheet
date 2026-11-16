@@ -70,4 +70,11 @@ describe("ScribaSheet Frontend", () => {
       expect(screen.getByText(/No Transcription Score Generated Yet/i)).toBeInTheDocument();
     });
   });
+
+  it("renders application NotFoundPage for unknown routes", () => {
+    window.history.pushState({}, "", "/non-existent-route-xyz");
+    render(<App />);
+    expect(screen.getByText(/Page Not Found/i)).toBeInTheDocument();
+    window.history.pushState({}, "", "/");
+  });
 });
