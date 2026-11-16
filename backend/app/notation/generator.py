@@ -22,6 +22,7 @@ from app.notation.analyzer import (
     get_instrument_program_and_clef,
     quantize_seconds,
 )
+from app.notation.timing_map import TimingMap
 from app.schemas.score import ScoreData, ScoreNote, ScoreTrack
 from app.transcription.base import DetectedNote
 
@@ -42,16 +43,39 @@ def build_score_data(
     instrument: str,
     quantization: str = "sixteenth",
     analysis: dict | None = None,
+    timing_map: TimingMap | None = None,
 ) -> ScoreData:
     program, clef = get_instrument_program_and_clef(instrument)
     is_guitar = "guitar" in instrument.lower()
-    sec_per_beat = 60.0 / max(20.0, tempo_bpm)
+    effective_bpm = timing_map.tempo_bpm if timing_map is not None else tempo_bpm
+    sec_per_beat = 60.0 / max(20.0, effective_bpm)
     min_dur = max(0.05, sec_per_beat * 0.125)
+
+    grid_map_ql = {
+        "quarter": 1.0,
+        "dotted_eighth": 0.75,
+        "eighth": 0.5,
+        "eighth_triplet": 1.0 / 3.0,
+        "triplet": 1.0 / 3.0,
+        "sixteenth": 0.25,
+        "sixteenth_triplet": 1.0 / 6.0,
+        "thirtysecond": 0.125,
+    }
+    grid_ql = grid_map_ql.get(quantization, 0.25)
 
     score_notes: list[ScoreNote] = []
     for n in detected_notes:
-        onset = quantize_seconds(n.onset_sec, tempo_bpm, quantization)
-        offset = quantize_seconds(n.offset_sec, tempo_bpm, quantization)
+        if timing_map is not None and quantization != "none":
+            raw_onset_ql = max(0.0, timing_map.seconds_to_ql(n.onset_sec))
+            raw_offset_ql = max(raw_onset_ql + grid_ql, timing_map.seconds_to_ql(n.offset_sec))
+            q_onset_ql = max(0.0, round(raw_onset_ql / grid_ql) * grid_ql)
+            raw_dur_ql = max(grid_ql, raw_offset_ql - raw_onset_ql)
+            q_dur_ql = max(grid_ql, round(raw_dur_ql / grid_ql) * grid_ql)
+            onset = round(q_onset_ql * sec_per_beat, 4)
+            offset = round((q_onset_ql + q_dur_ql) * sec_per_beat, 4)
+        else:
+            onset = quantize_seconds(n.onset_sec, effective_bpm, quantization)
+            offset = quantize_seconds(n.offset_sec, effective_bpm, quantization)
         if offset <= onset:
             offset = round(onset + min_dur, 4)
         str_num, fret_num = assign_guitar_tab(n.pitch_midi) if is_guitar else (None, None)
@@ -72,7 +96,7 @@ def build_score_data(
         )
 
     score_notes.sort(key=lambda x: (x.onset_sec, x.pitch_midi))
-    chords = detect_chords(score_notes, tempo_bpm, time_signature)
+    chords = detect_chords(score_notes, effective_bpm, time_signature)
 
     track = ScoreTrack(
         index=0,
@@ -83,19 +107,29 @@ def build_score_data(
         muted=False,
     )
 
+    merged_analysis = dict(analysis or {})
+    if timing_map is not None:
+        merged_analysis["timing_map"] = timing_map.provenance
+        effective_duration = max(
+            duration_seconds,
+            max((n.offset_sec for n in score_notes), default=0.0),
+        )
+    else:
+        effective_duration = duration_seconds
+
     return ScoreData(
         title=title,
-        tempo_bpm=tempo_bpm,
+        tempo_bpm=effective_bpm,
         tempo_estimated=tempo_estimated,
         time_signature=time_signature,
         time_signature_estimated=time_signature_estimated,
         key_signature=key_signature,
         key_signature_estimated=key_signature_estimated,
-        duration_seconds=round(duration_seconds, 3),
+        duration_seconds=round(effective_duration, 3),
         tracks=[track],
         notes=score_notes,
         chords=chords,
-        analysis=analysis or {},
+        analysis=merged_analysis,
     )
 
 

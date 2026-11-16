@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import hashlib
-import inspect
 import itertools
 import json
 import platform
@@ -34,9 +33,8 @@ from app.audio.processor import (
 )
 from app.notation.analyzer import (
     estimate_key_signature,
-    estimate_tempo,
-    estimate_tempo_with_diagnostics,
 )
+from app.notation.beat_tracker import track_beats_and_downbeats
 from app.notation.generator import (
     build_score_data,
     clean_score_title,
@@ -44,6 +42,7 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
+from app.notation.timing_map import build_timing_map
 from app.transcription.base import DetectedNote
 from app.transcription.basic_pitch_provider import (
     resolve_onnx_model_path,
@@ -325,6 +324,7 @@ def main() -> int:
     parser.add_argument("--expected-time-signature", type=str, default="4/4")
     parser.add_argument("--instrument", type=str, default="piano")
     parser.add_argument("--engine", type=str, default=None, choices=["basic_pitch", "transkun"])
+    parser.add_argument("--timing-provider", type=str, default="auto", choices=["auto", "beat_this", "librosa"])
     parser.add_argument("--allow-fallback", action="store_true", default=False)
     parser.add_argument("--title", type=str, default=None)
     parser.add_argument("--output", required=True, type=Path, help="Output JSON report path")
@@ -388,12 +388,27 @@ def main() -> int:
         except ImportError:
             pass
 
-        tempo_kwargs: dict[str, Any] = {"tempo_mode": "auto", "manual_tempo_bpm": None}
-        uses_refined_notes_for_tempo = "notes" in inspect.signature(estimate_tempo).parameters
-        if uses_refined_notes_for_tempo:
-            tempo_kwargs["notes"] = refined_notes
-        tempo_bpm, tempo_estimated = estimate_tempo(wav_path, **tempo_kwargs)
-        tempo_diag = estimate_tempo_with_diagnostics(wav_path, **tempo_kwargs)
+        beats_per_bar = (
+            max(1, int(args.expected_time_signature.split("/")[0]))
+            if "/" in args.expected_time_signature
+            else 4
+        )
+        note_durs = [max(0.05, n.offset_sec - n.onset_sec) for n in refined_notes]
+        beat_res = track_beats_and_downbeats(
+            wav_path,
+            beats_per_measure=beats_per_bar,
+            provider_preference=args.timing_provider,
+            note_durations_sec=note_durs,
+        )
+        timing_map = build_timing_map(
+            beat_result=beat_res,
+            notes=refined_notes,
+            duration_seconds=wav_meta.duration_seconds,
+            time_signature=args.expected_time_signature,
+        )
+        tempo_bpm = timing_map.tempo_bpm
+        tempo_estimated = True
+        tempo_diag = timing_map.provenance
         key_sig, key_estimated = estimate_key_signature(refined_notes, key_setting="auto")
 
         title = clean_score_title(args.title or audio_path.stem)
@@ -410,6 +425,7 @@ def main() -> int:
             instrument=args.instrument,
             quantization="sixteenth",
             analysis={"refiner": refiner_stats},
+            timing_map=timing_map,
         )
 
         midi_bytes = score_data_to_midi_bytes(score_data)
@@ -501,7 +517,10 @@ def main() -> int:
             "tempo_analysis_config": {
                 "tempo_mode": "auto",
                 "manual_tempo_bpm": None,
-                "uses_refined_notes": uses_refined_notes_for_tempo,
+                "uses_refined_notes": True,
+                "timing_provider": timing_map.provider,
+                "timing_fallback_used": timing_map.fallback_used,
+                "timing_fallback_reason": timing_map.fallback_reason,
             },
             "source_duration_sec": round(raw_meta.duration_seconds, 3),
             "evaluation_timestamp": eval_ts,
@@ -517,9 +536,16 @@ def main() -> int:
         },
         "tempo": {
             **tempo_eval,
+            "raw_bpm": tempo_diag.get("raw_bpm"),
+            "selected_ratio": tempo_diag.get("selected_ratio"),
+            "downbeat_confidence": tempo_diag.get("downbeat_confidence"),
+            "first_downbeat_sec": timing_map.first_downbeat_sec,
+            "pickup_ql": timing_map.pickup_ql,
+            "resolution_reason": tempo_diag.get("resolution_reason"),
             "candidates": tempo_diag.get("candidates", []),
-            "confidence": tempo_diag.get("confidence"),
+            "confidence": tempo_diag.get("downbeat_confidence"),
             "ambiguous": tempo_diag.get("ambiguous"),
+            "timing_provenance": timing_map.provenance,
         },
         "key": key_eval,
         "time_signature": args.expected_time_signature,
