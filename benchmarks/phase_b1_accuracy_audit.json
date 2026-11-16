@@ -1,0 +1,110 @@
+{
+  "audit_phase": "Phase B.1",
+  "audit_timestamp": "2026-11-16T18:35:00+08:00",
+  "git_commit_sha": "c6e4f9e3bc57c49a8a6396cde6807b3e319a2296",
+  "pre_fix_commit_sha": "d9afd2a5d9807019608c4c65b319b163f7a70d46",
+  "reference_audio": {
+    "repo_path": "assets/test_audio/soft-easy-piano-calming-melody_75bpm_F_major.wav",
+    "external_path": "C:\\Users\\PC\\Documents\\.WEBSITES\\documentation\\scribasheet\\soft-easy-piano-calming-melody_75bpm_F_major.wav",
+    "sha256": "908E18DF558BF4CC2BBDD2CBAA8E7D4DCE972B3CB24E45E59293CCD636DCF497",
+    "byte_for_byte_identical": true,
+    "expected_properties": {
+      "duration_seconds": 13.2,
+      "tempo_bpm": 75.0,
+      "key": "F major",
+      "time_signature": "4/4"
+    }
+  },
+  "benchmark_reconciliation": {
+    "verified_facts": [
+      "In commit c6e4f9e, benchmarks/baseline_f_major.json was overwritten by re-running scripts/evaluate_transcription.py against the post-fix codebase using assets/test_audio/soft-easy-piano-calming-melody_75bpm_F_major.wav and --expected-key 'F major'.",
+      "Both benchmarks/baseline_f_major.json and benchmarks/after_fixes_f_major.json in c6e4f9e have refiner_stats.enabled=true, tempo=73.8 BPM, raw_count=109, refined_count=63, reattack_merges=46, and identical artifact sizes (raw_notes.json=17771B, score.mid=445B, score.musicxml=42357B, score.pdf=6905B).",
+      "The earlier reported baseline (143.6 BPM, 111 raw notes, refiner_stats.enabled=false, 8 measures, 16 overflow measures) originated from commit d9afd2a before processor.py, note_refiner.py, analyzer.py, and generator.py were modified in c6e4f9e."
+    ],
+    "original_baseline_available_in_benchmarks_dir": false,
+    "pre_fix_code_available_in_git": true
+  },
+  "reproducible_measurements": {
+    "audio_duration_sec": 13.2,
+    "preprocessed_sample_rate": 22050,
+    "librosa_raw_beat_track_bpm": 152.0,
+    "resolved_tempo_bpm": 73.8,
+    "tempo_abs_error_bpm": 1.2,
+    "music21_key_tonic": "F",
+    "music21_key_mode": "major",
+    "music21_key_correlation": 0.7475,
+    "raw_note_count": 109,
+    "refined_note_count": 63,
+    "reattack_merges": 46,
+    "reattack_merges_with_zero_or_negative_gap": 39,
+    "reattack_merges_with_onset_diff_gt_250ms": 39,
+    "reattack_max_onset_diff_sec": 2.4161,
+    "octave_ghosts_suppressed": 0,
+    "remaining_octave_pairs_in_refined": 4,
+    "midi_note_count": 63,
+    "musicxml_notehead_count_excluding_ties": 62,
+    "midi_vs_musicxml_missing_pitches": {"69": 1},
+    "musicxml_parts": 2,
+    "musicxml_measures_per_part": [4, 4],
+    "musicxml_overflow_measures": 0,
+    "musicxml_underflow_measures": 0,
+    "musicxml_parse_ok": true,
+    "pdf_bytes": 6905,
+    "pdf_pages": 1,
+    "pdf_text_ops": 14
+  },
+  "pipeline_parity": {
+    "shared_modules": [
+      "preprocess_to_wav",
+      "BasicPitchProvider.transcribe",
+      "refine_detected_notes",
+      "estimate_key_signature",
+      "build_score_data",
+      "score_data_to_midi_bytes",
+      "score_data_to_musicxml"
+    ],
+    "divergences": [
+      "scripts/evaluate_transcription.py calls estimate_tempo(wav_path, ...) without passing notes=refined_notes, whereas worker_agent.py and pipeline.py pass notes=refined_notes.",
+      "RealTranscriptionHandler does not render PDF during worker execution (PDF is rendered on-demand via API).",
+      "ScoreData persists raw_onset_sec/raw_offset_sec on surviving refined notes, not dropped/merged raw note events."
+    ]
+  },
+  "confirmed_defects": [
+    {
+      "id": "DEF-01",
+      "severity": "high",
+      "component": "backend/app/transcription/note_refiner.py",
+      "summary": "reattack_debounce merges pedaled/sustained repeated notes because gap <= 0.035s is never treated as a genuine re-articulation (39 of 46 merges had onset_diff > 250ms, up to 2.416s)."
+    },
+    {
+      "id": "DEF-02",
+      "severity": "medium",
+      "component": "backend/app/notation/generator.py",
+      "summary": "MusicXML drops 1 note (MIDI 69 / A4) relative to MIDI (62 vs 63 notes) when two same-pitch notes quantize to identical (start_ql, end_ql)."
+    },
+    {
+      "id": "DEF-03",
+      "severity": "medium",
+      "component": "benchmarks/baseline_f_major.json",
+      "summary": "Baseline benchmark JSON was overwritten by a post-fix run in commit c6e4f9e; benchmarks_artifacts/ was also committed outside benchmarks/."
+    },
+    {
+      "id": "DEF-04",
+      "severity": "low",
+      "component": "backend/app/notation/generator.py",
+      "summary": "PDF engraving uses proportional-time notehead placement with solid circles only (no rhythmic noteheads/beams/rests/accidentals/key signatures) and renders footer bullet as \\177 in WinAnsi."
+    },
+    {
+      "id": "DEF-05",
+      "severity": "low",
+      "component": "scripts/evaluate_transcription.py",
+      "summary": "Evaluator omits notes=refined_notes in estimate_tempo() and lacks WAV SHA-256 + git commit SHA recording."
+    }
+  ],
+  "unverified_without_ground_truth": [
+    "True note-level onset/pitch precision, recall, and F1 against ground-truth MIDI.",
+    "Whether any of the 46 merged reattacks are true repeated notes vs sustain-tail re-triggers.",
+    "Whether the 4 remaining octave pairs in refined_notes are intentional piano octaves or harmonic ghosts.",
+    "Harmonic accuracy of the 8 detected chord symbols."
+  ]
+}

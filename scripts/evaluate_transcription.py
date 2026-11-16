@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import hashlib
+import inspect
+import itertools
 import json
+import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,19 +25,19 @@ BACKEND_DIR = REPO_ROOT / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.audio.processor import preprocess_to_wav, probe_media  # noqa: E402
-from app.notation.analyzer import (  # noqa: E402
+from app.audio.processor import preprocess_to_wav, probe_media
+from app.notation.analyzer import (
     estimate_key_signature,
     estimate_tempo,
 )
-from app.notation.generator import (  # noqa: E402
+from app.notation.generator import (
     build_score_data,
     render_score_pdf,
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
-from app.transcription.base import DetectedNote  # noqa: E402
-from app.transcription.basic_pitch_provider import (  # noqa: E402
+from app.transcription.base import DetectedNote
+from app.transcription.basic_pitch_provider import (
     BasicPitchProvider,
     resolve_onnx_model_path,
     verify_onnx_cpu_runtime,
@@ -61,7 +67,7 @@ def _count_rapid_reattacks(notes: list[DetectedNote], max_gap_sec: float = 0.06)
     count = 0
     for pitch_notes in by_pitch.values():
         pitch_notes.sort(key=lambda n: n.onset_sec)
-        for prev, curr in zip(pitch_notes, pitch_notes[1:], strict=False):
+        for prev, curr in itertools.pairwise(pitch_notes):
             gap = curr.onset_sec - prev.offset_sec
             if gap <= max_gap_sec:
                 count += 1
@@ -124,7 +130,7 @@ def validate_musicxml_integrity(musicxml_str: str) -> dict[str, Any]:
         parts = list(parsed.parts) if hasattr(parsed, "parts") else []
         m21_parts = len(parts)
         m21_measures_per_part = [len(p.getElementsByClass(music21.stream.Measure)) for p in parts]
-    except Exception as exc:
+    except (OSError, ValueError, music21.exceptions21.Music21Exception) as exc:
         parse_error = str(exc)
 
     overflow_measures: list[dict[str, Any]] = []
@@ -157,7 +163,7 @@ def validate_musicxml_integrity(musicxml_str: str) -> dict[str, Any]:
                             beats = int(b_el.text)
                         if bt_el is not None and bt_el.text:
                             beat_type = int(bt_el.text)
-                expected_ticks = int(round(divisions * beats * (4.0 / beat_type)))
+                expected_ticks = round(divisions * beats * (4.0 / beat_type))
 
                 voice_ticks: dict[str, int] = defaultdict(int)
                 for child in m:
@@ -193,7 +199,7 @@ def validate_musicxml_integrity(musicxml_str: str) -> dict[str, Any]:
                                 "expected_ticks": expected_ticks,
                             }
                         )
-    except Exception as exc:
+    except (ET.ParseError, ValueError) as exc:
         parse_ok = False
         parse_error = parse_error or str(exc)
 
@@ -261,6 +267,43 @@ def _evaluate_against_ground_truth(
     }
 
 
+def _compute_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest().upper()
+
+
+def _get_git_provenance(repo_root: Path) -> dict[str, Any]:
+    commit_sha: str | None = None
+    dirty: bool | None = None
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            commit_sha = res.stdout.strip()
+        st = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if st.returncode == 0:
+            dirty = bool(st.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        commit_sha = commit_sha or None
+    return {"git_commit_sha": commit_sha, "git_dirty": dirty}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate ScribaSheet transcription pipeline.")
     parser.add_argument("--audio", required=True, type=Path, help="Input audio/video file path")
@@ -299,16 +342,26 @@ def main() -> int:
         # Use note refiner if available in codebase
         refined_notes = raw_notes
         refiner_stats: dict[str, Any] = {"enabled": False}
+        refiner_config_dict: dict[str, Any] | None = None
         try:
-            from app.transcription.note_refiner import refine_detected_notes  # type: ignore
+            from app.transcription.note_refiner import (  # type: ignore
+                NoteRefinerConfig,
+                refine_detected_notes,
+            )
 
-            refined_result = refine_detected_notes(raw_notes)
+            cfg = NoteRefinerConfig()
+            refiner_config_dict = dataclasses.asdict(cfg)
+            refined_result = refine_detected_notes(raw_notes, config=cfg)
             refined_notes = refined_result.notes
             refiner_stats = {"enabled": True, **refined_result.stats}
         except ImportError:
             pass
 
-        tempo_bpm, tempo_estimated = estimate_tempo(wav_path, tempo_mode="auto", manual_tempo_bpm=None)
+        tempo_kwargs: dict[str, Any] = {"tempo_mode": "auto", "manual_tempo_bpm": None}
+        uses_refined_notes_for_tempo = "notes" in inspect.signature(estimate_tempo).parameters
+        if uses_refined_notes_for_tempo:
+            tempo_kwargs["notes"] = refined_notes
+        tempo_bpm, tempo_estimated = estimate_tempo(wav_path, **tempo_kwargs)
         key_sig, key_estimated = estimate_key_signature(refined_notes, key_setting="auto")
 
         title = args.title or audio_path.stem
@@ -332,18 +385,25 @@ def main() -> int:
         pdf_bytes = render_score_pdf(score_data)
 
     # Write artifacts
-    raw_notes_payload = [
-        {
-            "pitch_midi": n.pitch_midi,
-            "onset_sec": round(n.onset_sec, 4),
-            "offset_sec": round(n.offset_sec, 4),
-            "duration_sec": round(max(0.0, n.offset_sec - n.onset_sec), 4),
-            "velocity": n.velocity,
-            "confidence": round(n.confidence, 4) if n.confidence is not None else None,
-        }
-        for n in raw_notes
-    ]
-    (artifacts_dir / "raw_notes.json").write_text(json.dumps(raw_notes_payload, indent=2), encoding="utf-8")
+    def _serialize_notes(items: list[DetectedNote]) -> list[dict[str, Any]]:
+        return [
+            {
+                "pitch_midi": n.pitch_midi,
+                "onset_sec": round(n.onset_sec, 4),
+                "offset_sec": round(n.offset_sec, 4),
+                "duration_sec": round(max(0.0, n.offset_sec - n.onset_sec), 4),
+                "velocity": n.velocity,
+                "confidence": round(n.confidence, 4) if n.confidence is not None else None,
+            }
+            for n in items
+        ]
+
+    (artifacts_dir / "raw_notes.json").write_text(
+        json.dumps(_serialize_notes(raw_notes), indent=2), encoding="utf-8"
+    )
+    (artifacts_dir / "refined_notes.json").write_text(
+        json.dumps(_serialize_notes(refined_notes), indent=2), encoding="utf-8"
+    )
     (artifacts_dir / "score.mid").write_bytes(midi_bytes)
     (artifacts_dir / "score.musicxml").write_text(musicxml_str, encoding="utf-8")
     (artifacts_dir / "score.pdf").write_bytes(pdf_bytes)
@@ -371,7 +431,29 @@ def main() -> int:
     elif args.ground_truth_musicxml:
         gt_eval = _evaluate_against_ground_truth(refined_notes, args.ground_truth_musicxml)
 
+    git_prov = _get_git_provenance(REPO_ROOT)
+    wav_sha256 = _compute_sha256(audio_path)
+    eval_ts = datetime.now(UTC).isoformat()
+
     report: dict[str, Any] = {
+        "provenance": {
+            "wav_sha256": wav_sha256,
+            "git_commit_sha": git_prov["git_commit_sha"],
+            "git_dirty": git_prov["git_dirty"],
+            "expected_bpm": args.expected_bpm,
+            "expected_key": args.expected_key,
+            "expected_time_signature": args.expected_time_signature,
+            "transcription_engine": tx_out.engine,
+            "inference_provider": tx_out.metadata.get("provider", "CPUExecutionProvider"),
+            "refiner_config": refiner_config_dict,
+            "tempo_analysis_config": {
+                "tempo_mode": "auto",
+                "manual_tempo_bpm": None,
+                "uses_refined_notes": uses_refined_notes_for_tempo,
+            },
+            "source_duration_sec": round(raw_meta.duration_seconds, 3),
+            "evaluation_timestamp": eval_ts,
+        },
         "audio_file": str(audio_path),
         "audio_metadata": {
             "source_duration_sec": round(raw_meta.duration_seconds, 3),

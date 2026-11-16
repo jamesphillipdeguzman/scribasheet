@@ -1,0 +1,257 @@
+{
+  "provenance": {
+    "wav_sha256": "908E18DF558BF4CC2BBDD2CBAA8E7D4DCE972B3CB24E45E59293CCD636DCF497",
+    "git_commit_sha": "d9afd2a5d9807019608c4c65b319b163f7a70d46",
+    "git_dirty": true,
+    "expected_bpm": 75.0,
+    "expected_key": "F major",
+    "expected_time_signature": "4/4",
+    "transcription_engine": "basic_pitch",
+    "inference_provider": "CPUExecutionProvider",
+    "refiner_config": null,
+    "tempo_analysis_config": {
+      "tempo_mode": "auto",
+      "manual_tempo_bpm": null,
+      "uses_refined_notes": false
+    },
+    "source_duration_sec": 13.2,
+    "evaluation_timestamp": "2026-11-16T10:38:16.718535+00:00"
+  },
+  "audio_file": "C:\\Users\\PC\\Documents\\.WEBSITES\\scribasheet\\assets\\test_audio\\soft-easy-piano-calming-melody_75bpm_F_major.wav",
+  "audio_metadata": {
+    "source_duration_sec": 13.2,
+    "source_sample_rate": 44100,
+    "source_channels": 2,
+    "preprocessed_duration_sec": 13.2,
+    "preprocessed_sample_rate": 22050,
+    "is_silent": false
+  },
+  "tempo": {
+    "estimated_bpm": 143.6,
+    "expected_bpm": 75.0,
+    "abs_error_bpm": 68.6,
+    "ratio_to_expected": 1.915
+  },
+  "key": {
+    "estimated_key": "F",
+    "expected_key": "F major",
+    "exact_match": false
+  },
+  "time_signature": "4/4",
+  "raw_notes_summary": {
+    "count": 111,
+    "min_pitch": 41,
+    "max_pitch": 86,
+    "pitch_span_semitones": 45,
+    "durations_sec": {
+      "min": 0.0696,
+      "median": 0.3947,
+      "mean": 0.5208,
+      "max": 3.0083
+    },
+    "velocities": {
+      "min": 50,
+      "mean": 71.86,
+      "max": 104
+    },
+    "confidences": {
+      "min": 0.2958,
+      "mean": 0.4987,
+      "max": 0.7937
+    },
+    "short_notes_lt_55ms": 0,
+    "suspected_octave_duplicates": 25,
+    "rapid_same_pitch_reattacks_le_60ms": 47
+  },
+  "refined_notes_summary": {
+    "count": 111,
+    "min_pitch": 41,
+    "max_pitch": 86,
+    "pitch_span_semitones": 45,
+    "durations_sec": {
+      "min": 0.0696,
+      "median": 0.3947,
+      "mean": 0.5208,
+      "max": 3.0083
+    },
+    "velocities": {
+      "min": 50,
+      "mean": 71.86,
+      "max": 104
+    },
+    "confidences": {
+      "min": 0.2958,
+      "mean": 0.4987,
+      "max": 0.7937
+    },
+    "short_notes_lt_55ms": 0,
+    "suspected_octave_duplicates": 25,
+    "rapid_same_pitch_reattacks_le_60ms": 47
+  },
+  "refiner_stats": {
+    "enabled": false
+  },
+  "score_summary": {
+    "score_note_count": 111,
+    "chord_count": 8,
+    "chord_symbols": [
+      "Bb",
+      "Dm",
+      "F",
+      "Am",
+      "Bb",
+      "Gm",
+      "G",
+      "F"
+    ],
+    "chords": [
+      {
+        "measure": 1,
+        "beat": 1.0,
+        "onset_sec": 0.0,
+        "symbol": "Bb"
+      },
+      {
+        "measure": 3,
+        "beat": 1.0,
+        "onset_sec": 3.343,
+        "symbol": "Dm"
+      },
+      {
+        "measure": 4,
+        "beat": 1.0,
+        "onset_sec": 5.014,
+        "symbol": "F"
+      },
+      {
+        "measure": 4,
+        "beat": 3.0,
+        "onset_sec": 5.85,
+        "symbol": "Am"
+      },
+      {
+        "measure": 5,
+        "beat": 1.0,
+        "onset_sec": 6.685,
+        "symbol": "Bb"
+      },
+      {
+        "measure": 6,
+        "beat": 5.0,
+        "onset_sec": 8.357,
+        "symbol": "Gm"
+      },
+      {
+        "measure": 6,
+        "beat": 3.0,
+        "onset_sec": 9.192,
+        "symbol": "G"
+      },
+      {
+        "measure": 7,
+        "beat": 1.0,
+        "onset_sec": 10.028,
+        "symbol": "F"
+      }
+    ]
+  },
+  "musicxml_integrity": {
+    "music21_parse_ok": true,
+    "music21_parse_error": null,
+    "music21_parts": 2,
+    "music21_measures_per_part": [
+      8,
+      8
+    ],
+    "xml_parts": 2,
+    "xml_measures_per_part": [
+      8,
+      8
+    ],
+    "overflow_measure_count": 16,
+    "underflow_measure_count": 0,
+    "overflow_measures_sample": [
+      {
+        "part_index": 0,
+        "measure": "1",
+        "voice": "1",
+        "actual_ticks": 45360,
+        "expected_ticks": 40320
+      },
+      {
+        "part_index": 0,
+        "measure": "2",
+        "voice": "1",
+        "actual_ticks": 52920,
+        "expected_ticks": 40320
+      },
+      {
+        "part_index": 0,
+        "measure": "3",
+        "voice": "1",
+        "actual_ticks": 63000,
+        "expected_ticks": 40320
+      },
+      {
+        "part_index": 0,
+        "measure": "4",
+        "voice": "1",
+        "actual_ticks": 63000,
+        "expected_ticks": 40320
+      },
+      {
+        "part_index": 0,
+        "measure": "5",
+        "voice": "1",
+        "actual_ticks": 55440,
+        "expected_ticks": 40320
+      },
+      {
+        "part_index": 0,
+        "measure": "6",
+        "voice": "1",
+        "actual_ticks": 60480,
+        "expected_ticks": 40320
+      },
+      {
+        "part_index": 0,
+        "measure": "7",
+        "voice": "1",
+        "actual_ticks": 55440,
+        "expected_ticks": 40320
+      },
+      {
+        "part_index": 0,
+        "measure": "8",
+        "voice": "1",
+        "actual_ticks": 42840,
+        "expected_ticks": 40320
+      },
+      {
+        "part_index": 1,
+        "measure": "1",
+        "voice": "1",
+        "actual_ticks": 63000,
+        "expected_ticks": 40320
+      },
+      {
+        "part_index": 1,
+        "measure": "2",
+        "voice": "1",
+        "actual_ticks": 70560,
+        "expected_ticks": 40320
+      }
+    ],
+    "underflow_measures_sample": [],
+    "structural_integrity_ok": false
+  },
+  "pdf_summary": {
+    "bytes": 9810,
+    "valid_pdf_header": true
+  },
+  "midi_summary": {
+    "bytes": 746
+  },
+  "ground_truth_eval": null,
+  "artifacts_dir": "C:\\Users\\PC\\Documents\\.WEBSITES\\scribasheet\\benchmarks\\historical\\pre_phase_b_baseline_d9afd2a_artifacts"
+}

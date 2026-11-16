@@ -23,6 +23,11 @@ class NoteRefinerConfig:
     high_conf_short_threshold: float = 0.72
     min_confidence: float = 0.28
     reattack_gap_sec: float = 0.060
+    min_distinct_reattack_onset_sec: float = 0.110
+    reattack_tail_min_conf_ratio: float = 0.55
+    reattack_tail_max_duration_sec: float = 0.120
+    reattack_trim_margin_sec: float = 0.005
+    min_trimmed_duration_sec: float = 0.030
     reattack_genuine_conf_boost: float = 1.15
     reattack_genuine_vel_boost: int = 12
     enable_octave_ghost_suppression: bool = True
@@ -133,6 +138,8 @@ def refine_detected_notes(
 
     stage_b: list[DetectedNote] = []
     reattack_merges = 0
+    reattack_retained = 0
+    reattack_trimmed = 0
     for pitch_midi in sorted(by_pitch.keys()):
         p_notes = sorted(by_pitch[pitch_midi], key=lambda x: x.onset_sec)
         merged: list[DetectedNote] = []
@@ -142,37 +149,73 @@ def refine_detected_notes(
                 continue
             prev = merged[-1]
             gap = curr.onset_sec - prev.offset_sec
-            if gap <= cfg.reattack_gap_sec:
-                prev_conf = _note_conf(prev)
-                curr_conf = _note_conf(curr)
-                is_genuine_reattack = (
-                    gap > 0.035
-                    and (
-                        curr_conf >= prev_conf * cfg.reattack_genuine_conf_boost
-                        or curr.velocity >= prev.velocity + cfg.reattack_genuine_vel_boost
-                    )
-                )
-                if is_genuine_reattack:
-                    prev.offset_sec = min(prev.offset_sec, max(prev.onset_sec + 0.03, curr.onset_sec - 0.005))
-                    merged.append(curr)
-                else:
-                    prev.offset_sec = max(prev.offset_sec, curr.offset_sec)
-                    prev.velocity = max(prev.velocity, curr.velocity)
-                    if prev.confidence is not None and curr.confidence is not None:
-                        prev.confidence = max(prev.confidence, curr.confidence)
-                    reattack_merges += 1
-                    decisions.append(
-                        {
-                            "stage": "reattack_debounce",
-                            "action": "merge",
-                            "pitch_midi": pitch_midi,
-                            "prev_onset_sec": round(prev.onset_sec, 4),
-                            "merged_onset_sec": round(curr.onset_sec, 4),
-                            "gap_sec": round(gap, 4),
-                        }
-                    )
-            else:
+            if gap > cfg.reattack_gap_sec:
                 merged.append(curr)
+                continue
+
+            onset_diff = curr.onset_sec - prev.onset_sec
+            curr_dur = max(0.0, curr.offset_sec - curr.onset_sec)
+            prev_conf = _note_conf(prev)
+            curr_conf = _note_conf(curr)
+
+            is_weak_decay_tail = (
+                curr_conf < prev_conf * cfg.reattack_tail_min_conf_ratio
+                and curr_dur <= cfg.reattack_tail_max_duration_sec
+            )
+            has_distinct_onset_separation = (
+                onset_diff >= cfg.min_distinct_reattack_onset_sec
+                and curr_dur >= cfg.min_duration_sec
+                and not is_weak_decay_tail
+            )
+            has_strong_rapid_reattack = (
+                gap > 0.035
+                and (
+                    curr_conf >= prev_conf * cfg.reattack_genuine_conf_boost
+                    or curr.velocity >= prev.velocity + cfg.reattack_genuine_vel_boost
+                )
+            )
+
+            if has_distinct_onset_separation or has_strong_rapid_reattack:
+                trimmed = False
+                if prev.offset_sec > curr.onset_sec:
+                    new_offset = max(
+                        prev.onset_sec + cfg.min_trimmed_duration_sec,
+                        curr.onset_sec - cfg.reattack_trim_margin_sec,
+                    )
+                    if new_offset < prev.offset_sec:
+                        prev.offset_sec = new_offset
+                        trimmed = True
+                        reattack_trimmed += 1
+                merged.append(curr)
+                reattack_retained += 1
+                decisions.append(
+                    {
+                        "stage": "reattack_debounce",
+                        "action": "retain_and_trim_prev" if trimmed else "retain",
+                        "pitch_midi": pitch_midi,
+                        "prev_onset_sec": round(prev.onset_sec, 4),
+                        "curr_onset_sec": round(curr.onset_sec, 4),
+                        "onset_diff_sec": round(onset_diff, 4),
+                        "gap_sec": round(gap, 4),
+                    }
+                )
+            else:
+                prev.offset_sec = max(prev.offset_sec, curr.offset_sec)
+                prev.velocity = max(prev.velocity, curr.velocity)
+                if prev.confidence is not None and curr.confidence is not None:
+                    prev.confidence = max(prev.confidence, curr.confidence)
+                reattack_merges += 1
+                decisions.append(
+                    {
+                        "stage": "reattack_debounce",
+                        "action": "merge",
+                        "pitch_midi": pitch_midi,
+                        "prev_onset_sec": round(prev.onset_sec, 4),
+                        "merged_onset_sec": round(curr.onset_sec, 4),
+                        "onset_diff_sec": round(onset_diff, 4),
+                        "gap_sec": round(gap, 4),
+                    }
+                )
         stage_b.extend(merged)
 
     stage_b.sort(key=lambda x: (x.onset_sec, x.pitch_midi))
@@ -274,6 +317,8 @@ def refine_detected_notes(
         "raw_count": len(raw_notes),
         "filtered_short_or_low_conf": filtered_short_or_low_conf,
         "reattack_merges": reattack_merges,
+        "reattack_retained": reattack_retained,
+        "reattack_trimmed": reattack_trimmed,
         "octave_ghosts_suppressed": octave_ghosts_suppressed,
         "refined_count": len(refined),
     }

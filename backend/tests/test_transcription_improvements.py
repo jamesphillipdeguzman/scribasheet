@@ -94,9 +94,9 @@ def test_note_refiner_preserves_raw_and_cleans_artifacts() -> None:
         # Fundamental F3 + octave harmonic ghost F4 (weaker, no melodic neighbors)
         DetectedNote(pitch_midi=53, onset_sec=0.50, offset_sec=1.30, velocity=85, confidence=0.82),
         DetectedNote(pitch_midi=65, onset_sec=0.51, offset_sec=1.10, velocity=55, confidence=0.42),
-        # Rapid same-pitch re-attack sustain tail (gap 20ms) -> should merge
+        # Rapid same-pitch re-attack sustain tail (gap 20ms, short weak tail) -> should merge
         DetectedNote(pitch_midi=60, onset_sec=1.50, offset_sec=1.90, velocity=78, confidence=0.75),
-        DetectedNote(pitch_midi=60, onset_sec=1.92, offset_sec=2.30, velocity=62, confidence=0.55),
+        DetectedNote(pitch_midi=60, onset_sec=1.92, offset_sec=2.01, velocity=48, confidence=0.35),
         # Ultra-short low-confidence blip -> should drop
         DetectedNote(pitch_midi=72, onset_sec=2.50, offset_sec=2.53, velocity=50, confidence=0.30),
         # High-confidence short staccato note -> should keep
@@ -109,9 +109,9 @@ def test_note_refiner_preserves_raw_and_cleans_artifacts() -> None:
     assert res.stats["filtered_short_or_low_conf"] == 1
     pitches = [n.pitch_midi for n in res.notes]
     assert pitches == [53, 60, 69]
-    # Merged C4 should extend to 2.30s
+    # Merged C4 should extend to 2.01s
     c4 = next(n for n in res.notes if n.pitch_midi == 60)
-    assert abs(c4.offset_sec - 2.30) < 1e-4
+    assert abs(c4.offset_sec - 2.01) < 1e-4
 
 
 def test_tempo_estimation_resolves_calm_75bpm_vs_fast_150bpm(tmp_path: Path) -> None:
@@ -200,3 +200,151 @@ def test_quantize_seconds_supports_triplet_and_strength() -> None:
     # 60 BPM -> 1 beat = 1.0s
     assert quantize_seconds(0.31, 60.0, "eighth_triplet", strength=1.0) == round(1.0 / 3.0, 4)
     assert quantize_seconds(0.31, 60.0, "quarter", strength=0.0) == 0.31
+
+
+def test_reattack_preserves_pedaled_repeated_notes_and_merges_jitter() -> None:
+    raw = [
+        # Legato/pedaled repeated Bb2 eighth/quarter notes (gap=0.0, onset_diff=0.40s) -> must stay separate
+        DetectedNote(pitch_midi=46, onset_sec=0.50, offset_sec=0.92, velocity=82, confidence=0.75),
+        DetectedNote(pitch_midi=46, onset_sec=0.90, offset_sec=1.30, velocity=78, confidence=0.68),
+        DetectedNote(pitch_midi=46, onset_sec=1.30, offset_sec=1.75, velocity=80, confidence=0.70),
+        # Rapid onset jitter (<110ms) -> should merge
+        DetectedNote(pitch_midi=60, onset_sec=2.00, offset_sec=2.08, velocity=74, confidence=0.65),
+        DetectedNote(pitch_midi=60, onset_sec=2.08, offset_sec=2.60, velocity=70, confidence=0.60),
+    ]
+    res = refine_detected_notes(raw, NoteRefinerConfig())
+    assert len(res.raw_notes) == 5
+    bb2_notes = [n for n in res.notes if n.pitch_midi == 46]
+    c4_notes = [n for n in res.notes if n.pitch_midi == 60]
+    assert len(bb2_notes) == 3
+    assert len(c4_notes) == 1
+    # Overlapping first Bb2 trimmed cleanly before second onset without becoming invalid
+    assert bb2_notes[0].offset_sec > bb2_notes[0].onset_sec
+    assert bb2_notes[0].offset_sec <= bb2_notes[1].onset_sec
+    assert res.stats["reattack_retained"] == 2
+    assert res.stats["reattack_merges"] == 1
+
+
+def test_midi_and_musicxml_preserve_identical_note_counts_under_polyphony() -> None:
+    # 5 overlapping notes in RH (including duplicate pitch+quantized interval)
+    detected = [
+        DetectedNote(pitch_midi=65, onset_sec=0.0, offset_sec=1.6, velocity=80, confidence=0.9),
+        DetectedNote(pitch_midi=69, onset_sec=0.0, offset_sec=0.8, velocity=85, confidence=0.9),
+        DetectedNote(pitch_midi=69, onset_sec=0.01, offset_sec=0.81, velocity=82, confidence=0.85),
+        DetectedNote(pitch_midi=72, onset_sec=0.0, offset_sec=1.2, velocity=84, confidence=0.88),
+        DetectedNote(pitch_midi=77, onset_sec=0.0, offset_sec=0.4, velocity=90, confidence=0.92),
+        DetectedNote(pitch_midi=53, onset_sec=0.0, offset_sec=1.6, velocity=80, confidence=0.9),
+    ]
+    score = build_score_data(
+        title="Parity Test",
+        detected_notes=detected,
+        tempo_bpm=75.0,
+        tempo_estimated=True,
+        time_signature="4/4",
+        time_signature_estimated=True,
+        key_signature="F",
+        key_signature_estimated=True,
+        duration_seconds=2.0,
+        instrument="piano",
+        quantization="sixteenth",
+    )
+    midi_bytes = score_data_to_midi_bytes(score)
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
+    midi_pitches = sorted(n.pitch for inst in pm.instruments for n in inst.notes)
+
+    xml_str = score_data_to_musicxml(score)
+    parsed = music21.converter.parseData(xml_str, format="musicxml")
+    xml_pitches: list[int] = []
+    for part in parsed.parts:
+        for el in part.recurse().notes:
+            if el.tie and el.tie.type in ("continue", "stop"):
+                continue
+            if isinstance(el, music21.note.Note):
+                xml_pitches.append(el.pitch.midi)
+            elif isinstance(el, music21.chord.Chord):
+                xml_pitches.extend(p.midi for p in el.pitches)
+    xml_pitches.sort()
+
+    assert midi_pitches == xml_pitches
+    overflows, underflows = _check_musicxml_per_voice_ticks(xml_str)
+    assert overflows == 0
+    assert underflows == 0
+
+
+def test_evaluator_tempo_parity_and_provenance(tmp_path: Path, monkeypatch) -> None:
+    import importlib.util
+
+    eval_path = Path(__file__).resolve().parents[2] / "scripts" / "evaluate_transcription.py"
+    spec = importlib.util.spec_from_file_location("evaluate_transcription", eval_path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    sr = 22050
+    t = np.arange(int(1.5 * sr), dtype=np.float32) / sr
+    sig = 0.4 * np.sin(2.0 * np.pi * 440.0 * t)
+    wav_path = tmp_path / "sample.wav"
+    _write_wav(wav_path, sig, sr=sr)
+    out_json = tmp_path / "report.json"
+
+    captured_kwargs: dict = {}
+
+    def fake_estimate_tempo(path, tempo_mode="auto", manual_tempo_bpm=None, notes=None):
+        captured_kwargs["tempo_mode"] = tempo_mode
+        captured_kwargs["manual_tempo_bpm"] = manual_tempo_bpm
+        captured_kwargs["notes"] = notes
+        return 90.0, True
+
+    monkeypatch.setattr(mod, "estimate_tempo", fake_estimate_tempo)
+    monkeypatch.setattr(
+        mod.BasicPitchProvider,
+        "transcribe",
+        lambda self, *a, **kw: type(
+            "Tx",
+            (),
+            {
+                "engine": "basic_pitch",
+                "notes": [DetectedNote(pitch_midi=69, onset_sec=0.1, offset_sec=0.6, velocity=80, confidence=0.8)],
+                "metadata": {"provider": "CPUExecutionProvider"},
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate_transcription.py",
+            "--audio",
+            str(wav_path),
+            "--expected-bpm",
+            "123",
+            "--expected-key",
+            "A",
+            "--output",
+            str(out_json),
+        ],
+    )
+    rc = mod.main()
+    assert rc == 0
+    assert captured_kwargs["notes"] is not None and len(captured_kwargs["notes"]) == 1
+    assert captured_kwargs["manual_tempo_bpm"] is None
+
+    import json as _json
+
+    report = _json.loads(out_json.read_text(encoding="utf-8"))
+    prov = report["provenance"]
+    for key in (
+        "wav_sha256",
+        "git_commit_sha",
+        "expected_bpm",
+        "expected_key",
+        "expected_time_signature",
+        "transcription_engine",
+        "inference_provider",
+        "refiner_config",
+        "tempo_analysis_config",
+        "source_duration_sec",
+        "evaluation_timestamp",
+    ):
+        assert key in prov
+    assert prov["tempo_analysis_config"]["uses_refined_notes"] is True
+    assert report["tempo"]["estimated_bpm"] == 90.0

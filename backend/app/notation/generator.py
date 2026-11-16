@@ -142,21 +142,23 @@ def _pack_notes_into_voices(
             end_ql = start_ql + 0.25
         raw_events.append((start_ql, end_ql, n.pitch_midi, n.velocity))
 
+    # Sort by quantized (start_ql, end_ql, pitch) so chord grouping is deterministic
+    raw_events.sort(key=lambda x: (x[0], x[1], x[2]))
+
     chord_groups: list[tuple[float, float, list[int], int]] = []
     for start_ql, end_ql, pitch, vel in raw_events:
         if (
             chord_groups
             and abs(chord_groups[-1][0] - start_ql) < 1e-6
             and abs(chord_groups[-1][1] - end_ql) < 1e-6
+            and pitch not in chord_groups[-1][2]
         ):
-            if pitch not in chord_groups[-1][2]:
-                chord_groups[-1][2].append(pitch)
+            chord_groups[-1][2].append(pitch)
         else:
             chord_groups.append((start_ql, end_ql, [pitch], vel))
 
     voices: list[list[tuple[float, float, list[int], int]]] = []
     voice_ends: list[float] = []
-    max_voices = 4
 
     for ev in chord_groups:
         start_ql, end_ql, pitches, vel = ev
@@ -168,17 +170,9 @@ def _pack_notes_into_voices(
                 placed = True
                 break
         if not placed:
-            if len(voices) < max_voices:
-                voices.append([(start_ql, end_ql, sorted(pitches), vel)])
-                voice_ends.append(end_ql)
-            else:
-                # Trim the voice that finishes earliest to avoid overflow
-                best_v = min(range(len(voice_ends)), key=lambda idx: voice_ends[idx])
-                prev_s, prev_e, prev_p, prev_vel = voices[best_v][-1]
-                if start_ql > prev_s:
-                    voices[best_v][-1] = (prev_s, start_ql, prev_p, prev_vel)
-                    voices[best_v].append((start_ql, end_ql, sorted(pitches), vel))
-                    voice_ends[best_v] = end_ql
+            # Allocate a new non-overlapping voice so no musical event is ever dropped
+            voices.append([(start_ql, end_ql, sorted(pitches), vel)])
+            voice_ends.append(end_ql)
 
     return voices or [[]]
 
