@@ -168,7 +168,10 @@ def download_export(
     project = db.query(Project).filter(Project.id == export.project_id).first()
     base_name = sanitize_filename(project.title if project else "scribasheet_score")
     mime_type, ext = EXPORT_MIME_TYPES.get(export.format, ("application/octet-stream", "bin"))
-    data = storage_service.read_bytes(export.storage_path)
+    try:
+        data = storage_service.read_bytes(export.storage_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exported file not found in storage.")
 
     return Response(
         content=data,

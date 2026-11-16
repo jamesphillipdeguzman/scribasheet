@@ -726,3 +726,226 @@ def test_r2_confirm_rejects_zero_negative_and_oversized_uploads(client, db_sessi
     finally:
         os.environ["STORAGE_BACKEND"] = "local"
         get_settings.cache_clear()
+
+
+def test_r2_config_validation_and_s3v4_client_setup():
+    os.environ["STORAGE_BACKEND"] = "s3"
+    os.environ["S3_ENDPOINT_URL"] = ""
+    os.environ["S3_ACCESS_KEY_ID"] = ""
+    os.environ["S3_SECRET_ACCESS_KEY"] = ""
+    get_settings.cache_clear()
+    try:
+        import pytest
+
+        with pytest.raises(ValueError, match="Missing required S3/R2 configuration"):
+            storage_service._s3_client()
+
+        os.environ["S3_ENDPOINT_URL"] = "https://acct123.r2.cloudflarestorage.com"
+        os.environ["S3_BUCKET_NAME"] = "scribasheet-private"
+        os.environ["S3_ACCESS_KEY_ID"] = "ak"
+        os.environ["S3_SECRET_ACCESS_KEY"] = "sk"
+        os.environ["S3_REGION"] = "auto"
+        get_settings.cache_clear()
+
+        with patch("boto3.client") as mock_boto_client:
+            storage_service._s3_client()
+            mock_boto_client.assert_called_once()
+            _, kwargs = mock_boto_client.call_args
+            assert kwargs["endpoint_url"] == "https://acct123.r2.cloudflarestorage.com"
+            assert kwargs["region_name"] == "auto"
+            assert kwargs["config"].signature_version == "s3v4"
+    finally:
+        os.environ["STORAGE_BACKEND"] = "local"
+        get_settings.cache_clear()
+
+
+def test_r2_presign_validation_cross_user_isolation_and_expired_signed_url(client, db_session):
+    os.environ["STORAGE_BACKEND"] = "s3"
+    os.environ["S3_ENDPOINT_URL"] = "https://acct123.r2.cloudflarestorage.com"
+    os.environ["S3_BUCKET_NAME"] = "scribasheet-private"
+    os.environ["S3_ACCESS_KEY_ID"] = "ak"
+    os.environ["S3_SECRET_ACCESS_KEY"] = "sk"
+    get_settings.cache_clear()
+    try:
+        reg1 = client.post(
+            "/api/v1/auth/register",
+            json={"email": "iso1@example.com", "password": "StrongPassword123!", "display_name": "User 1"},
+        )
+        h1 = {"Authorization": f"Bearer {reg1.json()['access_token']}"}
+        u1_id = reg1.json()["user"]["id"]
+
+        reg2 = client.post(
+            "/api/v1/auth/register",
+            json={"email": "iso2@example.com", "password": "StrongPassword123!", "display_name": "User 2"},
+        )
+        h2 = {"Authorization": f"Bearer {reg2.json()['access_token']}"}
+
+        p1 = client.post("/api/v1/projects", headers=h1, json={"title": "User 1 Project"}).json()
+        p2 = client.post("/api/v1/projects", headers=h2, json={"title": "User 2 Project"}).json()
+
+        # Invalid content type / extension rejected on presign
+        bad_mime = client.post(
+            "/api/v1/uploads/presign",
+            headers=h1,
+            json={"project_id": p1["id"], "filename": "script.exe", "content_type": "application/x-msdownload", "size_bytes": 500},
+        )
+        assert bad_mime.status_code == 400
+
+        # Oversized upload rejected on presign
+        too_big = client.post(
+            "/api/v1/uploads/presign",
+            headers=h1,
+            json={
+                "project_id": p1["id"],
+                "filename": "huge.wav",
+                "content_type": "audio/wav",
+                "size_bytes": get_settings().max_upload_bytes + 1,
+            },
+        )
+        assert too_big.status_code == 413
+
+        # Cross-user object key isolation on /uploads/confirm
+        cross_key = f"users/{u1_id}/projects/{p1['id']}/originals/stolen.wav"
+        res_cross = client.post(
+            "/api/v1/uploads/confirm",
+            headers=h2,
+            json={
+                "project_id": p2["id"],
+                "storage_key": cross_key,
+                "filename": "stolen.wav",
+                "content_type": "audio/wav",
+                "size_bytes": 1024,
+            },
+        )
+        assert res_cross.status_code == 403
+
+        # Confirm valid asset with mocked R2, then verify signed URL, unauthorized access, and expired stream sig
+        valid_key = f"users/{u1_id}/projects/{p1['id']}/originals/valid.wav"
+        mock_s3 = MagicMock()
+        mock_s3.generate_presigned_url.side_effect = lambda op, Params, ExpiresIn: (
+            f"https://r2.mock/{op}/{Params['Key']}?exp={ExpiresIn}"
+        )
+        with (
+            patch.object(storage_service, "exists", return_value=True),
+            patch.object(storage_service, "get_object_size", return_value=1024),
+            patch.object(storage_service, "_s3_client", return_value=mock_s3),
+        ):
+            asset = client.post(
+                "/api/v1/uploads/confirm",
+                headers=h1,
+                json={
+                    "project_id": p1["id"],
+                    "storage_key": valid_key,
+                    "filename": "valid.wav",
+                    "content_type": "audio/wav",
+                    "size_bytes": 1024,
+                },
+            ).json()
+
+            # Owner gets signed R2 GET URL; intruder gets 403
+            signed = client.get(f"/api/v1/uploads/{asset['id']}/signed-url", headers=h1)
+            assert signed.status_code == 200
+            assert "get_object" in signed.json()["url"]
+            assert client.get(f"/api/v1/uploads/{asset['id']}/signed-url", headers=h2).status_code == 403
+
+            # Expired or invalid local stream signature rejected with 403
+            assert client.get(f"/api/v1/uploads/{asset['id']}/stream?sig=bad&exp=1").status_code == 403
+            assert client.get(f"/api/v1/uploads/{asset['id']}/stream").status_code == 401
+    finally:
+        os.environ["STORAGE_BACKEND"] = "local"
+        get_settings.cache_clear()
+
+
+def test_r2_worker_download_and_export_storage_compatibility(client, db_session):
+    os.environ["STORAGE_BACKEND"] = "s3"
+    os.environ["JOB_EXECUTION_MODE"] = "remote_worker"
+    os.environ["WORKER_API_TOKEN"] = "r2-worker-token"
+    os.environ["S3_ENDPOINT_URL"] = "https://acct123.r2.cloudflarestorage.com"
+    os.environ["S3_BUCKET_NAME"] = "scribasheet-private"
+    os.environ["S3_ACCESS_KEY_ID"] = "ak"
+    os.environ["S3_SECRET_ACCESS_KEY"] = "sk"
+    get_settings.cache_clear()
+    try:
+        reg = client.post(
+            "/api/v1/auth/register",
+            json={"email": "r2exp@example.com", "password": "StrongPassword123!", "display_name": "R2 Export"},
+        )
+        headers = {"Authorization": f"Bearer {reg.json()['access_token']}"}
+        user_id = reg.json()["user"]["id"]
+        proj = client.post("/api/v1/projects", headers=headers, json={"title": "R2 Export Song"}).json()
+
+        r2_store: dict[str, bytes] = {}
+        mock_s3 = MagicMock()
+        mock_s3.generate_presigned_url.side_effect = lambda op, Params, ExpiresIn: (
+            f"https://r2.mock/{op}/{Params['Key']}?exp={ExpiresIn}"
+        )
+        mock_s3.put_object.side_effect = lambda Bucket, Key, Body, ContentType: r2_store.__setitem__(Key, Body)
+        mock_s3.get_object.side_effect = lambda Bucket, Key: {"Body": MagicMock(read=lambda: r2_store[Key])}
+        mock_s3.head_object.side_effect = lambda Bucket, Key: {"ContentLength": len(r2_store[Key])}
+
+        orig_key = f"users/{user_id}/projects/{proj['id']}/originals/song.wav"
+        r2_store[orig_key] = b"RIFF0000WAVEfmt "
+
+        with patch.object(storage_service, "_s3_client", return_value=mock_s3):
+            asset = client.post(
+                "/api/v1/uploads/confirm",
+                headers=headers,
+                json={
+                    "project_id": proj["id"],
+                    "storage_key": orig_key,
+                    "filename": "song.wav",
+                    "content_type": "audio/wav",
+                    "size_bytes": len(r2_store[orig_key]),
+                },
+            ).json()
+
+            job = client.post(
+                f"/api/v1/projects/{proj['id']}/transcriptions",
+                headers=headers,
+                json={"source_asset_id": asset["id"]},
+            ).json()
+
+            claim = client.post(
+                "/api/v1/worker/jobs/claim",
+                json={"worker_id": "r2-win-worker"},
+                headers={"X-Worker-Token": "r2-worker-token"},
+            ).json()["job"]
+            assert "get_object" in claim["source_download_url"]
+            assert "put_object" in claim["artifact_upload_urls"]["midi"]["url"]
+            assert "put_object" in claim["artifact_upload_urls"]["musicxml"]["url"]
+
+            # Complete job with valid score_json, then generate & download MIDI export via mocked R2
+            client.post(
+                f"/api/v1/worker/jobs/{job['id']}/complete",
+                json={
+                    "worker_id": "r2-win-worker",
+                    "midi_key": claim["artifact_upload_urls"]["midi"]["key"],
+                    "musicxml_key": claim["artifact_upload_urls"]["musicxml"]["key"],
+                    "duration_seconds": 4.0,
+                    "score_json": {
+                        "title": "R2 Export Song",
+                        "tempo_bpm": 120.0,
+                        "time_signature": "4/4",
+                        "key_signature": "C",
+                        "duration_seconds": 4.0,
+                        "tracks": [{"index": 0, "name": "Piano", "instrument": "piano", "clef": "treble", "program": 0, "muted": False}],
+                        "notes": [{"id": "n1", "pitch_midi": 60, "onset_sec": 0.0, "offset_sec": 0.5, "velocity": 85, "track_index": 0}],
+                        "chords": [],
+                    },
+                },
+                headers={"X-Worker-Token": "r2-worker-token"},
+            )
+
+            exp = client.post(
+                f"/api/v1/projects/{proj['id']}/exports",
+                headers=headers,
+                json={"format": "midi"},
+            )
+            assert exp.status_code == 201
+            dl = client.get(exp.json()["download_url"], headers=headers)
+            assert dl.status_code == 200
+            assert dl.content.startswith(b"MThd")
+    finally:
+        os.environ["STORAGE_BACKEND"] = "local"
+        os.environ["JOB_EXECUTION_MODE"] = "local"
+        get_settings.cache_clear()

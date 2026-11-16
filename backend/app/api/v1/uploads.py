@@ -55,10 +55,15 @@ def presign_upload(
     if project.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this project.")
 
-    if payload.size_bytes <= 0 or payload.size_bytes > settings.max_upload_bytes:
+    if payload.size_bytes <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File size must be greater than 0 bytes.",
+        )
+    if payload.size_bytes > settings.max_upload_bytes:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File size must be between 1 byte and {settings.MAX_UPLOAD_SIZE_MB} MB.",
+            detail=f"File size must not exceed {settings.MAX_UPLOAD_SIZE_MB} MB.",
         )
 
     safe_name = sanitize_filename(payload.filename)
@@ -290,7 +295,10 @@ def stream_upload(
     else:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Signed media URL required.")
 
-    local_path = storage_service.get_local_file_path(asset.storage_path)
+    try:
+        local_path = storage_service.get_local_file_path(asset.storage_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored media file not found.")
     return FileResponse(path=str(local_path), media_type=asset.mime_type, filename=asset.original_filename)
 
 

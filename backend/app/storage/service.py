@@ -165,9 +165,22 @@ class StorageService:
         from botocore.config import Config
 
         settings = get_settings()
+        missing = [
+            name
+            for name, val in (
+                ("S3_ENDPOINT_URL", settings.S3_ENDPOINT_URL),
+                ("S3_BUCKET_NAME", settings.S3_BUCKET_NAME),
+                ("S3_ACCESS_KEY_ID", settings.S3_ACCESS_KEY_ID),
+                ("S3_SECRET_ACCESS_KEY", settings.S3_SECRET_ACCESS_KEY),
+            )
+            if not val
+        ]
+        if missing:
+            raise ValueError(f"Missing required S3/R2 configuration: {', '.join(missing)}")
+
         return boto3.client(
             "s3",
-            endpoint_url=settings.S3_ENDPOINT_URL or None,
+            endpoint_url=settings.S3_ENDPOINT_URL,
             aws_access_key_id=settings.S3_ACCESS_KEY_ID,
             aws_secret_access_key=settings.S3_SECRET_ACCESS_KEY,
             region_name=settings.S3_REGION or "auto",
