@@ -1,9 +1,10 @@
 """
-ScribaSheet Local Windows Worker Agent (Phase A.1).
+ScribaSheet Local Windows Worker Agent (Phase A.2).
 
 Runs outbound HTTPS polling against the Railway-hosted FastAPI coordinator,
 claims at most one job at a time, sends periodic heartbeats with lease-loss
-detection, and executes a pluggable JobHandler.
+detection, handles transient network interruptions without false failures,
+and supports cooperative shutdown on Ctrl+C / SIGTERM.
 
 Usage (from backend/):
     python -m app.worker_agent
@@ -33,6 +34,10 @@ logger = logging.getLogger("scribasheet.worker_agent")
 
 class LeaseLostError(Exception):
     """Raised when the worker loses its lease or job ownership during execution."""
+
+
+class WorkerInterruptedError(Exception):
+    """Raised when the worker receives a shutdown signal during job execution."""
 
 
 @dataclass
@@ -80,7 +85,7 @@ class PhaseATestHandler:
         step = 0.2
         while remaining > 0:
             if cancel_event and cancel_event.wait(min(step, remaining)):
-                raise LeaseLostError(f"Job {job_id} cancelled cooperatively due to lease/ownership loss.")
+                raise LeaseLostError(f"Job {job_id} cancelled cooperatively.")
             if not cancel_event:
                 time.sleep(min(step, remaining))
             remaining -= step
@@ -113,6 +118,7 @@ class RemoteWorkerAgent:
         self.heartbeat_interval_sec = max(0.2, heartbeat_interval_sec)
         self.handler = handler or PhaseATestHandler()
         self._stop_event = threading.Event()
+        self._active_cancel_event: threading.Event | None = None
         self._client = http_client or httpx.Client(timeout=30.0)
         self._owns_client = http_client is None
 
@@ -121,12 +127,15 @@ class RemoteWorkerAgent:
 
     def request_stop(self) -> None:
         self._stop_event.set()
+        if self._active_cancel_event is not None:
+            self._active_cancel_event.set()
 
     def _heartbeat_loop(
         self,
         job_id: str,
         job_done: threading.Event,
         lease_lost: threading.Event,
+        cancel_event: threading.Event,
     ) -> None:
         while not job_done.wait(self.heartbeat_interval_sec) and not self._stop_event.is_set():
             try:
@@ -143,8 +152,16 @@ class RemoteWorkerAgent:
                         resp.status_code,
                     )
                     lease_lost.set()
+                    cancel_event.set()
                     return
                 resp.raise_for_status()
+                data = resp.json()
+                logger.info(
+                    "Heartbeat renewed for job %s (worker_id=%s, lease_expires=%s)",
+                    job_id,
+                    self.worker_id,
+                    data.get("lease_expires_at"),
+                )
             except httpx.HTTPStatusError as exc:
                 logger.warning(
                     "Heartbeat HTTP error for job %s (status=%s)",
@@ -180,16 +197,23 @@ class RemoteWorkerAgent:
 
         job_done = threading.Event()
         lease_lost = threading.Event()
+        cancel_event = threading.Event()
+        if self._stop_event.is_set():
+            cancel_event.set()
+        self._active_cancel_event = cancel_event
+
         hb_thread = threading.Thread(
             target=self._heartbeat_loop,
-            args=(job_id, job_done, lease_lost),
+            args=(job_id, job_done, lease_lost, cancel_event),
             daemon=True,
         )
         hb_thread.start()
 
         def report_progress(status_str: str, progress: int, stage: str, log_line: str | None = None) -> None:
-            if lease_lost.is_set() or self._stop_event.is_set():
-                raise LeaseLostError(f"Aborting progress report for job {job_id}: lease lost or stopping.")
+            if self._stop_event.is_set():
+                raise WorkerInterruptedError(f"Worker stopping; aborting progress for job {job_id}.")
+            if lease_lost.is_set():
+                raise LeaseLostError(f"Aborting progress report for job {job_id}: lease lost.")
             p_resp = self._client.post(
                 f"{self.api_base_url}/worker/jobs/{job_id}/progress",
                 json={
@@ -203,11 +227,14 @@ class RemoteWorkerAgent:
             )
             if p_resp.status_code in (403, 409):
                 lease_lost.set()
+                cancel_event.set()
                 raise LeaseLostError(f"Progress rejected (HTTP {p_resp.status_code}) for job {job_id}.")
             p_resp.raise_for_status()
 
         try:
-            result = self.handler.handle(job, report_progress, lease_lost)
+            result = self.handler.handle(job, report_progress, cancel_event)
+            if self._stop_event.is_set():
+                raise WorkerInterruptedError(f"Worker interrupted before completing job {job_id}.")
             if lease_lost.is_set():
                 raise LeaseLostError(f"Lease lost before completion of job {job_id}.")
 
@@ -225,14 +252,22 @@ class RemoteWorkerAgent:
             )
             if c_resp.status_code in (403, 409):
                 lease_lost.set()
+                cancel_event.set()
                 raise LeaseLostError(f"Completion rejected (HTTP {c_resp.status_code}) for job {job_id}.")
             c_resp.raise_for_status()
             logger.info("Completed job %s (project=%s, worker_id=%s)", job_id, project_id, self.worker_id)
-        except LeaseLostError as exc:
-            logger.warning("Stopped job %s without completing: %s", job_id, exc)
+        except (LeaseLostError, WorkerInterruptedError) as exc:
+            logger.warning("Stopped job %s without completing or failing: %s", job_id, exc)
+        except httpx.RequestError as exc:
+            logger.warning(
+                "Transient network error during job %s (%s); leaving job for lease recovery.",
+                job_id,
+                type(exc).__name__,
+            )
+            raise
         except Exception as exc:
             logger.error("Job %s failed (worker_id=%s): %s", job_id, self.worker_id, exc)
-            if not lease_lost.is_set():
+            if not lease_lost.is_set() and not self._stop_event.is_set():
                 try:
                     self._client.post(
                         f"{self.api_base_url}/worker/jobs/{job_id}/fail",
@@ -247,6 +282,7 @@ class RemoteWorkerAgent:
                     logger.error("Failed to report failure for job %s: %s", job_id, type(fail_exc).__name__)
         finally:
             job_done.set()
+            self._active_cancel_event = None
             hb_thread.join(timeout=2.0)
 
         return True
@@ -314,7 +350,7 @@ def main() -> int:
     )
 
     def _handle_signal(signum, frame):
-        logger.info("Received shutdown signal (%s), stopping after current operation...", signum)
+        logger.info("Received shutdown signal (%s), stopping cooperatively...", signum)
         agent.request_stop()
 
     signal.signal(signal.SIGINT, _handle_signal)

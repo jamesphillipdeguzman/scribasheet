@@ -99,6 +99,19 @@ class StorageService:
                 return False
         return self._local_path(key).exists()
 
+    def get_object_size(self, key: str) -> int | None:
+        """Return object byte size from S3/R2 head_object or local file stat, if available."""
+        if self.backend == "s3":
+            client = self._s3_client()
+            try:
+                head = client.head_object(Bucket=get_settings().S3_BUCKET_NAME, Key=key)
+                length = head.get("ContentLength")
+                return int(length) if length is not None else None
+            except Exception:
+                return None
+        path = self._local_path(key)
+        return path.stat().st_size if path.exists() else None
+
     def delete(self, key: str) -> None:
         if self.backend == "s3":
             client = self._s3_client()

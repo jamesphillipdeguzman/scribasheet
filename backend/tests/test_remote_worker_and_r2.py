@@ -543,3 +543,186 @@ def test_r2_confirm_missing_object_and_unauthorized_asset_access(client, db_sess
     finally:
         os.environ["STORAGE_BACKEND"] = "local"
         get_settings.cache_clear()
+
+
+def test_active_non_expired_lease_cannot_be_recovered_prematurely(client, db_session):
+    _, _, job_id, w_headers = _setup_project_and_job(client, db_session)
+
+    c1 = client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-1"}, headers=w_headers)
+    assert c1.status_code == 200
+    assert c1.json()["job"]["id"] == job_id
+
+    # Ensure lease is explicitly in the future
+    row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    row.lease_expires_at = datetime.now(UTC) + timedelta(seconds=90)
+    db_session.commit()
+
+    # Worker 2 must NOT recover or claim the active job
+    c2 = client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-2"}, headers=w_headers)
+    assert c2.status_code == 200
+    assert c2.json()["job"] is None
+
+    db_session.expire_all()
+    refreshed = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    assert refreshed.locked_by_worker == "worker-1"
+    assert refreshed.attempt_count == 1
+
+
+def test_stale_worker_cannot_fail_reclaimed_job(client, db_session):
+    _, _, job_id, w_headers = _setup_project_and_job(client, db_session)
+
+    client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-1"}, headers=w_headers)
+    row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=10)
+    db_session.commit()
+
+    c2 = client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-2"}, headers=w_headers)
+    assert c2.json()["job"]["id"] == job_id
+
+    # Stale worker 1 must be rejected with 403 when attempting /fail
+    stale_fail = client.post(
+        f"/api/v1/worker/jobs/{job_id}/fail",
+        json={"worker_id": "worker-1", "error_code": "STALE", "error_message": "Stale failure"},
+        headers=w_headers,
+    )
+    assert stale_fail.status_code == 403
+
+    db_session.expire_all()
+    refreshed = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    assert refreshed.status == "validating"
+    assert refreshed.locked_by_worker == "worker-2"
+
+
+def test_interrupted_worker_does_not_complete_or_fail_and_recovers_on_lease_expiry(client, db_session):
+    import threading
+
+    from app.worker_agent import PhaseATestHandler
+
+    _, _, job_id, w_headers = _setup_project_and_job(client, db_session, worker_token="interrupt-token")
+
+    agent_http = httpx.Client(transport=client._transport, base_url="http://testserver")
+    agent = RemoteWorkerAgent(
+        api_base_url="http://testserver/api/v1",
+        worker_token="interrupt-token",
+        worker_id="interrupt-worker",
+        heartbeat_interval_sec=5.0,
+        handler=PhaseATestHandler(test_duration_sec=2.0),
+        http_client=agent_http,
+    )
+
+    # Trigger graceful Ctrl+C / SIGTERM stop shortly after claim
+    def _interrupt():
+        import time
+
+        time.sleep(0.25)
+        agent.request_stop()
+
+    t = threading.Thread(target=_interrupt, daemon=True)
+    t.start()
+    did_claim = agent.run_once()
+    t.join(timeout=2.0)
+    assert did_claim is True
+
+    db_session.expire_all()
+    row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    assert row.status not in ("completed", "failed")
+    assert row.locked_by_worker == "interrupt-worker"
+
+    # Once lease expires, another worker can recover and complete it
+    row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=5)
+    db_session.commit()
+
+    agent2 = RemoteWorkerAgent(
+        api_base_url="http://testserver/api/v1",
+        worker_token="interrupt-token",
+        worker_id="recovery-worker",
+        handler=PhaseATestHandler(test_duration_sec=0.1),
+        http_client=agent_http,
+    )
+    assert agent2.run_once() is True
+
+    db_session.expire_all()
+    recovered = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    assert recovered.status == "completed"
+    assert recovered.locked_by_worker == "recovery-worker"
+    assert recovered.attempt_count == 2
+
+
+def test_r2_confirm_rejects_zero_negative_and_oversized_uploads(client, db_session):
+    os.environ["STORAGE_BACKEND"] = "s3"
+    get_settings.cache_clear()
+    try:
+        reg = client.post(
+            "/api/v1/auth/register",
+            json={"email": "size_r2@example.com", "password": "StrongPassword123!", "display_name": "Size Tester"},
+        )
+        headers = {"Authorization": f"Bearer {reg.json()['access_token']}"}
+        proj = client.post("/api/v1/projects", headers=headers, json={"title": "Size Validation"}).json()
+        owner_id = reg.json()["user"]["id"]
+        valid_key = f"users/{owner_id}/projects/{proj['id']}/originals/test.wav"
+
+        # Zero and negative size_bytes rejected with 400
+        for bad_size in (0, -100):
+            res = client.post(
+                "/api/v1/uploads/confirm",
+                headers=headers,
+                json={
+                    "project_id": proj["id"],
+                    "storage_key": valid_key,
+                    "filename": "test.wav",
+                    "content_type": "audio/wav",
+                    "size_bytes": bad_size,
+                },
+            )
+            assert res.status_code == 400
+
+        # Oversized declared size rejected with 413
+        oversized = get_settings().max_upload_bytes + 1
+        res_big = client.post(
+            "/api/v1/uploads/confirm",
+            headers=headers,
+            json={
+                "project_id": proj["id"],
+                "storage_key": valid_key,
+                "filename": "test.wav",
+                "content_type": "audio/wav",
+                "size_bytes": oversized,
+            },
+        )
+        assert res_big.status_code == 413
+
+        # Mismatched actual object size on R2 rejected with 400
+        with (
+            patch.object(storage_service, "exists", return_value=True),
+            patch.object(storage_service, "get_object_size", return_value=2048),
+        ):
+            res_mismatch = client.post(
+                "/api/v1/uploads/confirm",
+                headers=headers,
+                json={
+                    "project_id": proj["id"],
+                    "storage_key": valid_key,
+                    "filename": "test.wav",
+                    "content_type": "audio/wav",
+                    "size_bytes": 1024,
+                },
+            )
+            assert res_mismatch.status_code == 400
+
+            # Matching actual object size succeeds with 201
+            res_ok = client.post(
+                "/api/v1/uploads/confirm",
+                headers=headers,
+                json={
+                    "project_id": proj["id"],
+                    "storage_key": valid_key,
+                    "filename": "test.wav",
+                    "content_type": "audio/wav",
+                    "size_bytes": 2048,
+                },
+            )
+            assert res_ok.status_code == 201
+            assert res_ok.json()["size_bytes"] == 2048
+    finally:
+        os.environ["STORAGE_BACKEND"] = "local"
+        get_settings.cache_clear()

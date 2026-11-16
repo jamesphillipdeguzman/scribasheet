@@ -83,11 +83,23 @@ def confirm_presigned_upload(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    settings = get_settings()
     project = db.query(Project).filter(Project.id == payload.project_id).first()
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
     if project.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this project.")
+
+    if payload.size_bytes <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File size must be greater than 0 bytes.",
+        )
+    if payload.size_bytes > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+        )
 
     expected_prefix = f"users/{current_user.id}/projects/{project.id}/originals/"
     if not payload.storage_key.startswith(expected_prefix) or ".." in payload.storage_key:
@@ -96,6 +108,21 @@ def confirm_presigned_upload(
     if not storage_service.exists(payload.storage_key):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded object not found in storage.")
 
+    actual_size = storage_service.get_object_size(payload.storage_key)
+    if actual_size is not None:
+        if actual_size <= 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded object is empty.")
+        if actual_size > settings.max_upload_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Uploaded object exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+            )
+        if actual_size != payload.size_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded object size does not match declared size.",
+            )
+
     asset = MediaAsset(
         project_id=project.id,
         user_id=current_user.id,
@@ -103,7 +130,7 @@ def confirm_presigned_upload(
         storage_path=payload.storage_key,
         original_filename=sanitize_filename(payload.filename),
         mime_type=payload.content_type,
-        size_bytes=payload.size_bytes,
+        size_bytes=actual_size if actual_size is not None else payload.size_bytes,
     )
     db.add(asset)
     db.commit()

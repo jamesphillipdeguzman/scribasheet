@@ -16,15 +16,28 @@
 4. Run `alembic upgrade head` in the start command before launching `uvicorn`.
 
 ### 2. Cloudflare R2 Private Bucket
-1. Create a private R2 bucket (e.g., `scribasheet-private`) and an R2 API Token with Object Read & Write permissions.
-2. Configure CORS on the R2 bucket to allow `PUT` and `GET` from your Vercel frontend origin.
-3. Set in Railway backend environment:
+1. Create a **private** R2 bucket (e.g., `scribasheet-private`) with **no public access** enabled.
+2. Create an R2 API Token with **Object Read & Write** permissions scoped to that bucket.
+3. Configure **CORS** on the R2 bucket so the Vercel frontend can perform direct presigned `PUT` uploads and `GET` audio playback:
+   ```json
+   [
+     {
+       "AllowedOrigins": ["https://scribasheet.vercel.app", "http://localhost:5173"],
+       "AllowedMethods": ["PUT", "GET", "HEAD"],
+       "AllowedHeaders": ["*"],
+       "ExposeHeaders": ["ETag"],
+       "MaxAgeSeconds": 3600
+     }
+   ]
+   ```
+4. Set these exact variables in Railway backend environment (keep `STORAGE_BACKEND=local` until R2 is ready):
    - `STORAGE_BACKEND=s3`
    - `S3_ENDPOINT_URL=https://<ACCOUNT_ID>.r2.cloudflarestorage.com`
    - `S3_BUCKET_NAME=scribasheet-private`
    - `S3_ACCESS_KEY_ID=<r2-access-key-id>`
    - `S3_SECRET_ACCESS_KEY=<r2-secret-access-key>`
    - `S3_REGION=auto`
+   - `S3_PRESIGNED_PUT_TTL_SECONDS=900`
 
 ### 3. Local Windows 11 Worker Startup (PowerShell)
 ```powershell
