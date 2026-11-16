@@ -27,6 +27,90 @@ class VideoUrlCheckRequest(BaseModel):
     url: str
 
 
+class PresignUploadRequest(BaseModel):
+    project_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+
+
+class ConfirmUploadRequest(BaseModel):
+    project_id: str
+    storage_key: str
+    filename: str
+    content_type: str
+    size_bytes: int
+
+
+@router.post("/presign")
+def presign_upload(
+    payload: PresignUploadRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    settings = get_settings()
+    project = db.query(Project).filter(Project.id == payload.project_id).first()
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+    if project.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this project.")
+
+    if payload.size_bytes <= 0 or payload.size_bytes > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File size must be between 1 byte and {settings.MAX_UPLOAD_SIZE_MB} MB.",
+        )
+
+    safe_name = sanitize_filename(payload.filename)
+    try:
+        validate_upload_extension_and_mime(safe_name, payload.content_type)
+    except MediaValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+
+    if storage_service.backend != "s3":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Direct presigned uploads require STORAGE_BACKEND=s3 (Cloudflare R2). Use multipart POST /api/v1/uploads for local storage.",
+        )
+
+    key = storage_service.build_key(current_user.id, project.id, "originals", safe_name)
+    return storage_service.create_presigned_put_url(key, content_type=payload.content_type)
+
+
+@router.post("/confirm", response_model=MediaAssetResponse, status_code=status.HTTP_201_CREATED)
+def confirm_presigned_upload(
+    payload: ConfirmUploadRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = db.query(Project).filter(Project.id == payload.project_id).first()
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+    if project.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this project.")
+
+    expected_prefix = f"users/{current_user.id}/projects/{project.id}/originals/"
+    if not payload.storage_key.startswith(expected_prefix) or ".." in payload.storage_key:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid storage key for this project.")
+
+    if not storage_service.exists(payload.storage_key):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded object not found in storage.")
+
+    asset = MediaAsset(
+        project_id=project.id,
+        user_id=current_user.id,
+        asset_type="original",
+        storage_path=payload.storage_key,
+        original_filename=sanitize_filename(payload.filename),
+        mime_type=payload.content_type,
+        size_bytes=payload.size_bytes,
+    )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+    return asset
+
+
 @router.post("", response_model=MediaAssetResponse, status_code=status.HTTP_201_CREATED)
 async def upload_media(
     project_id: str = Form(...),

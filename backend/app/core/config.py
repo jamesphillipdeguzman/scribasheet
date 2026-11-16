@@ -5,7 +5,6 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
@@ -41,7 +40,9 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./scribasheet.db"
 
     # Background Jobs
-    JOB_EXECUTION_MODE: Literal["local", "celery"] = "local"
+    JOB_EXECUTION_MODE: Literal["local", "celery", "remote_worker"] = "local"
+    WORKER_API_TOKEN: str = ""
+    WORKER_LEASE_SECONDS: int = 120
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
@@ -53,6 +54,7 @@ class Settings(BaseSettings):
     LOCAL_STORAGE_ROOT: str = "./storage_data"
     SIGNED_URL_SECRET: str = "dev-only-signed-url-secret-change-in-production"
     SIGNED_URL_TTL_SECONDS: int = 900
+    S3_PRESIGNED_PUT_TTL_SECONDS: int = 900
 
     S3_ENDPOINT_URL: str = ""
     S3_BUCKET_NAME: str = "scribasheet-private"

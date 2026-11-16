@@ -15,6 +15,10 @@ _local_executor = ThreadPoolExecutor(
 
 def enqueue_transcription_job(job_id: str) -> str | None:
     settings = get_settings()
+    if settings.JOB_EXECUTION_MODE == "remote_worker":
+        logger.info("Job %s queued for remote local worker claim.", job_id)
+        return f"remote-{job_id[:8]}"
+
     if settings.JOB_EXECUTION_MODE == "celery":
         try:
             from app.workers.celery_app import transcribe_audio_task
