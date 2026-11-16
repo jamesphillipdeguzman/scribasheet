@@ -30,6 +30,7 @@ from app.notation.generator import (
 from app.schemas.transcription import TranscriptionSettings
 from app.storage.service import storage_service
 from app.transcription.basic_pitch_provider import BasicPitchProvider
+from app.transcription.note_refiner import refine_detected_notes
 from app.workers.ws_manager import job_ws_manager
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,9 @@ def run_transcription_pipeline(job_id: str) -> None:
                 transpose_semitones=settings.transpose_semitones,
             )
 
+            refinement = refine_detected_notes(t_out.notes)
+            refined_notes = refinement.notes or t_out.notes
+
             # Stage 5: Musical Analysis & MusicXML Notation Generation
             _update_job(
                 db,
@@ -219,18 +223,18 @@ def run_transcription_pipeline(job_id: str) -> None:
                 status="generating_notation",
                 progress=80,
                 stage="Generating Notation",
-                log_line=f"Detected {len(t_out.notes)} note events. Analyzing tempo, key, chords, and building MusicXML.",
+                log_line=f"Detected {len(t_out.notes)} raw note events ({len(refined_notes)} refined). Analyzing tempo, key, chords, and building MusicXML.",
             )
             tempo_bpm, tempo_est = estimate_tempo(
-                processed_wav, settings.tempo_mode, settings.manual_tempo_bpm
+                processed_wav, settings.tempo_mode, settings.manual_tempo_bpm, notes=refined_notes
             )
-            key_sig, key_est = estimate_key_signature(t_out.notes, settings.key_signature)
+            key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
             time_sig = "4/4" if settings.time_signature == "auto" else settings.time_signature
             time_est = settings.time_signature == "auto"
 
             score_data = build_score_data(
                 title=project.title,
-                detected_notes=t_out.notes,
+                detected_notes=refined_notes,
                 tempo_bpm=tempo_bpm,
                 tempo_estimated=tempo_est,
                 time_signature=time_sig,
@@ -242,7 +246,9 @@ def run_transcription_pipeline(job_id: str) -> None:
                 quantization=settings.quantization,
                 analysis={
                     "engine": t_out.engine,
-                    "note_count": len(t_out.notes),
+                    "raw_note_count": len(t_out.notes),
+                    "note_count": len(refined_notes),
+                    "refiner": refinement.stats,
                     "is_silent_audio": proc_meta.is_silent,
                     "separation": separation_note,
                     "mode": settings.mode,

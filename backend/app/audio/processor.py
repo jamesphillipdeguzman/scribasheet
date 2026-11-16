@@ -7,6 +7,7 @@ from pathlib import Path
 import librosa
 import numpy as np
 import soundfile as sf
+from scipy import signal
 
 from app.core.config import get_settings
 
@@ -156,10 +157,17 @@ def preprocess_to_wav(input_path: Path, output_wav_path: Path, target_sr: int = 
     rms = float(np.sqrt(np.mean(np.square(y)))) if len(y) > 0 else 0.0
     is_silent = rms < 1e-4
 
-    # Peak normalize (avoid clipping, preserve dynamics if already reasonable)
+    # Gentle zero-phase high-pass filter (~27.5 Hz, lowest piano A0) to remove sub-bass/DC rumble
+    # while preserving t = 0.0 onset alignment.
+    if not is_silent and sr > 100 and len(y) > 24:
+        sos = signal.butter(2, 27.5, btype="highpass", fs=sr, output="sos")
+        y = signal.sosfiltfilt(sos, y).astype(np.float32)
+
+    # Peak normalize to ~ -1.0 dBFS (0.89125) to avoid clipping and keep consistent headroom
+    target_peak = float(10.0 ** (-1.0 / 20.0))
     peak = float(np.max(np.abs(y))) if len(y) > 0 else 0.0
-    if peak > 1e-4 and peak < 0.9:
-        y = (y / peak) * 0.9
+    if peak > 1e-4:
+        y = ((y / peak) * target_peak).astype(np.float32)
         sf.write(str(output_wav_path), y, sr, subtype="PCM_16")
 
     duration = float(len(y) / sr) if sr > 0 else meta.duration_seconds

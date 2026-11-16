@@ -101,6 +101,105 @@ def _parse_key_to_music21(key_str: str) -> music21.key.Key:
         return music21.key.Key("C", "major")
 
 
+def _split_rh_lh_notes(notes: list[ScoreNote]) -> tuple[list[ScoreNote], list[ScoreNote]]:
+    """Assign piano notes to RH (treble) and LH (bass) with hysteresis near Middle C."""
+    treble: list[ScoreNote] = []
+    bass: list[ScoreNote] = []
+    last_hand = "treble"
+    for n in sorted(notes, key=lambda x: (x.onset_sec, x.pitch_midi)):
+        if n.pitch_midi >= 63:
+            hand = "treble"
+        elif n.pitch_midi <= 56:
+            hand = "bass"
+        else:
+            # Hysteresis zone (57..62): keep with recent hand unless a simultaneous lower/higher note exists
+            hand = last_hand if n.pitch_midi >= 60 or last_hand == "treble" else "bass"
+            if n.pitch_midi < 60 and last_hand == "bass":
+                hand = "bass"
+        last_hand = hand
+        if hand == "treble":
+            treble.append(n)
+        else:
+            bass.append(n)
+    return treble, bass
+
+
+def _pack_notes_into_voices(
+    notes: Iterable[ScoreNote],
+    beats_per_sec: float,
+) -> list[list[tuple[float, float, list[int], int]]]:
+    """Pack quantized notes into non-overlapping voices: (start_ql, end_ql, pitches, velocity)."""
+    sorted_notes = sorted(notes, key=lambda n: (n.onset_sec, n.pitch_midi))
+    if not sorted_notes:
+        return [[]]
+
+    # Group notes that share the same quantized onset and quantized offset into chords
+    raw_events: list[tuple[float, float, int, int]] = []
+    for n in sorted_notes:
+        start_ql = max(0.0, round(n.onset_sec * beats_per_sec * 4.0) / 4.0)
+        end_ql = round(n.offset_sec * beats_per_sec * 4.0) / 4.0
+        if end_ql <= start_ql:
+            end_ql = start_ql + 0.25
+        raw_events.append((start_ql, end_ql, n.pitch_midi, n.velocity))
+
+    chord_groups: list[tuple[float, float, list[int], int]] = []
+    for start_ql, end_ql, pitch, vel in raw_events:
+        if (
+            chord_groups
+            and abs(chord_groups[-1][0] - start_ql) < 1e-6
+            and abs(chord_groups[-1][1] - end_ql) < 1e-6
+        ):
+            if pitch not in chord_groups[-1][2]:
+                chord_groups[-1][2].append(pitch)
+        else:
+            chord_groups.append((start_ql, end_ql, [pitch], vel))
+
+    voices: list[list[tuple[float, float, list[int], int]]] = []
+    voice_ends: list[float] = []
+    max_voices = 4
+
+    for ev in chord_groups:
+        start_ql, end_ql, pitches, vel = ev
+        placed = False
+        for v_idx, v_end in enumerate(voice_ends):
+            if start_ql >= v_end - 1e-6:
+                voices[v_idx].append((start_ql, end_ql, sorted(pitches), vel))
+                voice_ends[v_idx] = end_ql
+                placed = True
+                break
+        if not placed:
+            if len(voices) < max_voices:
+                voices.append([(start_ql, end_ql, sorted(pitches), vel)])
+                voice_ends.append(end_ql)
+            else:
+                # Trim the voice that finishes earliest to avoid overflow
+                best_v = min(range(len(voice_ends)), key=lambda idx: voice_ends[idx])
+                prev_s, prev_e, prev_p, prev_vel = voices[best_v][-1]
+                if start_ql > prev_s:
+                    voices[best_v][-1] = (prev_s, start_ql, prev_p, prev_vel)
+                    voices[best_v].append((start_ql, end_ql, sorted(pitches), vel))
+                    voice_ends[best_v] = end_ql
+
+    return voices or [[]]
+
+
+def _build_m21_element(
+    pitches: list[int],
+    dur_ql: float,
+    velocity: int,
+    tie_type: str | None,
+) -> music21.note.NotRest:
+    if len(pitches) == 1:
+        elem: music21.note.NotRest = music21.note.Note(pitches[0])
+    else:
+        elem = music21.chord.Chord(pitches)
+    elem.quarterLength = dur_ql
+    elem.volume.velocity = max(1, min(127, velocity))
+    if tie_type:
+        elem.tie = music21.tie.Tie(tie_type)
+    return elem
+
+
 def _populate_part_from_notes(
     part: music21.stream.Part,
     notes: Iterable[ScoreNote],
@@ -108,40 +207,67 @@ def _populate_part_from_notes(
     time_sig: str,
     key_obj: music21.key.Key,
     clef_obj: music21.clef.Clef,
+    min_measures: int = 1,
 ) -> None:
     beats_per_sec = max(20.0, tempo_bpm) / 60.0
-    part.append(clef_obj)
-    part.append(music21.meter.TimeSignature(time_sig))
-    part.append(key_obj)
-    part.append(music21.tempo.MetronomeMark(number=round(tempo_bpm, 1)))
+    ts_obj = music21.meter.TimeSignature(time_sig)
+    measure_ql = float(ts_obj.barDuration.quarterLength)
 
-    # Group nearly-simultaneous notes into chords so music21 renders clean polyphony
-    sorted_notes = sorted(notes, key=lambda n: (n.onset_sec, n.pitch_midi))
-    groups: list[list[ScoreNote]] = []
-    for n in sorted_notes:
-        if groups and abs(n.onset_sec - groups[-1][0].onset_sec) < 0.04:
-            groups[-1].append(n)
-        else:
-            groups.append([n])
+    voices = _pack_notes_into_voices(notes, beats_per_sec)
+    max_end_ql = max((ev[1] for v in voices for ev in v), default=measure_ql)
+    total_measures = max(min_measures, int(np.ceil(max_end_ql / measure_ql)))
 
-    for grp in groups:
-        onset_beats = max(0.0, round(grp[0].onset_sec * beats_per_sec * 4) / 4.0)
-        avg_dur_sec = max(0.08, sum(n.offset_sec - n.onset_sec for n in grp) / len(grp))
-        dur_beats = max(0.25, round(avg_dur_sec * beats_per_sec * 4) / 4.0)
+    for m_idx in range(total_measures):
+        m_start = m_idx * measure_ql
+        m_end = (m_idx + 1) * measure_ql
+        m = music21.stream.Measure(number=m_idx + 1)
+        if m_idx == 0:
+            m.append(clef_obj)
+            m.append(music21.meter.TimeSignature(time_sig))
+            m.append(key_obj)
+            m.append(music21.tempo.MetronomeMark(number=round(tempo_bpm, 1)))
 
-        pitches = sorted({n.pitch_midi for n in grp})
-        if len(pitches) == 1:
-            elem: music21.note.NotRest = music21.note.Note(pitches[0])
-        else:
-            elem = music21.chord.Chord(pitches)
-        elem.quarterLength = dur_beats
-        elem.volume.velocity = grp[0].velocity
-        part.insert(onset_beats + 0.0, elem)
+        active_voices: list[tuple[int, list[tuple[float, float, list[int], int]]]] = []
+        for v_idx, v_events in enumerate(voices):
+            sliced = [
+                (ev_s, ev_e, pitches, vel)
+                for ev_s, ev_e, pitches, vel in v_events
+                if ev_e > m_start + 1e-6 and ev_s < m_end - 1e-6
+            ]
+            if sliced or v_idx == 0:
+                active_voices.append((v_idx + 1, sliced))
 
-    part.makeMeasures(inPlace=True)
-    if len(part.getElementsByClass(music21.stream.Measure)) == 0:
-        m = music21.stream.Measure(number=1)
-        m.append(music21.note.Rest(quarterLength=4.0))
+        use_voice_containers = len(active_voices) > 1
+        for voice_num, v_events in active_voices:
+            target_stream: music21.stream.Stream = (
+                music21.stream.Voice(id=str(voice_num)) if use_voice_containers else m
+            )
+            cursor = m_start
+            for ev_s, ev_e, pitches, vel in v_events:
+                seg_s = max(m_start, ev_s)
+                seg_e = min(m_end, ev_e)
+                if seg_s > cursor + 1e-6:
+                    target_stream.append(music21.note.Rest(quarterLength=round(seg_s - cursor, 4)))
+                continues_before = ev_s < m_start - 1e-6
+                continues_after = ev_e > m_end + 1e-6
+                tie_type: str | None = None
+                if continues_before and continues_after:
+                    tie_type = "continue"
+                elif continues_before:
+                    tie_type = "stop"
+                elif continues_after:
+                    tie_type = "start"
+
+                seg_dur = round(seg_e - seg_s, 4)
+                if seg_dur > 1e-6:
+                    target_stream.append(_build_m21_element(pitches, seg_dur, vel, tie_type))
+                    cursor = seg_e
+            if cursor < m_end - 1e-6:
+                target_stream.append(music21.note.Rest(quarterLength=round(m_end - cursor, 4)))
+
+            if use_voice_containers:
+                m.insert(0, target_stream)
+
         part.append(m)
 
 
@@ -152,25 +278,41 @@ def score_data_to_musicxml(score: ScoreData) -> str:
 
     key_obj = _parse_key_to_music21(score.key_signature)
     time_sig = score.time_signature or "4/4"
+    ts_obj = music21.meter.TimeSignature(time_sig)
+    measure_ql = float(ts_obj.barDuration.quarterLength)
+    beats_per_sec = max(20.0, score.tempo_bpm) / 60.0
+    max_note_ql = max((n.offset_sec * beats_per_sec for n in score.notes), default=measure_ql)
+    min_measures = max(1, int(np.ceil(max_note_ql / measure_ql)))
     tracks = score.tracks or [ScoreTrack()]
 
     for track in tracks:
         track_notes = [n for n in score.notes if n.track_index == track.index]
         if track.clef == "grand":
-            treble_notes = [n for n in track_notes if n.pitch_midi >= 60]
-            bass_notes = [n for n in track_notes if n.pitch_midi < 60]
+            treble_notes, bass_notes = _split_rh_lh_notes(track_notes)
 
             p_treble = music21.stream.Part()
             p_treble.partName = f"{track.name} (RH)"
             _populate_part_from_notes(
-                p_treble, treble_notes, score.tempo_bpm, time_sig, key_obj, music21.clef.TrebleClef()
+                p_treble,
+                treble_notes,
+                score.tempo_bpm,
+                time_sig,
+                key_obj,
+                music21.clef.TrebleClef(),
+                min_measures=min_measures,
             )
             m21_score.insert(0, p_treble)
 
             p_bass = music21.stream.Part()
             p_bass.partName = f"{track.name} (LH)"
             _populate_part_from_notes(
-                p_bass, bass_notes, score.tempo_bpm, time_sig, key_obj, music21.clef.BassClef()
+                p_bass,
+                bass_notes,
+                score.tempo_bpm,
+                time_sig,
+                key_obj,
+                music21.clef.BassClef(),
+                min_measures=min_measures,
             )
             m21_score.insert(0, p_bass)
 
@@ -180,7 +322,9 @@ def score_data_to_musicxml(score: ScoreData) -> str:
             clef_obj = music21.clef.BassClef() if track.clef == "bass" else music21.clef.TrebleClef()
             p = music21.stream.Part()
             p.partName = track.name
-            _populate_part_from_notes(p, track_notes, score.tempo_bpm, time_sig, key_obj, clef_obj)
+            _populate_part_from_notes(
+                p, track_notes, score.tempo_bpm, time_sig, key_obj, clef_obj, min_measures=min_measures
+            )
             m21_score.insert(0, p)
 
     exporter = music21.musicxml.m21ToXml.GeneralObjectExporter(m21_score)
@@ -220,47 +364,88 @@ def score_data_to_midi_bytes(score: ScoreData) -> bytes:
     return buf.getvalue()
 
 
+_PC_TO_DIATONIC = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6]
+
+
+def _midi_to_diatonic_step(midi_pitch: int) -> int:
+    octave = (midi_pitch // 12) - 1
+    return octave * 7 + _PC_TO_DIATONIC[midi_pitch % 12]
+
+
 def render_score_pdf(score: ScoreData) -> bytes:
-    """Render a clean, printable multi-page PDF sheet music document from actual score data."""
+    """Render a clean, printable multi-page PDF grand-staff sheet music document."""
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=letter)
     width, height = letter
 
+    left_margin = 48.0
+    right_margin = width - 48.0
+    clef_gutter = 26.0
+    note_area_left = left_margin + clef_gutter
+    usable_w = right_margin - note_area_left - 8.0
+
+    line_gap = 6.0  # 24pt staff height (5 lines)
+    step_pt = line_gap / 2.0  # 3.0pt per diatonic step
+    staff_height = 4 * line_gap
+    bass_offset = 54.0  # distance from treble top to bass top
+
+    # Treble bottom line = E4 (midi 64, diatonic step 30); Bass bottom line = G2 (midi 43, diatonic step 18)
+    treble_e4_step = _midi_to_diatonic_step(64)
+    bass_g2_step = _midi_to_diatonic_step(43)
+
+    is_grand = any(t.clef == "grand" for t in (score.tracks or [])) or any(
+        n.pitch_midi < 57 for n in score.notes
+    )
+
     def draw_header(page_num: int) -> float:
-        c.setFont("Helvetica-Bold", 18)
-        c.drawCentredString(width / 2, height - 48, score.title or "ScribaSheet Transcription")
-        c.setFont("Helvetica", 10)
+        c.setFont("Helvetica-Bold", 17)
+        c.drawCentredString(width / 2, height - 46, score.title or "ScribaSheet Transcription")
+        c.setFont("Helvetica", 9.5)
         meta = (
             f"Tempo: {score.tempo_bpm:.0f} BPM  |  Time: {score.time_signature}  |  "
             f"Key: {score.key_signature}  |  Notes: {len(score.notes)}"
         )
-        c.drawCentredString(width / 2, height - 66, meta)
+        c.drawCentredString(width / 2, height - 64, meta)
         c.setFont("Helvetica", 8)
-        c.drawRightString(width - 42, 28, f"ScribaSheet • Page {page_num}")
-        return height - 105
+        c.drawRightString(width - 42, 26, f"ScribaSheet • Page {page_num}")
+        return height - 108
 
-    def draw_staff_system(y_top: float) -> float:
-        left = 48
-        right = width - 48
+    def draw_staff_system(y_treble_top: float, measures_in_sys: int) -> None:
         c.setLineWidth(0.6)
+        # Treble 5 lines
         for i in range(5):
-            y = y_top - i * 7
-            c.line(left, y, right, y)
-        # Barlines
-        c.line(left, y_top, left, y_top - 28)
-        c.line(right, y_top, right, y_top - 28)
-        for m in range(1, 4):
-            bx = left + (right - left) * (m / 4.0)
-            c.line(bx, y_top, bx, y_top - 28)
-        return y_top
+            y = y_treble_top - i * line_gap
+            c.line(left_margin, y, right_margin, y)
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(left_margin + 5, y_treble_top - 17, "G")
+
+        y_bottom_bar = y_treble_top - staff_height
+        if is_grand:
+            y_bass_top = y_treble_top - bass_offset
+            for i in range(5):
+                y = y_bass_top - i * line_gap
+                c.line(left_margin, y, right_margin, y)
+            c.setFont("Helvetica-Bold", 9)
+            c.drawString(left_margin + 5, y_bass_top - 15, "F")
+            y_bottom_bar = y_bass_top - staff_height
+            # Grand-staff left brace bar
+            c.setLineWidth(1.4)
+            c.line(left_margin - 4, y_treble_top, left_margin - 4, y_bottom_bar)
+            c.setLineWidth(0.6)
+
+        # System barlines (aligned across treble & bass)
+        c.line(left_margin, y_treble_top, left_margin, y_bottom_bar)
+        c.line(right_margin, y_treble_top, right_margin, y_bottom_bar)
+        for m in range(1, measures_in_sys):
+            bx = note_area_left + (usable_w * (m / float(measures_in_sys)))
+            c.line(bx, y_treble_top, bx, y_bottom_bar)
 
     page_num = 1
     y_cursor = draw_header(page_num)
 
-    # Group notes into systems of 4 measures
     sec_per_beat = 60.0 / max(20.0, score.tempo_bpm)
     try:
-        beats_per_measure = int(score.time_signature.split("/")[0])
+        beats_per_measure = max(1, int(score.time_signature.split("/")[0]))
     except Exception:
         beats_per_measure = 4
     sec_per_measure = sec_per_beat * beats_per_measure
@@ -269,40 +454,78 @@ def render_score_pdf(score: ScoreData) -> bytes:
         int(np.ceil((max((n.offset_sec for n in score.notes), default=4.0)) / sec_per_measure)),
     )
 
-    left = 54
-    usable_w = width - 108
+    measures_per_sys = 4
+    system_advance = 114.0 if is_grand else 78.0
+    min_y_cursor = 115.0 if is_grand else 85.0
 
-    for sys_start_m in range(0, total_measures, 4):
-        if y_cursor < 100:
+    treble_notes, bass_notes = _split_rh_lh_notes(score.notes) if is_grand else (score.notes, [])
+    treble_ids = {n.id for n in treble_notes}
+
+    for sys_start_m in range(0, total_measures, measures_per_sys):
+        if y_cursor < min_y_cursor:
             c.showPage()
             page_num += 1
             y_cursor = draw_header(page_num)
 
-        draw_staff_system(y_cursor)
+        draw_staff_system(y_cursor, measures_per_sys)
+        # Measure number placed cleanly in top-left gutter above chord lane
         c.setFont("Helvetica", 7)
-        c.drawString(48, y_cursor + 8, f"m. {sys_start_m + 1}")
+        c.drawString(left_margin, y_cursor + 24, f"m. {sys_start_m + 1}")
 
         sys_start_sec = sys_start_m * sec_per_measure
-        sys_end_sec = (sys_start_m + 4) * sec_per_measure
+        sys_dur_sec = measures_per_sys * sec_per_measure
+        sys_end_sec = sys_start_sec + sys_dur_sec
 
-        # Draw chords above staff
+        # Draw chords in dedicated lane above treble staff (no collision with measure numbers)
+        last_chord_x = -100.0
         for ch in score.chords:
             if sys_start_sec <= ch.onset_sec < sys_end_sec:
-                x = left + ((ch.onset_sec - sys_start_sec) / (4 * sec_per_measure)) * usable_w
-                c.setFont("Helvetica-Bold", 8)
-                c.drawString(x, y_cursor + 10, ch.symbol)
+                x = note_area_left + ((ch.onset_sec - sys_start_sec) / sys_dur_sec) * usable_w
+                if x - last_chord_x < 24.0:
+                    x = last_chord_x + 24.0
+                c.setFont("Helvetica-Bold", 8.5)
+                c.drawString(x, y_cursor + 12, ch.symbol)
+                last_chord_x = x
 
-        # Draw noteheads on staff (E4=64 on bottom line y_cursor-28, 3.5pt per diatonic step approx)
+        y_treble_bottom = y_cursor - staff_height
+        y_bass_bottom = (y_cursor - bass_offset) - staff_height
+
         for n in score.notes:
-            if sys_start_sec <= n.onset_sec < sys_end_sec:
-                x = left + ((n.onset_sec - sys_start_sec) / (4 * sec_per_measure)) * usable_w
-                semitones_above_e4 = n.pitch_midi - 64
-                ny = (y_cursor - 28) + semitones_above_e4 * 2.1
-                ny = max(y_cursor - 44, min(y_cursor + 14, ny))
-                c.circle(x, ny, 2.6, stroke=1, fill=1)
-                c.line(x + 2.6, ny, x + 2.6, ny + 14)
+            if not (sys_start_sec <= n.onset_sec < sys_end_sec):
+                continue
+            x = note_area_left + ((n.onset_sec - sys_start_sec) / sys_dur_sec) * usable_w
+            use_treble = (not is_grand) or (n.id in treble_ids)
+            if use_treble:
+                steps_above = _midi_to_diatonic_step(n.pitch_midi) - treble_e4_step
+                ny = y_treble_bottom + steps_above * step_pt
+                staff_bot = y_treble_bottom
+                staff_top = y_cursor
+            else:
+                steps_above = _midi_to_diatonic_step(n.pitch_midi) - bass_g2_step
+                ny = y_bass_bottom + steps_above * step_pt
+                staff_bot = y_bass_bottom
+                staff_top = y_cursor - bass_offset
 
-        y_cursor -= 72
+            # Draw ledger lines when outside 5-line staff
+            c.setLineWidth(0.5)
+            if ny > staff_top + 1.0:
+                ly = staff_top + line_gap
+                while ly <= ny + 1.0:
+                    c.line(x - 4.5, ly, x + 4.5, ly)
+                    ly += line_gap
+            elif ny < staff_bot - 1.0:
+                ly = staff_bot - line_gap
+                while ly >= ny - 1.0:
+                    c.line(x - 4.5, ly, x + 4.5, ly)
+                    ly -= line_gap
+
+            c.circle(x, ny, 2.4, stroke=1, fill=1)
+            if steps_above >= 4:
+                c.line(x - 2.4, ny, x - 2.4, ny - 13)
+            else:
+                c.line(x + 2.4, ny, x + 2.4, ny + 13)
+
+        y_cursor -= system_advance
 
     c.save()
     return buf.getvalue()

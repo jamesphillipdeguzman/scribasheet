@@ -48,6 +48,7 @@ from app.transcription.basic_pitch_provider import (
     resolve_onnx_model_path,
     verify_onnx_cpu_runtime,
 )
+from app.transcription.note_refiner import refine_detected_notes
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -229,24 +230,27 @@ class RealTranscriptionHandler:
                     "No valid musical notes were detected in the audio recording.",
                 )
 
+            refinement = refine_detected_notes(t_out.notes)
+            refined_notes = refinement.notes or t_out.notes
+
             # 5. Extract musical notes, tempo, key, and timing (70%)
             self._check_cancelled(job_id, cancel_event)
             report_progress(
                 "generating_notation",
                 70,
                 "Extracting Musical Notes",
-                f"Detected {len(t_out.notes)} note events; analyzing tempo, key, and harmony.",
+                f"Detected {len(t_out.notes)} raw note events ({len(refined_notes)} refined); analyzing tempo, key, and harmony.",
             )
             tempo_bpm, tempo_est = estimate_tempo(
-                processed_wav, settings.tempo_mode, settings.manual_tempo_bpm
+                processed_wav, settings.tempo_mode, settings.manual_tempo_bpm, notes=refined_notes
             )
-            key_sig, key_est = estimate_key_signature(t_out.notes, settings.key_signature)
+            key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
             time_sig = "4/4" if settings.time_signature == "auto" else settings.time_signature
             time_est = settings.time_signature == "auto"
 
             score_data = build_score_data(
                 title=Path(safe_name).stem or "ScribaSheet Transcription",
-                detected_notes=t_out.notes,
+                detected_notes=refined_notes,
                 tempo_bpm=tempo_bpm,
                 tempo_estimated=tempo_est,
                 time_signature=time_sig,
@@ -259,7 +263,9 @@ class RealTranscriptionHandler:
                 analysis={
                     "engine": t_out.engine,
                     "model": t_out.metadata.get("model"),
-                    "note_count": len(t_out.notes),
+                    "raw_note_count": len(t_out.notes),
+                    "note_count": len(refined_notes),
+                    "refiner": refinement.stats,
                     "is_silent_audio": proc_meta.is_silent,
                     "mode": settings.mode,
                     "concert_pitch_hz": settings.concert_pitch_hz,
