@@ -37,6 +37,7 @@ from app.notation.analyzer import (
 )
 from app.notation.generator import (
     build_score_data,
+    clean_score_title,
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
@@ -312,7 +313,7 @@ class RealTranscriptionHandler:
             )
 
             score_data = build_score_data(
-                title=Path(safe_name).stem or "ScribaSheet Transcription",
+                title=clean_score_title(job.get("project_title") or safe_name),
                 detected_notes=refined_notes,
                 tempo_bpm=tempo_bpm,
                 tempo_estimated=tempo_est,

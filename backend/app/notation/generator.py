@@ -1,5 +1,7 @@
 import io
+import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -22,6 +24,8 @@ from app.notation.analyzer import (
 )
 from app.schemas.score import ScoreData, ScoreNote, ScoreTrack
 from app.transcription.base import DetectedNote
+
+logger = logging.getLogger(__name__)
 
 
 def build_score_data(
@@ -95,6 +99,32 @@ def build_score_data(
     )
 
 
+_FILENAME_NOISE_RE = re.compile(
+    r"(?:[_-]?\d{2,3}\s*bpm|[_-]?(?:[A-G](?:#|b)?)[_-]?(?:maj(?:or)?|min(?:or)?|m)|[_-]?(?:preprocessed|normalized|22050|44100|mono|stereo))+$",
+    re.IGNORECASE,
+)
+
+
+def clean_score_title(raw_title: str | None) -> str:
+    """Clean raw filenames into readable titles while preserving real project titles."""
+    text = (raw_title or "").strip()
+    if not text:
+        return "ScribaSheet Transcription"
+    # If it looks like a filename (has extension, underscores, or technical tags), clean it
+    if "." in text and text.rsplit(".", 1)[-1].lower() in {"wav", "mp3", "flac", "m4a", "aac", "ogg", "mid", "midi", "musicxml", "xml"}:
+        text = text.rsplit(".", 1)[0]
+    looks_like_filename = ("_" in text or "-" in text) and " " not in text
+    if looks_like_filename:
+        prev = None
+        while prev != text:
+            prev = text
+            text = _FILENAME_NOISE_RE.sub("", text).strip("_- ")
+        text = re.sub(r"[_-]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text.title() if text else "ScribaSheet Transcription"
+    return text
+
+
 def _parse_key_to_music21(key_str: str) -> music21.key.Key:
     clean = (key_str or "C major").strip()
     lower = clean.lower()
@@ -137,54 +167,121 @@ def _split_rh_lh_notes(notes: list[ScoreNote]) -> tuple[list[ScoreNote], list[Sc
     return treble, bass
 
 
+_STANDARD_DURS_EIGHTH = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
+_STANDARD_DURS_SIXTEENTH = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0)
+
+
+def _select_rhythmic_grid_ql(notes: list[ScoreNote], tempo_bpm: float) -> float:
+    """Choose 0.5 ql (8th) for calm pieces unless genuine 16th-note subdivisions exist."""
+    if not notes:
+        return 0.5
+    beats_per_sec = max(20.0, tempo_bpm) / 60.0
+    onsets_ql = sorted({round(n.onset_sec * beats_per_sec * 4.0) / 4.0 for n in notes})
+    odd_16th = sum(1 for q in onsets_ql if abs((q * 2.0) - round(q * 2.0)) > 0.1)
+    short_durs = sum(
+        1 for n in notes if 0.12 <= ((n.offset_sec - n.onset_sec) * beats_per_sec) < 0.38
+    )
+    if tempo_bpm >= 105.0 or (len(onsets_ql) >= 6 and (odd_16th / len(onsets_ql)) >= 0.22) or (
+        len(notes) >= 6 and (short_durs / len(notes)) >= 0.25
+    ):
+        return 0.25
+    return 0.5
+
+
+def _normalize_duration_ql(raw_dur_ql: float, grid_ql: float) -> float:
+    """Snap duration to standard musical values (no double dots or tiny fragments)."""
+    allowed = _STANDARD_DURS_SIXTEENTH if grid_ql <= 0.25 else _STANDARD_DURS_EIGHTH
+    clamped = max(allowed[0], min(allowed[-1], raw_dur_ql))
+    return min(allowed, key=lambda val: (abs(val - clamped), val))
+
+
 def _pack_notes_into_voices(
     notes: Iterable[ScoreNote],
     beats_per_sec: float,
+    *,
+    grid_ql: float = 0.5,
+    measure_ql: float = 4.0,
 ) -> list[list[tuple[float, float, list[int], int]]]:
-    """Pack quantized notes into non-overlapping voices: (start_ql, end_ql, pitches, velocity)."""
+    """Pack quantized notes into <=2 non-overlapping voices per staff when possible."""
     sorted_notes = sorted(notes, key=lambda n: (n.onset_sec, n.pitch_midi))
     if not sorted_notes:
         return [[]]
 
-    # Group notes that share the same quantized onset and quantized offset into chords
+    step = 1.0 / grid_ql
     raw_events: list[tuple[float, float, int, int]] = []
     for n in sorted_notes:
-        start_ql = max(0.0, round(n.onset_sec * beats_per_sec * 4.0) / 4.0)
-        end_ql = round(n.offset_sec * beats_per_sec * 4.0) / 4.0
-        if end_ql <= start_ql:
-            end_ql = start_ql + 0.25
+        start_ql = max(0.0, round(n.onset_sec * beats_per_sec * step) / step)
+        raw_dur_ql = max(grid_ql, (n.offset_sec - n.onset_sec) * beats_per_sec)
+        dur_ql = _normalize_duration_ql(raw_dur_ql, grid_ql)
+        end_ql = start_ql + dur_ql
+
+        # Trim tiny barline overshoot (<= 0.5 ql) if the note already has >= 1.0 ql before the barline
+        if measure_ql > 0:
+            next_bar = (int(start_ql // measure_ql) + 1) * measure_ql
+            overshoot = end_ql - next_bar
+            if 0.0 < overshoot <= 0.5 and (next_bar - start_ql) >= 1.0:
+                end_ql = next_bar
         raw_events.append((start_ql, end_ql, n.pitch_midi, n.velocity))
 
-    # Sort by quantized (start_ql, end_ql, pitch) so chord grouping is deterministic
-    raw_events.sort(key=lambda x: (x[0], x[1], x[2]))
-
+    # Group simultaneous notes at the same quantized onset into chords (even with minor release diff)
+    raw_events.sort(key=lambda x: (x[0], -x[1], x[2]))
     chord_groups: list[tuple[float, float, list[int], int]] = []
     for start_ql, end_ql, pitch, vel in raw_events:
-        if (
-            chord_groups
-            and abs(chord_groups[-1][0] - start_ql) < 1e-6
-            and abs(chord_groups[-1][1] - end_ql) < 1e-6
-            and pitch not in chord_groups[-1][2]
-        ):
-            chord_groups[-1][2].append(pitch)
-        else:
+        placed_in_chord = False
+        for idx in range(len(chord_groups) - 1, -1, -1):
+            g_s, g_e, g_pitches, _ = chord_groups[idx]
+            if abs(g_s - start_ql) > 1e-6:
+                break
+            if pitch not in g_pitches and abs(g_e - end_ql) <= max(grid_ql, 0.5):
+                g_pitches.append(pitch)
+                placed_in_chord = True
+                break
+        if not placed_in_chord:
             chord_groups.append((start_ql, end_ql, [pitch], vel))
 
     voices: list[list[tuple[float, float, list[int], int]]] = []
     voice_ends: list[float] = []
+    preferred_max_voices = 2
 
-    for ev in chord_groups:
-        start_ql, end_ql, pitches, vel = ev
+    for start_ql, end_ql, pitches, vel in chord_groups:
+        sorted_p = sorted(pitches)
         placed = False
+        # 1. Try placing without overlap in existing voices (preferring Voice 1, then Voice 2)
         for v_idx, v_end in enumerate(voice_ends):
             if start_ql >= v_end - 1e-6:
-                voices[v_idx].append((start_ql, end_ql, sorted(pitches), vel))
+                voices[v_idx].append((start_ql, end_ql, sorted_p, vel))
                 voice_ends[v_idx] = end_ql
                 placed = True
                 break
+
+        # 2. If voices < 2, allocate Voice 2
+        if not placed and len(voices) < preferred_max_voices:
+            voices.append([(start_ql, end_ql, sorted_p, vel)])
+            voice_ends.append(end_ql)
+            placed = True
+
+        # 3. If both voices are occupied, trim a trailing sustain tail if onset advanced >= grid_ql
         if not placed:
-            # Allocate a new non-overlapping voice so no musical event is ever dropped
-            voices.append([(start_ql, end_ql, sorted(pitches), vel)])
+            for v_idx in range(len(voices)):
+                prev_s, _prev_e, prev_p, prev_vel = voices[v_idx][-1]
+                if start_ql >= prev_s + grid_ql - 1e-6:
+                    trimmed_dur = _normalize_duration_ql(start_ql - prev_s, grid_ql)
+                    new_prev_e = min(start_ql, prev_s + trimmed_dur)
+                    if new_prev_e > prev_s + 1e-6:
+                        voices[v_idx][-1] = (prev_s, new_prev_e, prev_p, prev_vel)
+                        voices[v_idx].append((start_ql, end_ql, sorted_p, vel))
+                        voice_ends[v_idx] = end_ql
+                        placed = True
+                        break
+
+        # 4. Genuine 3+ simultaneous distinct-duration voices: preserve notes and log warning
+        if not placed:
+            logger.warning(
+                "Passage at %.2f ql requires >2 simultaneous voices; allocating overflow voice %d to preserve notes.",
+                start_ql,
+                len(voices) + 1,
+            )
+            voices.append([(start_ql, end_ql, sorted_p, vel)])
             voice_ends.append(end_ql)
 
     return voices or [[]]
@@ -195,6 +292,7 @@ def _build_m21_element(
     dur_ql: float,
     velocity: int,
     tie_type: str | None,
+    stem_direction: str | None = None,
 ) -> music21.note.NotRest:
     if len(pitches) == 1:
         elem: music21.note.NotRest = music21.note.Note(pitches[0])
@@ -204,7 +302,36 @@ def _build_m21_element(
     elem.volume.velocity = max(1, min(127, velocity))
     if tie_type:
         elem.tie = music21.tie.Tie(tie_type)
+    if stem_direction:
+        elem.stemDirection = stem_direction
     return elem
+
+
+def _apply_key_signature_and_accidentals(part: music21.stream.Part, key_str: str) -> None:
+    """Suppress redundant diatonic naturals while preserving genuine in-measure cancellations."""
+    key_obj = _parse_key_to_music21(key_str)
+    part.makeAccidentals(inPlace=True)
+    key_alters: dict[str, float] = {}
+    for step in ("A", "B", "C", "D", "E", "F", "G"):
+        acc = key_obj.accidentalByStep(step)
+        key_alters[step] = float(acc.alter) if acc is not None else 0.0
+
+    for m in part.getElementsByClass(music21.stream.Measure):
+        measure_state: dict[tuple[str, int], float] = {}
+        for el in m.recurse().notes:
+            pitches = [el.pitch] if isinstance(el, music21.note.Note) else list(el.pitches)
+            for p in pitches:
+                expected = key_alters.get(p.step, 0.0)
+                active = measure_state.get((p.step, p.octave), expected)
+                actual = float(p.accidental.alter) if p.accidental is not None else 0.0
+                if abs(actual - active) < 1e-6:
+                    if p.accidental is not None:
+                        p.accidental.displayStatus = False
+                else:
+                    if p.accidental is None:
+                        p.accidental = music21.pitch.Accidental(actual)
+                    p.accidental.displayStatus = True
+                    measure_state[(p.step, p.octave)] = actual
 
 
 def _populate_part_from_notes(
@@ -212,15 +339,17 @@ def _populate_part_from_notes(
     notes: Iterable[ScoreNote],
     tempo_bpm: float,
     time_sig: str,
-    key_obj: music21.key.Key,
+    key_str: str,
     clef_obj: music21.clef.Clef,
     min_measures: int = 1,
+    grid_ql: float = 0.5,
 ) -> None:
     beats_per_sec = max(20.0, tempo_bpm) / 60.0
     ts_obj = music21.meter.TimeSignature(time_sig)
     measure_ql = float(ts_obj.barDuration.quarterLength)
+    key_obj = _parse_key_to_music21(key_str)
 
-    voices = _pack_notes_into_voices(notes, beats_per_sec)
+    voices = _pack_notes_into_voices(notes, beats_per_sec, grid_ql=grid_ql, measure_ql=measure_ql)
     max_end_ql = max((ev[1] for v in voices for ev in v), default=measure_ql)
     total_measures = max(min_measures, int(np.ceil(max_end_ql / measure_ql)))
 
@@ -233,6 +362,8 @@ def _populate_part_from_notes(
             m.append(music21.meter.TimeSignature(time_sig))
             m.append(key_obj)
             m.append(music21.tempo.MetronomeMark(number=round(tempo_bpm, 1)))
+        elif m_idx % 4 == 0:
+            m.insert(0, music21.layout.SystemLayout(isNew=True))
 
         active_voices: list[tuple[int, list[tuple[float, float, list[int], int]]]] = []
         for v_idx, v_events in enumerate(voices):
@@ -249,12 +380,17 @@ def _populate_part_from_notes(
             target_stream: music21.stream.Stream = (
                 music21.stream.Voice(id=str(voice_num)) if use_voice_containers else m
             )
+            stem_dir = ("up" if voice_num == 1 else "down") if use_voice_containers else None
+            is_secondary_voice = use_voice_containers and voice_num > 1
             cursor = m_start
             for ev_s, ev_e, pitches, vel in v_events:
                 seg_s = max(m_start, ev_s)
                 seg_e = min(m_end, ev_e)
                 if seg_s > cursor + 1e-6:
-                    target_stream.append(music21.note.Rest(quarterLength=round(seg_s - cursor, 4)))
+                    rest = music21.note.Rest(quarterLength=round(seg_s - cursor, 4))
+                    if is_secondary_voice:
+                        rest.style.hideObjectOnPrint = True
+                    target_stream.append(rest)
                 continues_before = ev_s < m_start - 1e-6
                 continues_after = ev_e > m_end + 1e-6
                 tie_type: str | None = None
@@ -267,27 +403,35 @@ def _populate_part_from_notes(
 
                 seg_dur = round(seg_e - seg_s, 4)
                 if seg_dur > 1e-6:
-                    target_stream.append(_build_m21_element(pitches, seg_dur, vel, tie_type))
+                    target_stream.append(_build_m21_element(pitches, seg_dur, vel, tie_type, stem_dir))
                     cursor = seg_e
             if cursor < m_end - 1e-6:
-                target_stream.append(music21.note.Rest(quarterLength=round(m_end - cursor, 4)))
+                rest = music21.note.Rest(quarterLength=round(m_end - cursor, 4))
+                if is_secondary_voice:
+                    rest.style.hideObjectOnPrint = True
+                target_stream.append(rest)
 
             if use_voice_containers:
                 m.insert(0, target_stream)
 
         part.append(m)
 
+    _apply_key_signature_and_accidentals(part, key_str)
+
 
 def score_data_to_musicxml(score: ScoreData) -> str:
     m21_score = music21.stream.Score()
     m21_score.metadata = music21.metadata.Metadata()
-    m21_score.metadata.title = score.title or "ScribaSheet Transcription"
+    clean_title = clean_score_title(score.title)
+    m21_score.metadata.title = clean_title
+    m21_score.metadata.movementName = clean_title
 
-    key_obj = _parse_key_to_music21(score.key_signature)
+    key_str = score.key_signature or "C major"
     time_sig = score.time_signature or "4/4"
     ts_obj = music21.meter.TimeSignature(time_sig)
     measure_ql = float(ts_obj.barDuration.quarterLength)
     beats_per_sec = max(20.0, score.tempo_bpm) / 60.0
+    grid_ql = _select_rhythmic_grid_ql(score.notes, score.tempo_bpm)
     max_note_ql = max((n.offset_sec * beats_per_sec for n in score.notes), default=measure_ql)
     min_measures = max(1, int(np.ceil(max_note_ql / measure_ql)))
     tracks = score.tracks or [ScoreTrack()]
@@ -304,9 +448,10 @@ def score_data_to_musicxml(score: ScoreData) -> str:
                 treble_notes,
                 score.tempo_bpm,
                 time_sig,
-                key_obj,
+                key_str,
                 music21.clef.TrebleClef(),
                 min_measures=min_measures,
+                grid_ql=grid_ql,
             )
             m21_score.insert(0, p_treble)
 
@@ -317,9 +462,10 @@ def score_data_to_musicxml(score: ScoreData) -> str:
                 bass_notes,
                 score.tempo_bpm,
                 time_sig,
-                key_obj,
+                key_str,
                 music21.clef.BassClef(),
                 min_measures=min_measures,
+                grid_ql=grid_ql,
             )
             m21_score.insert(0, p_bass)
 
@@ -330,7 +476,14 @@ def score_data_to_musicxml(score: ScoreData) -> str:
             p = music21.stream.Part()
             p.partName = track.name
             _populate_part_from_notes(
-                p, track_notes, score.tempo_bpm, time_sig, key_obj, clef_obj, min_measures=min_measures
+                p,
+                track_notes,
+                score.tempo_bpm,
+                time_sig,
+                key_str,
+                clef_obj,
+                min_measures=min_measures,
+                grid_ql=grid_ql,
             )
             m21_score.insert(0, p)
 

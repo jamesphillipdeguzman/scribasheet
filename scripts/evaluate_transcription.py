@@ -39,6 +39,7 @@ from app.notation.analyzer import (
 )
 from app.notation.generator import (
     build_score_data,
+    clean_score_title,
     render_score_pdf,
     score_data_to_midi_bytes,
     score_data_to_musicxml,
@@ -395,7 +396,7 @@ def main() -> int:
         tempo_diag = estimate_tempo_with_diagnostics(wav_path, **tempo_kwargs)
         key_sig, key_estimated = estimate_key_signature(refined_notes, key_setting="auto")
 
-        title = args.title or audio_path.stem
+        title = clean_score_title(args.title or audio_path.stem)
         score_data = build_score_data(
             title=title,
             detected_notes=refined_notes,
