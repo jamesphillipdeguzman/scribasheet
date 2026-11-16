@@ -32,15 +32,16 @@ import httpx
 from app.audio.processor import get_preprocessing_profile, preprocess_to_wav, probe_media
 from app.notation.analyzer import (
     estimate_key_signature,
-    estimate_tempo_with_diagnostics,
     get_instrument_program_and_clef,
 )
+from app.notation.beat_tracker import track_beats_and_downbeats
 from app.notation.generator import (
     build_score_data,
     clean_score_title,
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
+from app.notation.timing_map import build_timing_map
 from app.schemas.transcription import TranscriptionSettings
 from app.storage.service import sanitize_filename
 from app.transcription.basic_pitch_provider import (
@@ -296,14 +297,32 @@ class RealTranscriptionHandler:
                 "Extracting Musical Notes",
                 f"Detected {len(t_out.notes)} raw note events ({len(refined_notes)} refined); analyzing tempo, key, and harmony.",
             )
-            tempo_diag = estimate_tempo_with_diagnostics(
-                processed_wav, settings.tempo_mode, settings.manual_tempo_bpm, notes=refined_notes
-            )
-            tempo_bpm = float(tempo_diag["tempo_bpm"])
-            tempo_est = bool(tempo_diag["tempo_estimated"])
-            key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
             time_sig = "4/4" if settings.time_signature == "auto" else settings.time_signature
             time_est = settings.time_signature == "auto"
+            beats_per_bar = max(1, int(time_sig.split("/")[0])) if "/" in time_sig else 4
+
+            timing_map = None
+            if settings.tempo_mode == "manual" and settings.manual_tempo_bpm is not None:
+                tempo_bpm = round(float(settings.manual_tempo_bpm), 1)
+                tempo_est = False
+                tempo_diag = {"tempo_bpm": tempo_bpm, "tempo_estimated": False, "candidates": []}
+            else:
+                note_durs = [max(0.05, n.offset_sec - n.onset_sec) for n in refined_notes]
+                beat_res = track_beats_and_downbeats(
+                    processed_wav,
+                    beats_per_measure=beats_per_bar,
+                    note_durations_sec=note_durs,
+                )
+                timing_map = build_timing_map(
+                    beat_result=beat_res,
+                    notes=refined_notes,
+                    duration_seconds=proc_meta.duration_seconds,
+                    time_signature=time_sig,
+                )
+                tempo_bpm = timing_map.tempo_bpm
+                tempo_est = True
+                tempo_diag = timing_map.provenance
+            key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
 
             provenance = build_transcription_provenance(
                 source_audio_path=local_source,
@@ -324,6 +343,7 @@ class RealTranscriptionHandler:
                 duration_seconds=proc_meta.duration_seconds,
                 instrument=settings.instrument,
                 quantization=settings.quantization,
+                timing_map=timing_map,
                 analysis={
                     "engine": t_out.engine,
                     "requested_engine": exec_res.requested_engine,

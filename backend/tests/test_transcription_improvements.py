@@ -289,15 +289,29 @@ def test_evaluator_tempo_parity_and_provenance(tmp_path: Path, monkeypatch) -> N
 
     captured_kwargs: dict = {}
 
-    def fake_estimate_tempo(path, tempo_mode="auto", manual_tempo_bpm=None, notes=None):
-        captured_kwargs["tempo_mode"] = tempo_mode
-        captured_kwargs["manual_tempo_bpm"] = manual_tempo_bpm
-        captured_kwargs["notes"] = notes
-        return 90.0, True
+    def fake_track_beats(path, beats_per_measure=4, provider_preference=None, note_durations_sec=None):
+        from app.notation.beat_tracker import BeatTrackingResult
+
+        captured_kwargs["beats_per_measure"] = beats_per_measure
+        captured_kwargs["note_durations_sec"] = note_durations_sec
+        return BeatTrackingResult(
+            beat_times_sec=[0.0, 0.6667, 1.3333],
+            downbeat_times_sec=[0.0],
+            raw_bpm=90.0,
+            selected_bpm=90.0,
+            candidates=[{"bpm": 90.0, "relation": "primary", "score": 0.9}],
+            selected_ratio=1.0,
+            downbeat_confidence=0.9,
+            resolution_reason="mocked",
+            ambiguous=False,
+            requested_provider="auto",
+            actual_provider="librosa",
+            fallback_used=False,
+        )
 
     from app.transcription.basic_pitch_provider import BasicPitchProvider
 
-    monkeypatch.setattr(mod, "estimate_tempo", fake_estimate_tempo)
+    monkeypatch.setattr(mod, "track_beats_and_downbeats", fake_track_beats)
     monkeypatch.setattr(
         BasicPitchProvider,
         "transcribe",
@@ -327,8 +341,7 @@ def test_evaluator_tempo_parity_and_provenance(tmp_path: Path, monkeypatch) -> N
     )
     rc = mod.main()
     assert rc == 0
-    assert captured_kwargs["notes"] is not None and len(captured_kwargs["notes"]) == 1
-    assert captured_kwargs["manual_tempo_bpm"] is None
+    assert captured_kwargs["note_durations_sec"] is not None and len(captured_kwargs["note_durations_sec"]) == 1
 
     import json as _json
 

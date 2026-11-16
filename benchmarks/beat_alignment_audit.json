@@ -1,0 +1,41 @@
+{
+  "phase": "Phase C — Beat-Synchronized Timing and Downbeat Alignment",
+  "date": "2026-11-16",
+  "audio_file": "C:\\Users\\PC\\Documents\\.WEBSITES\\documentation\\scribasheet\\MP3\\Closer – Piano Cover GEHLEE (Piano Sheet).wav",
+  "wav_sha256": "9C44A525131ACDAF475843E8CAE5F42B1782AE52382DA20A08F04C6DA941B0CB",
+  "duration_sec": 182.293,
+  "timing_provider": {
+    "requested": "beat_this",
+    "actual": "beat_this",
+    "model_version": "beat_this-final0",
+    "fallback_used": false,
+    "fallback_reason": null,
+    "fallback_implementation": "librosa (verified via mocked failure test)"
+  },
+  "before_closer_musicxml": {
+    "path": "C:\\Users\\PC\\Documents\\.WEBSITES\\documentation\\scribasheet\\Closer.musicxml",
+    "tempo_bpm": 172.3,
+    "measures_per_part": [130, 130],
+    "part0_16th_rests": 150,
+    "tied_notes": 607,
+    "note_types": {"16th": 397, "quarter": 720, "half": 179, "eighth": 440, "whole": 2}
+  },
+  "after_beat_aligned_closer": {
+    "benchmark_dir": "benchmarks/runs/20261116_beat_alignment_closer",
+    "raw_bpm": 85.71,
+    "selected_bpm": 85.7,
+    "downbeat_confidence": 0.834,
+    "first_downbeat_sec": 4.9,
+    "pickup_ql": 0.0,
+    "measures_per_part": [67, 67],
+    "overflow_measures": 0,
+    "underflow_measures": 0,
+    "part0_16th_rests": 0,
+    "tied_notes": 80,
+    "note_types": {"quarter": 541, "half": 27, "eighth": 718, "whole": 6},
+    "midi_note_count": 1252,
+    "musicxml_note_count": 1252,
+    "midi_musicxml_exact_parity": true,
+    "pdf_bytes": 100312
+  }
+}

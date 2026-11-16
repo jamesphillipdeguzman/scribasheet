@@ -1,0 +1,980 @@
+{
+  "provenance": {
+    "run_id": "c1953ea7232a",
+    "pipeline_version": "2.1.0",
+    "model_version": "basic-pitch-0.4.0-nmp-onnx",
+    "preprocessing_profile": "piano",
+    "preprocessing_config_hash": "4846fc7456179c01",
+    "refiner_config_hash": "24a1e041fa478587",
+    "wav_sha256": "9C44A525131ACDAF475843E8CAE5F42B1782AE52382DA20A08F04C6DA941B0CB",
+    "git_commit_sha": "6bc9d05ad0eae1f716f9ead40d3c9c472752bcfc",
+    "git_dirty": true,
+    "expected_bpm": 86.0,
+    "expected_key": null,
+    "expected_time_signature": "4/4",
+    "requested_engine": "basic_pitch",
+    "actual_engine": "basic_pitch",
+    "fallback_used": false,
+    "fallback_reason": null,
+    "transcription_engine": "basic_pitch",
+    "provider_model": "nmp.onnx",
+    "checkpoint_sha256": null,
+    "inference_provider": "CPUExecutionProvider",
+    "inference_duration_sec": 6.954,
+    "python_version": "3.12.10",
+    "refiner_config": {
+      "min_duration_sec": 0.055,
+      "high_conf_short_min_duration_sec": 0.035,
+      "high_conf_short_threshold": 0.72,
+      "min_confidence": 0.28,
+      "reattack_gap_sec": 0.06,
+      "min_distinct_reattack_onset_sec": 0.11,
+      "reattack_tail_min_conf_ratio": 0.55,
+      "reattack_tail_max_duration_sec": 0.12,
+      "reattack_trim_margin_sec": 0.005,
+      "min_trimmed_duration_sec": 0.03,
+      "reattack_genuine_conf_boost": 1.15,
+      "reattack_genuine_vel_boost": 12,
+      "enable_octave_ghost_suppression": true,
+      "octave_onset_window_sec": 0.035,
+      "octave_confidence_ratio": 0.72,
+      "octave_strong_fundamental_min_conf": 0.48,
+      "octave_melodic_window_sec": 0.35,
+      "max_note_duration_sec": 6.0,
+      "enable_velocity_rescaling": true,
+      "velocity_min": 35,
+      "velocity_max": 115
+    },
+    "tempo_analysis_config": {
+      "tempo_mode": "auto",
+      "manual_tempo_bpm": null,
+      "uses_refined_notes": true,
+      "timing_provider": "beat_this",
+      "timing_fallback_used": false,
+      "timing_fallback_reason": null
+    },
+    "source_duration_sec": 182.293,
+    "evaluation_timestamp": "2026-11-16T14:09:11.494468+00:00"
+  },
+  "audio_file": "C:\\Users\\PC\\Documents\\.WEBSITES\\documentation\\scribasheet\\MP3\\Closer \u2013 Piano Cover GEHLEE (Piano Sheet).wav",
+  "audio_metadata": {
+    "source_duration_sec": 182.293,
+    "source_sample_rate": 48000,
+    "source_channels": 2,
+    "preprocessed_duration_sec": 182.293,
+    "preprocessed_sample_rate": 22050,
+    "is_silent": false
+  },
+  "tempo": {
+    "estimated_bpm": 85.7,
+    "expected_bpm": 86.0,
+    "abs_error_bpm": 0.3,
+    "ratio_to_expected": 0.997,
+    "raw_bpm": 85.71,
+    "selected_ratio": 1.0,
+    "downbeat_confidence": 0.834,
+    "first_downbeat_sec": 4.9,
+    "pickup_ql": 0.0,
+    "resolution_reason": "Primary beat pulse selected (85.7 BPM).",
+    "candidates": [
+      {
+        "bpm": 85.71,
+        "relation": "primary",
+        "score": 0.9869
+      },
+      {
+        "bpm": 42.86,
+        "relation": "half_time",
+        "score": 0.35
+      },
+      {
+        "bpm": 171.43,
+        "relation": "double_time",
+        "score": 0.35
+      }
+    ],
+    "confidence": 0.834,
+    "ambiguous": false,
+    "timing_provenance": {
+      "requested_provider": "beat_this",
+      "actual_provider": "beat_this",
+      "fallback_used": false,
+      "fallback_reason": null,
+      "model_version": "beat_this-final0",
+      "package_version": "unknown",
+      "raw_bpm": 85.71,
+      "selected_bpm": 85.7,
+      "selected_ratio": 1.0,
+      "candidates": [
+        {
+          "bpm": 85.71,
+          "relation": "primary",
+          "score": 0.9869
+        },
+        {
+          "bpm": 42.86,
+          "relation": "half_time",
+          "score": 0.35
+        },
+        {
+          "bpm": 171.43,
+          "relation": "double_time",
+          "score": 0.35
+        }
+      ],
+      "downbeat_confidence": 0.834,
+      "resolution_reason": "Primary beat pulse selected (85.7 BPM).",
+      "ambiguous": false,
+      "inference_seconds": 10.374,
+      "regularized_beat_count": 268,
+      "regularized_downbeat_count": 68,
+      "downbeat_bpm": 86.96,
+      "beats_per_bar_observed": 3.94,
+      "raw_beat_count": 198,
+      "raw_downbeat_count": 66
+    }
+  },
+  "key": {
+    "estimated_key": "E major",
+    "expected_key": null
+  },
+  "time_signature": "4/4",
+  "raw_notes_summary": {
+    "count": 1392,
+    "min_pitch": 28,
+    "max_pitch": 96,
+    "pitch_span_semitones": 68,
+    "durations_sec": {
+      "min": 0.0593,
+      "median": 0.3483,
+      "mean": 0.4186,
+      "max": 6.2384
+    },
+    "velocities": {
+      "min": 44,
+      "mean": 71.66,
+      "max": 107
+    },
+    "confidences": {
+      "min": 0.2419,
+      "mean": 0.4969,
+      "max": 0.8153
+    },
+    "short_notes_lt_55ms": 0,
+    "suspected_octave_duplicates": 298,
+    "rapid_same_pitch_reattacks_le_60ms": 564
+  },
+  "refined_notes_summary": {
+    "count": 1252,
+    "min_pitch": 28,
+    "max_pitch": 96,
+    "pitch_span_semitones": 68,
+    "durations_sec": {
+      "min": 0.0696,
+      "median": 0.3483,
+      "mean": 0.4431,
+      "max": 6.0
+    },
+    "velocities": {
+      "min": 35,
+      "mean": 69.12,
+      "max": 115
+    },
+    "confidences": {
+      "min": 0.2829,
+      "mean": 0.5104,
+      "max": 0.8153
+    },
+    "short_notes_lt_55ms": 0,
+    "suspected_octave_duplicates": 167,
+    "rapid_same_pitch_reattacks_le_60ms": 498
+  },
+  "refiner_stats": {
+    "enabled": true,
+    "raw_count": 1392,
+    "filtered_short_or_low_conf": 6,
+    "reattack_merges": 27,
+    "reattack_retained": 537,
+    "reattack_trimmed": 0,
+    "octave_ghosts_suppressed": 108,
+    "refined_count": 1252
+  },
+  "score_summary": {
+    "score_note_count": 1252,
+    "chord_count": 106,
+    "chord_symbols": [
+      "E",
+      "Ab7",
+      "Esus2",
+      "Abm7",
+      "Bm7",
+      "E7",
+      "Amaj7",
+      "Dbm7",
+      "Abm7",
+      "Dbm7",
+      "Gbm7",
+      "Dbm7",
+      "B",
+      "Gbsus4",
+      "E",
+      "Esus2",
+      "Ab7",
+      "Ebm",
+      "Dbm",
+      "Bm7",
+      "E7",
+      "Amaj7",
+      "Abm7",
+      "Dbm7",
+      "Gbm7",
+      "Dbm7",
+      "Gbsus4",
+      "Abm7",
+      "Esus2",
+      "E",
+      "Ab",
+      "Ab7",
+      "Dbm7",
+      "E7",
+      "Bm7",
+      "E",
+      "Amaj7",
+      "Dbm7",
+      "Abm7",
+      "Dbm",
+      "Gb7",
+      "B",
+      "Esus2",
+      "E",
+      "Ab7",
+      "Ab",
+      "Dbm7",
+      "Abdim",
+      "Bm7",
+      "E7",
+      "Amaj7",
+      "Abm7",
+      "Dbm7",
+      "Gbm7",
+      "B7",
+      "Esus2",
+      "E",
+      "Cmaj7",
+      "Ab7",
+      "Dbm",
+      "Bm7",
+      "E",
+      "Amaj7",
+      "E",
+      "Abm7",
+      "Dbm",
+      "Gbm7",
+      "Dbm",
+      "Abm7",
+      "Bsus2",
+      "E",
+      "Ab7",
+      "Eaug",
+      "Dbm7",
+      "Abdim",
+      "Bm7",
+      "E7",
+      "Amaj7",
+      "Abm7",
+      "Dbm7",
+      "Gbm7",
+      "Gbm",
+      "B7",
+      "Esus2",
+      "E",
+      "Ab",
+      "Dbm7",
+      "Bm7",
+      "E7",
+      "Amaj7",
+      "Abm7",
+      "Dbm7",
+      "Gbsus2",
+      "Amaj7",
+      "Esus4",
+      "E",
+      "Emaj7",
+      "Dbm7",
+      "E",
+      "Amaj7",
+      "E",
+      "Abaug",
+      "E",
+      "Abm7",
+      "Esus2",
+      "B"
+    ],
+    "chords": [
+      {
+        "measure": 1,
+        "beat": 1.0,
+        "onset_sec": 0.0,
+        "symbol": "E"
+      },
+      {
+        "measure": 2,
+        "beat": 1.0,
+        "onset_sec": 2.8,
+        "symbol": "Ab7"
+      },
+      {
+        "measure": 3,
+        "beat": 1.0,
+        "onset_sec": 5.601,
+        "symbol": "Esus2"
+      },
+      {
+        "measure": 3,
+        "beat": 3.0,
+        "onset_sec": 7.001,
+        "symbol": "Abm7"
+      },
+      {
+        "measure": 4,
+        "beat": 1.0,
+        "onset_sec": 8.401,
+        "symbol": "Bm7"
+      },
+      {
+        "measure": 4,
+        "beat": 3.0,
+        "onset_sec": 9.802,
+        "symbol": "E7"
+      },
+      {
+        "measure": 5,
+        "beat": 1.0,
+        "onset_sec": 11.202,
+        "symbol": "Amaj7"
+      },
+      {
+        "measure": 6,
+        "beat": 3.0,
+        "onset_sec": 15.403,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 7,
+        "beat": 1.0,
+        "onset_sec": 16.803,
+        "symbol": "Abm7"
+      },
+      {
+        "measure": 7,
+        "beat": 3.0,
+        "onset_sec": 18.203,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 8,
+        "beat": 1.0,
+        "onset_sec": 19.603,
+        "symbol": "Gbm7"
+      },
+      {
+        "measure": 8,
+        "beat": 3.0,
+        "onset_sec": 21.004,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 9,
+        "beat": 1.0,
+        "onset_sec": 22.404,
+        "symbol": "B"
+      },
+      {
+        "measure": 9,
+        "beat": 3.0,
+        "onset_sec": 23.804,
+        "symbol": "Gbsus4"
+      },
+      {
+        "measure": 10,
+        "beat": 1.0,
+        "onset_sec": 25.204,
+        "symbol": "E"
+      },
+      {
+        "measure": 10,
+        "beat": 3.0,
+        "onset_sec": 26.604,
+        "symbol": "Esus2"
+      },
+      {
+        "measure": 11,
+        "beat": 1.0,
+        "onset_sec": 28.005,
+        "symbol": "Ab7"
+      },
+      {
+        "measure": 11,
+        "beat": 3.0,
+        "onset_sec": 29.405,
+        "symbol": "Ebm"
+      },
+      {
+        "measure": 12,
+        "beat": 1.0,
+        "onset_sec": 30.805,
+        "symbol": "Dbm"
+      },
+      {
+        "measure": 13,
+        "beat": 1.0,
+        "onset_sec": 33.606,
+        "symbol": "Bm7"
+      },
+      {
+        "measure": 13,
+        "beat": 3.0,
+        "onset_sec": 35.006,
+        "symbol": "E7"
+      },
+      {
+        "measure": 14,
+        "beat": 1.0,
+        "onset_sec": 36.406,
+        "symbol": "Amaj7"
+      },
+      {
+        "measure": 15,
+        "beat": 1.0,
+        "onset_sec": 39.207,
+        "symbol": "Abm7"
+      },
+      {
+        "measure": 15,
+        "beat": 3.0,
+        "onset_sec": 40.607,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 16,
+        "beat": 1.0,
+        "onset_sec": 42.007,
+        "symbol": "Gbm7"
+      },
+      {
+        "measure": 17,
+        "beat": 1.0,
+        "onset_sec": 44.807,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 17,
+        "beat": 3.0,
+        "onset_sec": 46.208,
+        "symbol": "Gbsus4"
+      },
+      {
+        "measure": 18,
+        "beat": 1.0,
+        "onset_sec": 47.608,
+        "symbol": "Abm7"
+      },
+      {
+        "measure": 18,
+        "beat": 3.0,
+        "onset_sec": 49.008,
+        "symbol": "Esus2"
+      },
+      {
+        "measure": 19,
+        "beat": 3.0,
+        "onset_sec": 51.809,
+        "symbol": "E"
+      },
+      {
+        "measure": 20,
+        "beat": 1.0,
+        "onset_sec": 53.209,
+        "symbol": "Ab"
+      },
+      {
+        "measure": 20,
+        "beat": 3.0,
+        "onset_sec": 54.609,
+        "symbol": "Ab7"
+      },
+      {
+        "measure": 21,
+        "beat": 1.0,
+        "onset_sec": 56.009,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 21,
+        "beat": 3.0,
+        "onset_sec": 57.41,
+        "symbol": "E7"
+      },
+      {
+        "measure": 22,
+        "beat": 1.0,
+        "onset_sec": 58.81,
+        "symbol": "Bm7"
+      },
+      {
+        "measure": 22,
+        "beat": 3.0,
+        "onset_sec": 60.21,
+        "symbol": "E"
+      },
+      {
+        "measure": 23,
+        "beat": 1.0,
+        "onset_sec": 61.61,
+        "symbol": "Amaj7"
+      },
+      {
+        "measure": 23,
+        "beat": 3.0,
+        "onset_sec": 63.011,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 24,
+        "beat": 1.0,
+        "onset_sec": 64.411,
+        "symbol": "Abm7"
+      },
+      {
+        "measure": 24,
+        "beat": 3.0,
+        "onset_sec": 65.811,
+        "symbol": "Dbm"
+      },
+      {
+        "measure": 25,
+        "beat": 1.0,
+        "onset_sec": 67.211,
+        "symbol": "Gb7"
+      },
+      {
+        "measure": 26,
+        "beat": 1.0,
+        "onset_sec": 70.012,
+        "symbol": "B"
+      },
+      {
+        "measure": 26,
+        "beat": 3.0,
+        "onset_sec": 71.412,
+        "symbol": "Esus2"
+      },
+      {
+        "measure": 27,
+        "beat": 3.0,
+        "onset_sec": 74.212,
+        "symbol": "E"
+      },
+      {
+        "measure": 28,
+        "beat": 1.0,
+        "onset_sec": 75.613,
+        "symbol": "Ab7"
+      },
+      {
+        "measure": 28,
+        "beat": 3.0,
+        "onset_sec": 77.013,
+        "symbol": "Ab"
+      },
+      {
+        "measure": 29,
+        "beat": 1.0,
+        "onset_sec": 78.413,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 29,
+        "beat": 3.0,
+        "onset_sec": 79.813,
+        "symbol": "Abdim"
+      },
+      {
+        "measure": 30,
+        "beat": 1.0,
+        "onset_sec": 81.214,
+        "symbol": "Bm7"
+      },
+      {
+        "measure": 30,
+        "beat": 3.0,
+        "onset_sec": 82.614,
+        "symbol": "E7"
+      },
+      {
+        "measure": 31,
+        "beat": 1.0,
+        "onset_sec": 84.014,
+        "symbol": "Amaj7"
+      },
+      {
+        "measure": 32,
+        "beat": 1.0,
+        "onset_sec": 86.814,
+        "symbol": "Abm7"
+      },
+      {
+        "measure": 32,
+        "beat": 3.0,
+        "onset_sec": 88.215,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 33,
+        "beat": 1.0,
+        "onset_sec": 89.615,
+        "symbol": "Gbm7"
+      },
+      {
+        "measure": 33,
+        "beat": 3.0,
+        "onset_sec": 91.015,
+        "symbol": "B7"
+      },
+      {
+        "measure": 34,
+        "beat": 3.0,
+        "onset_sec": 93.816,
+        "symbol": "Esus2"
+      },
+      {
+        "measure": 35,
+        "beat": 1.0,
+        "onset_sec": 95.216,
+        "symbol": "E"
+      },
+      {
+        "measure": 35,
+        "beat": 3.0,
+        "onset_sec": 96.616,
+        "symbol": "Cmaj7"
+      },
+      {
+        "measure": 36,
+        "beat": 1.0,
+        "onset_sec": 98.016,
+        "symbol": "Ab7"
+      },
+      {
+        "measure": 37,
+        "beat": 1.0,
+        "onset_sec": 100.817,
+        "symbol": "Dbm"
+      },
+      {
+        "measure": 38,
+        "beat": 1.0,
+        "onset_sec": 103.617,
+        "symbol": "Bm7"
+      },
+      {
+        "measure": 38,
+        "beat": 3.0,
+        "onset_sec": 105.018,
+        "symbol": "E"
+      },
+      {
+        "measure": 39,
+        "beat": 1.0,
+        "onset_sec": 106.418,
+        "symbol": "Amaj7"
+      },
+      {
+        "measure": 39,
+        "beat": 3.0,
+        "onset_sec": 107.818,
+        "symbol": "E"
+      },
+      {
+        "measure": 40,
+        "beat": 1.0,
+        "onset_sec": 109.218,
+        "symbol": "Abm7"
+      },
+      {
+        "measure": 40,
+        "beat": 3.0,
+        "onset_sec": 110.618,
+        "symbol": "Dbm"
+      },
+      {
+        "measure": 41,
+        "beat": 1.0,
+        "onset_sec": 112.019,
+        "symbol": "Gbm7"
+      },
+      {
+        "measure": 41,
+        "beat": 3.0,
+        "onset_sec": 113.419,
+        "symbol": "Dbm"
+      },
+      {
+        "measure": 42,
+        "beat": 1.0,
+        "onset_sec": 114.819,
+        "symbol": "Abm7"
+      },
+      {
+        "measure": 42,
+        "beat": 3.0,
+        "onset_sec": 116.219,
+        "symbol": "Bsus2"
+      },
+      {
+        "measure": 43,
+        "beat": 1.0,
+        "onset_sec": 117.62,
+        "symbol": "E"
+      },
+      {
+        "measure": 44,
+        "beat": 1.0,
+        "onset_sec": 120.42,
+        "symbol": "Ab7"
+      },
+      {
+        "measure": 44,
+        "beat": 3.0,
+        "onset_sec": 121.82,
+        "symbol": "Eaug"
+      },
+      {
+        "measure": 45,
+        "beat": 1.0,
+        "onset_sec": 123.221,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 45,
+        "beat": 3.0,
+        "onset_sec": 124.621,
+        "symbol": "Abdim"
+      },
+      {
+        "measure": 46,
+        "beat": 1.0,
+        "onset_sec": 126.021,
+        "symbol": "Bm7"
+      },
+      {
+        "measure": 46,
+        "beat": 3.0,
+        "onset_sec": 127.421,
+        "symbol": "E7"
+      },
+      {
+        "measure": 47,
+        "beat": 1.0,
+        "onset_sec": 128.821,
+        "symbol": "Amaj7"
+      },
+      {
+        "measure": 48,
+        "beat": 1.0,
+        "onset_sec": 131.622,
+        "symbol": "Abm7"
+      },
+      {
+        "measure": 48,
+        "beat": 3.0,
+        "onset_sec": 133.022,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 49,
+        "beat": 1.0,
+        "onset_sec": 134.422,
+        "symbol": "Gbm7"
+      },
+      {
+        "measure": 49,
+        "beat": 3.0,
+        "onset_sec": 135.823,
+        "symbol": "Gbm"
+      },
+      {
+        "measure": 50,
+        "beat": 1.0,
+        "onset_sec": 137.223,
+        "symbol": "B7"
+      },
+      {
+        "measure": 51,
+        "beat": 1.0,
+        "onset_sec": 140.023,
+        "symbol": "Esus2"
+      },
+      {
+        "measure": 51,
+        "beat": 3.0,
+        "onset_sec": 141.424,
+        "symbol": "E"
+      },
+      {
+        "measure": 52,
+        "beat": 3.0,
+        "onset_sec": 144.224,
+        "symbol": "Ab"
+      },
+      {
+        "measure": 53,
+        "beat": 1.0,
+        "onset_sec": 145.624,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 54,
+        "beat": 1.0,
+        "onset_sec": 148.425,
+        "symbol": "Bm7"
+      },
+      {
+        "measure": 54,
+        "beat": 3.0,
+        "onset_sec": 149.825,
+        "symbol": "E7"
+      },
+      {
+        "measure": 55,
+        "beat": 1.0,
+        "onset_sec": 151.225,
+        "symbol": "Amaj7"
+      },
+      {
+        "measure": 56,
+        "beat": 1.0,
+        "onset_sec": 154.026,
+        "symbol": "Abm7"
+      },
+      {
+        "measure": 56,
+        "beat": 3.0,
+        "onset_sec": 155.426,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 57,
+        "beat": 1.0,
+        "onset_sec": 156.826,
+        "symbol": "Gbsus2"
+      },
+      {
+        "measure": 57,
+        "beat": 3.0,
+        "onset_sec": 158.226,
+        "symbol": "Amaj7"
+      },
+      {
+        "measure": 58,
+        "beat": 1.0,
+        "onset_sec": 159.627,
+        "symbol": "Esus4"
+      },
+      {
+        "measure": 58,
+        "beat": 3.0,
+        "onset_sec": 161.027,
+        "symbol": "E"
+      },
+      {
+        "measure": 59,
+        "beat": 3.0,
+        "onset_sec": 163.827,
+        "symbol": "Emaj7"
+      },
+      {
+        "measure": 60,
+        "beat": 1.0,
+        "onset_sec": 165.228,
+        "symbol": "Dbm7"
+      },
+      {
+        "measure": 60,
+        "beat": 3.0,
+        "onset_sec": 166.628,
+        "symbol": "E"
+      },
+      {
+        "measure": 61,
+        "beat": 1.0,
+        "onset_sec": 168.028,
+        "symbol": "Amaj7"
+      },
+      {
+        "measure": 61,
+        "beat": 3.0,
+        "onset_sec": 169.428,
+        "symbol": "E"
+      },
+      {
+        "measure": 62,
+        "beat": 1.0,
+        "onset_sec": 170.828,
+        "symbol": "Abaug"
+      },
+      {
+        "measure": 62,
+        "beat": 3.0,
+        "onset_sec": 172.229,
+        "symbol": "E"
+      },
+      {
+        "measure": 63,
+        "beat": 1.0,
+        "onset_sec": 173.629,
+        "symbol": "Abm7"
+      },
+      {
+        "measure": 63,
+        "beat": 3.0,
+        "onset_sec": 175.029,
+        "symbol": "Esus2"
+      },
+      {
+        "measure": 64,
+        "beat": 1.0,
+        "onset_sec": 176.429,
+        "symbol": "B"
+      }
+    ]
+  },
+  "musicxml_integrity": {
+    "music21_parse_ok": true,
+    "music21_parse_error": null,
+    "music21_parts": 2,
+    "music21_measures_per_part": [
+      67,
+      67
+    ],
+    "xml_parts": 2,
+    "xml_measures_per_part": [
+      67,
+      67
+    ],
+    "overflow_measure_count": 0,
+    "underflow_measure_count": 0,
+    "overflow_measures_sample": [],
+    "underflow_measures_sample": [],
+    "structural_integrity_ok": true
+  },
+  "pdf_summary": {
+    "bytes": 100312,
+    "valid_pdf_header": true
+  },
+  "midi_summary": {
+    "bytes": 7610
+  },
+  "ground_truth_eval": null,
+  "artifacts_dir": "C:\\Users\\PC\\Documents\\.WEBSITES\\scribasheet\\benchmarks\\runs\\20261116_beat_alignment_closer"
+}
