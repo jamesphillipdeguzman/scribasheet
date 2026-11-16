@@ -179,7 +179,7 @@ class RealTranscriptionHandler:
 
             # 1. Download source audio (5%)
             self._check_cancelled(job_id, cancel_event)
-            report_progress("validating", 5, "Downloading audio", "Retrieving source media from storage.")
+            report_progress("validating", 5, "Downloading Source Audio", "Retrieving source media from storage.")
             full_url = self._resolve_download_url(source_url)
             with self._client.stream("GET", full_url) as dl_resp:
                 dl_resp.raise_for_status()
@@ -192,24 +192,24 @@ class RealTranscriptionHandler:
             if not local_source.exists() or local_source.stat().st_size == 0:
                 raise TranscriptionInferenceError("EMPTY_AUDIO_FILE", "Downloaded audio file is empty.")
 
-            # 2. Validate audio (10%)
+            # 2. Validate audio (15%)
             self._check_cancelled(job_id, cancel_event)
-            report_progress("validating", 10, "Validating audio", "Inspecting audio stream metadata.")
+            report_progress("validating", 15, "Validating Audio", "Inspecting audio stream metadata.")
             probe_media(local_source)
 
-            # 3. Preprocess to 22.05 kHz mono WAV (20%)
+            # 3. Preprocess to 22.05 kHz mono WAV (25%)
             self._check_cancelled(job_id, cancel_event)
-            report_progress("preprocessing", 20, "Preprocessing audio", "Normalizing audio to 22.05 kHz mono WAV.")
+            report_progress("preprocessing", 25, "Preprocessing Audio", "Normalizing audio to 22.05 kHz mono WAV.")
             proc_meta = preprocess_to_wav(local_source, processed_wav, target_sr=22050)
 
-            # 4. Load AI model & run Basic Pitch ONNX inference (30% -> 45%)
+            # 4. Load AI model & run Basic Pitch ONNX inference (35% -> 60%)
             self._check_cancelled(job_id, cancel_event)
-            report_progress("transcribing", 30, "Loading AI model", "Initializing Basic Pitch ONNX CPU runtime.")
+            report_progress("transcribing", 35, "Initializing Transcription Model", "Initializing Basic Pitch ONNX CPU runtime.")
             model_path = resolve_onnx_model_path()
             verify_onnx_cpu_runtime(model_path)
 
             self._check_cancelled(job_id, cancel_event)
-            report_progress("transcribing", 45, "Running Basic Pitch inference", "Detecting musical notes on CPU.")
+            report_progress("transcribing", 60, "Running Basic Pitch Inference", "Detecting musical notes on CPU.")
             program, _ = get_instrument_program_and_clef(settings.instrument)
             t_out = self._provider.transcribe(
                 processed_wav,
@@ -229,12 +229,12 @@ class RealTranscriptionHandler:
                     "No valid musical notes were detected in the audio recording.",
                 )
 
-            # 5. Extract musical notes, tempo, key, and timing (65%)
+            # 5. Extract musical notes, tempo, key, and timing (70%)
             self._check_cancelled(job_id, cancel_event)
             report_progress(
                 "generating_notation",
-                65,
-                "Extracting musical notes",
+                70,
+                "Extracting Musical Notes",
                 f"Detected {len(t_out.notes)} note events; analyzing tempo, key, and harmony.",
             )
             tempo_bpm, tempo_est = estimate_tempo(
@@ -266,23 +266,41 @@ class RealTranscriptionHandler:
                 },
             )
 
-            # 6. Generate & validate MIDI (75%)
+            # 6. Generate & validate MIDI (80%)
             self._check_cancelled(job_id, cancel_event)
-            report_progress("generating_notation", 75, "Generating MIDI", "Building standard MIDI output.")
+            report_progress("generating_notation", 80, "Generating MIDI", "Building standard MIDI output.")
             midi_bytes = score_data_to_midi_bytes(score_data)
             if not midi_bytes or not midi_bytes.startswith(b"MThd"):
                 raise TranscriptionInferenceError("MIDI_GENERATION_FAILED", "Generated MIDI output is invalid.")
+            try:
+                import io as _io
 
-            # 7. Generate & validate MusicXML (85%)
+                import pretty_midi as _pm
+
+                parsed_midi = _pm.PrettyMIDI(_io.BytesIO(midi_bytes))
+                if sum(len(inst.notes) for inst in parsed_midi.instruments) == 0:
+                    raise TranscriptionInferenceError("MIDI_GENERATION_FAILED", "Generated MIDI contains zero notes.")
+            except TranscriptionInferenceError:
+                raise
+            except Exception as exc:
+                raise TranscriptionInferenceError("MIDI_GENERATION_FAILED", f"Generated MIDI failed validation: {exc}")
+
+            # 7. Generate & validate MusicXML (90%)
             self._check_cancelled(job_id, cancel_event)
-            report_progress("generating_notation", 85, "Generating MusicXML", "Engraving MusicXML notation.")
+            report_progress("generating_notation", 90, "Generating MusicXML", "Engraving MusicXML notation.")
             musicxml_str = score_data_to_musicxml(score_data)
             if "<score-partwise" not in musicxml_str:
                 raise TranscriptionInferenceError("MUSICXML_GENERATION_FAILED", "Generated MusicXML is invalid.")
+            try:
+                import music21 as _m21
+
+                _m21.converter.parseData(musicxml_str, format="musicxml")
+            except Exception as exc:
+                raise TranscriptionInferenceError("MUSICXML_GENERATION_FAILED", f"Generated MusicXML failed parsing: {exc}")
 
             # 8. Persist artifacts (95%)
             self._check_cancelled(job_id, cancel_event)
-            report_progress("finalizing", 95, "Persisting score and exports", "Saving MIDI, MusicXML, and score.")
+            report_progress("finalizing", 95, "Persisting Score", "Saving MIDI, MusicXML, and score.")
 
             artifact_urls = job.get("artifact_upload_urls") or {}
             midi_key: str | None = None

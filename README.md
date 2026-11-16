@@ -42,7 +42,24 @@ alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 3. Frontend
+### 3. Local Windows CPU Worker (Production / Remote Mode)
+When Railway runs with `JOB_EXECUTION_MODE=remote_worker`, run the local transcription worker on Windows (CPU-only via Spotify Basic Pitch ONNX `CPUExecutionProvider`, no GPU/CUDA required):
+
+```powershell
+cd backend
+.venv\Scripts\Activate.ps1
+$env:SCRIBASHEET_API_URL = "https://scribasheet-production.up.railway.app/api/v1"
+$env:WORKER_API_TOKEN = "<your-worker-api-token>"
+$env:WORKER_ID = "win11-ryzen-home"
+python -m app.worker_agent
+```
+
+Verify the startup log shows `handler=RealTranscriptionHandler` (never `PhaseATestHandler` in production). FFmpeg should be available on `PATH` for MP3/M4A/AAC/MP4 decoding. To verify the ONNX model locally:
+```powershell
+backend\.venv\Scripts\python.exe -c "from app.transcription.basic_pitch_provider import resolve_onnx_model_path, verify_onnx_cpu_runtime; p = resolve_onnx_model_path(); verify_onnx_cpu_runtime(p); print('Ready:', p)"
+```
+
+### 4. Frontend
 ```bash
 cd frontend
 npm install
@@ -50,7 +67,7 @@ npm run dev
 ```
 Open `http://localhost:5173`. API docs are at `http://localhost:8000/docs`.
 
-### 4. Docker Compose
+### 5. Docker Compose
 ```bash
 docker compose up --build
 ```
