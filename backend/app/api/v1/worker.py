@@ -18,6 +18,7 @@ from app.models import (
     TranscriptionResult,
     UsageRecord,
 )
+from app.schemas.score import ScoreData
 from app.storage.service import storage_service
 from app.workers.ws_manager import job_ws_manager
 
@@ -102,6 +103,7 @@ class WorkerProgressRequest(BaseModel):
 
 class WorkerCompleteRequest(BaseModel):
     worker_id: str = Field(min_length=1, max_length=128)
+    is_simulated: bool = False
     midi_key: str | None = None
     musicxml_key: str | None = None
     score_json: dict[str, Any] = Field(default_factory=dict)
@@ -370,6 +372,28 @@ def complete_job(
     midi_key = _validate_project_key(payload.midi_key, job.user_id, job.project_id)
     xml_key = _validate_project_key(payload.musicxml_key, job.user_id, job.project_id)
 
+    is_simulated = payload.is_simulated or payload.metadata_json.get("handler") == "phase_a_test"
+    validated_score: ScoreData | None = None
+
+    if not is_simulated:
+        if not payload.score_json:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Cannot complete non-simulated transcription without a valid score payload.",
+            )
+        try:
+            validated_score = ScoreData.model_validate(payload.score_json)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"Invalid score payload: {exc}",
+            )
+        if len(validated_score.notes) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Cannot mark project ready: transcription produced zero notes.",
+            )
+
     project = db.query(Project).filter(Project.id == job.project_id).first()
 
     midi_asset_id: str | None = None
@@ -404,11 +428,12 @@ def complete_job(
         db.flush()
         xml_asset_id = xml_asset.id
 
-    if payload.score_json:
+    if not is_simulated and validated_score is not None:
+        score_dict = validated_score.model_dump()
         existing_score = db.query(ProjectScore).filter(ProjectScore.project_id == job.project_id).first()
         if existing_score:
             existing_score.version += 1
-            existing_score.score_json = payload.score_json
+            existing_score.score_json = score_dict
             if xml_key:
                 existing_score.musicxml_path = xml_key
             if midi_key:
@@ -418,7 +443,7 @@ def complete_job(
                 ProjectScore(
                     project_id=job.project_id,
                     version=1,
-                    score_json=payload.score_json,
+                    score_json=score_dict,
                     musicxml_path=xml_key,
                     midi_path=midi_key,
                 )
@@ -426,16 +451,19 @@ def complete_job(
 
     existing_result = db.query(TranscriptionResult).filter(TranscriptionResult.job_id == job.id).first()
     if not existing_result:
+        meta = dict(payload.metadata_json or {})
+        if is_simulated:
+            meta["simulated"] = True
         db.add(
             TranscriptionResult(
                 job_id=job.id,
                 midi_asset_id=midi_asset_id,
                 musicxml_asset_id=xml_asset_id,
-                metadata_json=payload.metadata_json,
+                metadata_json=meta,
             )
         )
 
-    if payload.duration_seconds and payload.duration_seconds > 0:
+    if not is_simulated and payload.duration_seconds and payload.duration_seconds > 0:
         db.add(
             UsageRecord(
                 user_id=job.user_id,
@@ -445,13 +473,17 @@ def complete_job(
         )
 
     if project:
-        project.status = "ready"
+        # Only mark project "ready" when an actual transcription score was persisted
+        if not is_simulated and validated_score is not None:
+            project.status = "ready"
+        elif project.status == "processing":
+            project.status = "draft"
         if payload.duration_seconds is not None:
             project.duration_seconds = payload.duration_seconds
 
     job.status = "completed"
     job.progress = 100
-    job.current_stage = "Completed"
+    job.current_stage = "Completed (Simulated Test)" if is_simulated else "Completed"
     job.completed_at = now
     job.lease_expires_at = None
     db.commit()

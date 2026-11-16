@@ -42,6 +42,7 @@ class WorkerInterruptedError(Exception):
 
 @dataclass
 class JobCompletionResult:
+    is_simulated: bool = False
     midi_key: str | None = None
     musicxml_key: str | None = None
     score_json: dict[str, Any] = field(default_factory=dict)
@@ -92,10 +93,12 @@ class PhaseATestHandler:
 
         report_progress("finalizing", 90, "Finalizing (Local Worker)", "Phase A test handler completed.")
         return JobCompletionResult(
+            is_simulated=True,
             metadata_json={
                 "handler": "phase_a_test",
                 "worker_mode": "remote_worker",
-            }
+                "simulated": True,
+            },
         )
 
 
@@ -242,6 +245,7 @@ class RemoteWorkerAgent:
                 f"{self.api_base_url}/worker/jobs/{job_id}/complete",
                 json={
                     "worker_id": self.worker_id,
+                    "is_simulated": result.is_simulated,
                     "midi_key": result.midi_key,
                     "musicxml_key": result.musicxml_key,
                     "score_json": result.score_json,

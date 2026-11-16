@@ -157,8 +157,17 @@ def test_claim_concurrency_heartbeat_progress_and_complete(client, db_session):
             "midi_key": midi_key,
             "musicxml_key": xml_key,
             "duration_seconds": 12.5,
-            "score_json": {"title": "Remote Job Song", "tempo_bpm": 120, "notes": [], "tracks": [], "chords": []},
-            "metadata_json": {"note_count": 0},
+            "score_json": {
+                "title": "Remote Job Song",
+                "tempo_bpm": 120,
+                "time_signature": "4/4",
+                "key_signature": "C",
+                "duration_seconds": 12.5,
+                "tracks": [{"index": 0, "name": "Piano", "instrument": "piano", "clef": "treble", "program": 0, "muted": False}],
+                "notes": [{"id": "n1", "pitch_midi": 60, "onset_sec": 0.0, "offset_sec": 0.5, "velocity": 80, "track_index": 0}],
+                "chords": [],
+            },
+            "metadata_json": {"note_count": 1},
         },
         headers=w_headers,
     )
@@ -949,3 +958,141 @@ def test_r2_worker_download_and_export_storage_compatibility(client, db_session)
         os.environ["STORAGE_BACKEND"] = "local"
         os.environ["JOB_EXECUTION_MODE"] = "local"
         get_settings.cache_clear()
+
+
+def test_empty_or_invalid_score_cannot_mark_project_ready_and_simulated_stays_draft(client, db_session):
+    from app.models import Project, ProjectScore
+
+    user_headers, project_id, job_id, w_headers = _setup_project_and_job(client, db_session)
+    client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-1"}, headers=w_headers)
+
+    # 1. Empty score_json for non-simulated job is rejected (422)
+    r_empty = client.post(
+        f"/api/v1/worker/jobs/{job_id}/complete",
+        json={"worker_id": "worker-1", "score_json": {}},
+        headers=w_headers,
+    )
+    assert r_empty.status_code == 422
+
+    # 2. Zero-notes score_json for non-simulated job is rejected (422)
+    r_zero = client.post(
+        f"/api/v1/worker/jobs/{job_id}/complete",
+        json={"worker_id": "worker-1", "score_json": {"title": "Empty", "notes": []}},
+        headers=w_headers,
+    )
+    assert r_zero.status_code == 422
+
+    # 3. Invalid score payload is rejected (422)
+    r_bad = client.post(
+        f"/api/v1/worker/jobs/{job_id}/complete",
+        json={"worker_id": "worker-1", "score_json": {"tempo_bpm": "not-a-number"}},
+        headers=w_headers,
+    )
+    assert r_bad.status_code == 422
+
+    # Project must NOT be ready and no ProjectScore created; /score returns 404
+    db_session.expire_all()
+    proj = db_session.query(Project).filter(Project.id == project_id).first()
+    assert proj.status != "ready"
+    assert db_session.query(ProjectScore).filter(ProjectScore.project_id == project_id).count() == 0
+    assert client.get(f"/api/v1/projects/{project_id}/score", headers=user_headers).status_code == 404
+
+    # 4. Simulated PhaseATestHandler completion succeeds for job but leaves project in draft (not ready)
+    r_sim = client.post(
+        f"/api/v1/worker/jobs/{job_id}/complete",
+        json={
+            "worker_id": "worker-1",
+            "is_simulated": True,
+            "metadata_json": {"handler": "phase_a_test"},
+        },
+        headers=w_headers,
+    )
+    assert r_sim.status_code == 200
+    assert r_sim.json()["status"] == "completed"
+
+    db_session.expire_all()
+    proj_after = db_session.query(Project).filter(Project.id == project_id).first()
+    assert proj_after.status == "draft"
+    assert db_session.query(ProjectScore).filter(ProjectScore.project_id == project_id).count() == 0
+    assert client.get(f"/api/v1/projects/{project_id}/score", headers=user_headers).status_code == 404
+
+
+def test_missing_physical_musicxml_handled_separately_from_missing_db_score(client, db_session):
+    from app.models import ProjectScore
+
+    user_headers, project_id, job_id, w_headers = _setup_project_and_job(client, db_session)
+    client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-1"}, headers=w_headers)
+
+    # Save valid score + physical MusicXML
+    job_row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    xml_key = f"users/{job_row.user_id}/projects/{project_id}/musicxml/score.musicxml"
+    storage_service.save_bytes(xml_key, b"<score-partwise/>", content_type="application/vnd.recordare.musicxml+xml")
+
+    comp = client.post(
+        f"/api/v1/worker/jobs/{job_id}/complete",
+        json={
+            "worker_id": "worker-1",
+            "musicxml_key": xml_key,
+            "score_json": {
+                "title": "Valid Score",
+                "tempo_bpm": 120,
+                "time_signature": "4/4",
+                "key_signature": "C",
+                "duration_seconds": 2.0,
+                "tracks": [{"index": 0, "name": "Piano", "instrument": "piano", "clef": "treble", "program": 0, "muted": False}],
+                "notes": [{"id": "n1", "pitch_midi": 64, "onset_sec": 0.0, "offset_sec": 0.5, "velocity": 90, "track_index": 0}],
+                "chords": [],
+            },
+        },
+        headers=w_headers,
+    )
+    assert comp.status_code == 200
+
+    # Valid score returns 200 with musicxml content
+    s1 = client.get(f"/api/v1/projects/{project_id}/score", headers=user_headers)
+    assert s1.status_code == 200
+    assert s1.json()["musicxml"] == "<score-partwise/>"
+
+    # Delete physical MusicXML file while keeping ProjectScore DB row
+    storage_service.delete(xml_key)
+    assert db_session.query(ProjectScore).filter(ProjectScore.project_id == project_id).count() == 1
+
+    s2 = client.get(f"/api/v1/projects/{project_id}/score", headers=user_headers)
+    assert s2.status_code == 200
+    assert s2.json()["musicxml"] is None
+    assert len(s2.json()["score_json"]["notes"]) == 1
+
+
+def test_persistent_local_storage_root_and_relative_key_resolution(tmp_path):
+    from pathlib import Path
+
+    from app.core.config import Settings
+
+    # Custom LOCAL_STORAGE_ROOT is respected and relative keys resolve under it
+    custom_root = tmp_path / "persistent_data" / "storage_data"
+    s = Settings(ENVIRONMENT="production", LOCAL_STORAGE_ROOT=str(custom_root))
+    assert s.storage_root_path == custom_root.resolve()
+    assert s.storage_root_path.exists()
+
+    # Relative storage keys remain compatible across simulated restarts
+    old_env = os.environ.get("LOCAL_STORAGE_ROOT")
+    try:
+        os.environ["LOCAL_STORAGE_ROOT"] = str(custom_root)
+        get_settings.cache_clear()
+        key = storage_service.build_key("user-1", "proj-1", "originals", "melody.wav")
+        assert key.startswith("users/user-1/projects/proj-1/originals/")
+        storage_service.save_bytes(key, b"RIFFtest", content_type="audio/wav")
+
+        # Simulate restart by clearing settings cache and reading via relative key
+        get_settings.cache_clear()
+        assert storage_service.exists(key)
+        assert storage_service.read_bytes(key) == b"RIFFtest"
+    finally:
+        if old_env is not None:
+            os.environ["LOCAL_STORAGE_ROOT"] = old_env
+        get_settings.cache_clear()
+
+    # Production default falls back to /data/storage_data when /data exists
+    with patch.object(Path, "exists", return_value=True):
+        s_prod = Settings(ENVIRONMENT="production", LOCAL_STORAGE_ROOT="./storage_data")
+        assert str(s_prod.storage_root_path).replace("\\", "/").endswith("/data/storage_data")

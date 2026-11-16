@@ -78,7 +78,16 @@ class Settings(BaseSettings):
 
     @property
     def storage_root_path(self) -> Path:
-        path = Path(self.LOCAL_STORAGE_ROOT).resolve()
+        # In production on Railway, prefer /data/storage_data if /data volume is mounted
+        # and LOCAL_STORAGE_ROOT was not overridden to a custom path.
+        if (
+            self.ENVIRONMENT == "production"
+            and self.LOCAL_STORAGE_ROOT == "./storage_data"
+            and Path("/data").exists()
+        ):
+            path = Path("/data/storage_data").resolve()
+        else:
+            path = Path(self.LOCAL_STORAGE_ROOT).resolve()
         path.mkdir(parents=True, exist_ok=True)
         return path
 

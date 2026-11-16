@@ -43,6 +43,10 @@ export function ProjectStudioPage() {
   const [scoreData, setScoreData] = useState<ScoreData | null>(null);
   const [musicxml, setMusicxml] = useState<string | null>(null);
   const [scoreVersion, setScoreVersion] = useState<number>(1);
+  const [scoreLoadState, setScoreLoadState] = useState<
+    "idle" | "loading" | "ready" | "missing_score" | "missing_file" | "unauthorized" | "error"
+  >("idle");
+  const [scoreLoadError, setScoreLoadError] = useState<string | null>(null);
   const [undoStack, setUndoStack] = useState<ScoreData[]>([]);
   const [redoStack, setRedoStack] = useState<ScoreData[]>([]);
   const [saveStatus, setSaveStatus] = useState<"saved" | "unsaved" | "saving" | "error">("saved");
@@ -62,6 +66,8 @@ export function ProjectStudioPage() {
 
   const loadScore = useCallback(async () => {
     if (!projectId) return;
+    setScoreLoadState("loading");
+    setScoreLoadError(null);
     try {
       const res = await api.getScore(projectId);
       setScoreData(res.score_json);
@@ -70,8 +76,26 @@ export function ProjectStudioPage() {
       setUndoStack([]);
       setRedoStack([]);
       setSaveStatus("saved");
-    } catch {
-      // Score does not exist yet for new draft projects
+      setScoreLoadState(res.musicxml ? "ready" : "missing_file");
+    } catch (err) {
+      setScoreData(null);
+      setMusicxml(null);
+      if (err instanceof ApiError) {
+        if (err.status === 404) {
+          setScoreLoadState("missing_score");
+          return;
+        }
+        if (err.status === 401 || err.status === 403) {
+          setScoreLoadState("unauthorized");
+          setScoreLoadError(err.message);
+          return;
+        }
+        setScoreLoadState("error");
+        setScoreLoadError(err.message);
+        return;
+      }
+      setScoreLoadState("error");
+      setScoreLoadError("Unexpected error while loading project score.");
     }
   }, [projectId]);
 
@@ -247,12 +271,22 @@ export function ProjectStudioPage() {
   }
 
   if (projectError || !project) {
+    const isUnauthorized = projectError instanceof ApiError && (projectError.status === 401 || projectError.status === 403);
+    const isNotFound = projectError instanceof ApiError && projectError.status === 404;
     return (
       <AppShell>
         <div className="mx-auto max-w-2xl px-4 py-16 text-center space-y-4">
-          <h1 className="text-xl font-bold">Project Not Found</h1>
+          <h1 className="text-xl font-bold">
+            {isUnauthorized ? "Access Denied" : isNotFound ? "Project Not Found" : "Unable to Load Project"}
+          </h1>
           <p className="text-sm text-[#A1A1AA]">
-            This project does not exist or you do not have permission to view it.
+            {isUnauthorized
+              ? "You do not have permission to view this project."
+              : isNotFound
+                ? "This project does not exist or may have been deleted."
+                : projectError instanceof ApiError
+                  ? projectError.message
+                  : "An unexpected error occurred while loading the project."}
           </p>
           <Link to="/dashboard">
             <Button>Back to Dashboard</Button>
@@ -413,7 +447,48 @@ export function ProjectStudioPage() {
                 })}
               </div>
 
-              {activeTab === "notation" && <SheetMusicViewer musicxml={musicxml} />}
+              {activeTab === "notation" &&
+                (activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status) ? (
+                  <div className="flex h-64 flex-col items-center justify-center rounded-xl border border-[#27273A] bg-[#09090F] p-6 text-center space-y-2">
+                    <Loader2 className="h-6 w-6 animate-spin text-[#A78BFA]" />
+                    <div className="text-sm font-medium text-[#F5F3FF]">
+                      Transcription in progress: {activeJob.current_stage} ({activeJob.progress}%)
+                    </div>
+                    <p className="text-xs text-[#A1A1AA]">
+                      Sheet music will appear here automatically once a valid score is generated.
+                    </p>
+                  </div>
+                ) : scoreLoadState === "missing_file" ? (
+                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-6 text-center space-y-2">
+                    <div className="text-sm font-semibold text-amber-200">Score File Missing from Storage</div>
+                    <p className="text-xs text-amber-100/80">
+                      A score record exists in the database, but its MusicXML file could not be found in storage. You can still inspect or re-save notes from the Piano Roll, or re-run transcription.
+                    </p>
+                  </div>
+                ) : scoreLoadState === "unauthorized" ? (
+                  <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-6 text-center text-xs text-red-300">
+                    {scoreLoadError || "You are not authorized to view this score."}
+                  </div>
+                ) : scoreLoadState === "error" ? (
+                  <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-6 text-center space-y-3">
+                    <div className="text-xs text-red-300">{scoreLoadError || "Failed to load score."}</div>
+                    <Button size="sm" variant="secondary" onClick={loadScore}>
+                      Retry Loading Score
+                    </Button>
+                  </div>
+                ) : scoreLoadState === "missing_score" ? (
+                  <div className="flex h-64 flex-col items-center justify-center rounded-xl border border-[#27273A] bg-[#09090F] p-6 text-center space-y-2">
+                    <FileMusic className="h-7 w-7 text-[#A78BFA]" />
+                    <div className="text-sm font-medium text-[#F5F3FF]">No Transcription Score Generated Yet</div>
+                    <p className="max-w-md text-xs text-[#A1A1AA]">
+                      {activeJob?.status === "completed"
+                        ? "The latest worker job completed without generating a musical score (for example, a Phase A simulated test job)."
+                        : "Upload audio and run transcription to generate editable sheet music."}
+                    </p>
+                  </div>
+                ) : (
+                  <SheetMusicViewer musicxml={musicxml} />
+                ))}
 
               {activeTab === "pianoroll" &&
                 (scoreData ? (
