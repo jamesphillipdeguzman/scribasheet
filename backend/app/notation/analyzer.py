@@ -112,14 +112,22 @@ def _resolve_tempo_octave(
     return best_bpm
 
 
-def estimate_tempo(
+def estimate_tempo_with_diagnostics(
     wav_path: Path,
     tempo_mode: str = "auto",
     manual_tempo_bpm: float | None = None,
     notes: list[DetectedNote] | None = None,
-) -> tuple[float, bool]:
+) -> dict[str, object]:
+    """Estimate tempo and expose half-time/double-time candidates and ambiguity."""
     if tempo_mode == "manual" and manual_tempo_bpm is not None:
-        return round(float(manual_tempo_bpm), 1), False
+        bpm = round(float(manual_tempo_bpm), 1)
+        return {
+            "tempo_bpm": bpm,
+            "tempo_estimated": False,
+            "candidates": [{"bpm": bpm, "relation": "manual", "score": 1.0}],
+            "confidence": 1.0,
+            "ambiguous": False,
+        }
 
     try:
         y, sr = librosa.load(str(wav_path), sr=22050, mono=True, duration=120.0)
@@ -127,19 +135,70 @@ def estimate_tempo(
         tempo, _ = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
         if isinstance(tempo, np.ndarray):
             tempo = float(tempo[0]) if len(tempo) > 0 else 120.0
-        bpm = _resolve_tempo_octave(float(tempo), onset_env, sr, notes=notes)
-        if 40.0 <= bpm <= 240.0:
-            return round(bpm, 1), True
+        raw_bpm = float(tempo)
+        resolved_bpm = _resolve_tempo_octave(raw_bpm, onset_env, sr, notes=notes)
+
+        tempogram = librosa.feature.tempogram(onset_envelope=onset_env, sr=sr)
+        freqs = librosa.tempo_frequencies(tempogram.shape[0], sr=sr)
+        candidates: list[dict[str, object]] = []
+        raw_e = _tempogram_energy_at_bpm(tempogram, freqs, raw_bpm)
+        candidates.append({"bpm": round(raw_bpm, 1), "relation": "primary", "energy": round(raw_e, 4)})
+        if raw_bpm / 2.0 >= 45.0:
+            half_e = _tempogram_energy_at_bpm(tempogram, freqs, raw_bpm / 2.0)
+            candidates.append(
+                {
+                    "bpm": round(resolved_bpm if abs(resolved_bpm - raw_bpm / 2.0) < 12.0 else raw_bpm / 2.0, 1),
+                    "relation": "half_time",
+                    "energy": round(half_e, 4),
+                }
+            )
+        if raw_bpm * 2.0 <= 220.0:
+            dbl_e = _tempogram_energy_at_bpm(tempogram, freqs, raw_bpm * 2.0)
+            candidates.append({"bpm": round(raw_bpm * 2.0, 1), "relation": "double_time", "energy": round(dbl_e, 4)})
+
+        max_e = max((float(c["energy"]) for c in candidates), default=1.0) or 1.0
+        for c in candidates:
+            c["score"] = round(float(c["energy"]) / max_e, 3)
+        sorted_c = sorted(candidates, key=lambda c: float(c["score"]), reverse=True)
+        top_score = float(sorted_c[0]["score"])
+        second_score = float(sorted_c[1]["score"]) if len(sorted_c) > 1 else 0.0
+        ambiguous = len(sorted_c) > 1 and (top_score - second_score) <= 0.12
+
+        final_bpm = round(resolved_bpm, 1) if 40.0 <= resolved_bpm <= 240.0 else 120.0
+        return {
+            "tempo_bpm": final_bpm,
+            "tempo_estimated": True,
+            "candidates": sorted_c,
+            "confidence": round(max(0.0, min(1.0, top_score - 0.5 * second_score + 0.35)), 3),
+            "ambiguous": ambiguous,
+        }
     except Exception:
-        pass
-    return 120.0, True
+        return {
+            "tempo_bpm": 120.0,
+            "tempo_estimated": True,
+            "candidates": [],
+            "confidence": 0.0,
+            "ambiguous": True,
+        }
+
+
+def estimate_tempo(
+    wav_path: Path,
+    tempo_mode: str = "auto",
+    manual_tempo_bpm: float | None = None,
+    notes: list[DetectedNote] | None = None,
+) -> tuple[float, bool]:
+    diag = estimate_tempo_with_diagnostics(
+        wav_path, tempo_mode=tempo_mode, manual_tempo_bpm=manual_tempo_bpm, notes=notes
+    )
+    return float(diag["tempo_bpm"]), bool(diag["tempo_estimated"])
 
 
 def estimate_key_signature(notes: list[DetectedNote], key_setting: str = "auto") -> tuple[str, bool]:
     if key_setting != "auto":
         return key_setting, False
     if len(notes) < 3:
-        return "C", True
+        return "C major", True
 
     try:
         s = music21.stream.Stream()
@@ -149,10 +208,10 @@ def estimate_key_signature(notes: list[DetectedNote], key_setting: str = "auto")
             s.append(m_note)
         key = s.analyze("key")
         tonic = key.tonic.name.replace("-", "b")
-        mode_suffix = "m" if key.mode == "minor" else ""
-        return f"{tonic}{mode_suffix}", True
+        mode = "minor" if key.mode == "minor" else "major"
+        return f"{tonic} {mode}", True
     except Exception:
-        return "C", True
+        return "C major", True
 
 
 def quantize_seconds(
@@ -241,7 +300,8 @@ def detect_chords(notes: list[ScoreNote], tempo_bpm: float, time_signature: str)
         lowest_pitch = 128
         lowest_pc = 0
         for n, ov in active:
-            w = ov * (max(1, n.velocity) / 127.0)
+            conf_factor = float(n.confidence) if n.confidence is not None else 0.75
+            w = ov * (max(1, n.velocity) / 127.0) * max(0.25, conf_factor)
             pc = n.pitch_midi % 12
             pc_weights[pc] += w
             if n.pitch_midi < lowest_pitch:

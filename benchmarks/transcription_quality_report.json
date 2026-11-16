@@ -1,0 +1,90 @@
+{
+  "report_title": "ScribaSheet Production-Grade Music Transcription Quality Overhaul",
+  "date": "2026-11-16",
+  "pipeline_version": "2.1.0",
+  "model_version": "basic-pitch-0.4.0-nmp-onnx",
+  "reference_audio": {
+    "path": "assets/test_audio/soft-easy-piano-calming-melody_75bpm_F_major.wav",
+    "sha256": "908E18DF558BF4CC2BBDD2CBAA8E7D4DCE972B3CB24E45E59293CCD636DCF497",
+    "duration_sec": 13.2,
+    "expected_bpm": 75.0,
+    "expected_key": "F major",
+    "expected_time_signature": "4/4"
+  },
+  "historical_comparison": {
+    "pre_phase_b_d9afd2a": {
+      "report_path": "benchmarks/historical/pre_phase_b_baseline_d9afd2a.json",
+      "estimated_bpm": 143.6,
+      "estimated_key": "F",
+      "raw_notes": 111,
+      "refined_notes": 111,
+      "reattack_merges": 0,
+      "octave_ghosts_suppressed": 0,
+      "musicxml_measures_per_part": [8, 8],
+      "musicxml_overflow_measures": 16,
+      "musicxml_structural_integrity_ok": false,
+      "pdf_bytes": 9810
+    },
+    "phase_b2_f_major": {
+      "report_path": "benchmarks/phase_b2_f_major.json",
+      "estimated_bpm": 73.8,
+      "estimated_key": "F",
+      "raw_notes": 109,
+      "refined_notes": 104,
+      "reattack_merges": 4,
+      "reattack_retained": 42,
+      "octave_ghosts_suppressed": 1,
+      "musicxml_measures_per_part": [4, 4],
+      "musicxml_overflow_measures": 0,
+      "musicxml_structural_integrity_ok": true,
+      "pdf_bytes": 9513
+    },
+    "overhaul_run_20261116": {
+      "report_path": "benchmarks/runs/20261116_overhaul_f_major/report.json",
+      "run_id": "067d5e32c4a7",
+      "estimated_bpm": 73.8,
+      "tempo_confidence": 0.897,
+      "tempo_ambiguous": true,
+      "estimated_key": "F major",
+      "key_exact_match": true,
+      "raw_notes": 109,
+      "refined_notes": 100,
+      "reattack_merges": 4,
+      "reattack_retained": 42,
+      "octave_ghosts_suppressed": 5,
+      "musicxml_measures_per_part": [4, 4],
+      "musicxml_overflow_measures": 0,
+      "musicxml_structural_integrity_ok": true,
+      "pdf_bytes": 49856,
+      "pdf_engraver": "MuseScore4.exe (with ReportLab headless fallback)"
+    }
+  },
+  "status_classification": {
+    "implemented": [
+      "12-stage pipeline audit (benchmarks/transcription_pipeline_audit.md)",
+      "Transcription versioning & provenance hashes (backend/app/transcription/versioning.py)",
+      "Configurable audio preprocessing profiles & DC offset removal (backend/app/audio/processor.py)",
+      "Evidence-based octave-harmonic suppression & pedaled reattack preservation (backend/app/transcription/note_refiner.py)",
+      "Tempo candidate diagnostics & ambiguity reporting + F major/minor key formatting (backend/app/notation/analyzer.py)",
+      "MuseScore 4 CLI engraving from MusicXML with ReportLab fallback (backend/app/notation/generator.py)",
+      "Reproducible per-run benchmark directory (benchmarks/runs/20261116_overhaul_f_major/)"
+    ],
+    "tested": [
+      "39 backend pytest tests (including preprocessing profiles, octave suppression vs doubling, pedaled reattack, MIDI/MusicXML parity, tempo diagnostics, key formatting, provenance)",
+      "Ruff lint check (0 errors)"
+    ],
+    "benchmark_verified": [
+      "Fresh uncached CPU Basic Pitch ONNX run on SHA-256 verified reference WAV",
+      "Tempo resolved to 73.8 BPM (1.2 BPM error vs 75 BPM)",
+      "Key exact match: F major",
+      "MusicXML 4 measures per part, 0 overflow/underflow, 100==100 MIDI/MusicXML note parity",
+      "MuseScore 4 PDF output (49,856 bytes)"
+    ],
+    "musically_verified_by_listening": [],
+    "not_yet_implemented": [
+      "Ground-truth MIDI precision/recall/F1 evaluation (no ground-truth MIDI exists for the reference WAV)",
+      "Vocal lyric speech-to-text, forced syllable alignment, and melisma mapping (Phase 9 roadmap)",
+      "Multi-instrument full-mix separation beyond optional Demucs stem hook"
+    ]
+  }
+}

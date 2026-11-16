@@ -1,0 +1,237 @@
+{
+  "provenance": {
+    "run_id": "067d5e32c4a7",
+    "pipeline_version": "2.1.0",
+    "model_version": "basic-pitch-0.4.0-nmp-onnx",
+    "preprocessing_profile": "piano",
+    "preprocessing_config_hash": "4846fc7456179c01",
+    "refiner_config_hash": "24a1e041fa478587",
+    "wav_sha256": "908E18DF558BF4CC2BBDD2CBAA8E7D4DCE972B3CB24E45E59293CCD636DCF497",
+    "git_commit_sha": "8be2164d26e6206676220d2d4c831fe5156ab84b",
+    "git_dirty": true,
+    "expected_bpm": 75.0,
+    "expected_key": "F major",
+    "expected_time_signature": "4/4",
+    "transcription_engine": "basic_pitch",
+    "inference_provider": "CPUExecutionProvider",
+    "refiner_config": {
+      "min_duration_sec": 0.055,
+      "high_conf_short_min_duration_sec": 0.035,
+      "high_conf_short_threshold": 0.72,
+      "min_confidence": 0.28,
+      "reattack_gap_sec": 0.06,
+      "min_distinct_reattack_onset_sec": 0.11,
+      "reattack_tail_min_conf_ratio": 0.55,
+      "reattack_tail_max_duration_sec": 0.12,
+      "reattack_trim_margin_sec": 0.005,
+      "min_trimmed_duration_sec": 0.03,
+      "reattack_genuine_conf_boost": 1.15,
+      "reattack_genuine_vel_boost": 12,
+      "enable_octave_ghost_suppression": true,
+      "octave_onset_window_sec": 0.035,
+      "octave_confidence_ratio": 0.72,
+      "octave_strong_fundamental_min_conf": 0.48,
+      "octave_melodic_window_sec": 0.35,
+      "max_note_duration_sec": 6.0,
+      "enable_velocity_rescaling": true,
+      "velocity_min": 35,
+      "velocity_max": 115
+    },
+    "tempo_analysis_config": {
+      "tempo_mode": "auto",
+      "manual_tempo_bpm": null,
+      "uses_refined_notes": true
+    },
+    "source_duration_sec": 13.2,
+    "evaluation_timestamp": "2026-11-16T10:51:20.966421+00:00"
+  },
+  "audio_file": "C:\\Users\\PC\\Documents\\.WEBSITES\\scribasheet\\assets\\test_audio\\soft-easy-piano-calming-melody_75bpm_F_major.wav",
+  "audio_metadata": {
+    "source_duration_sec": 13.2,
+    "source_sample_rate": 44100,
+    "source_channels": 2,
+    "preprocessed_duration_sec": 13.2,
+    "preprocessed_sample_rate": 22050,
+    "is_silent": false
+  },
+  "tempo": {
+    "estimated_bpm": 73.8,
+    "expected_bpm": 75.0,
+    "abs_error_bpm": 1.2,
+    "ratio_to_expected": 0.984,
+    "candidates": [
+      {
+        "bpm": 152.0,
+        "relation": "primary",
+        "energy": 0.5443,
+        "score": 1.0
+      },
+      {
+        "bpm": 73.8,
+        "relation": "half_time",
+        "energy": 0.4932,
+        "score": 0.906
+      }
+    ],
+    "confidence": 0.897,
+    "ambiguous": true
+  },
+  "key": {
+    "estimated_key": "F major",
+    "expected_key": "F major",
+    "exact_match": true
+  },
+  "time_signature": "4/4",
+  "raw_notes_summary": {
+    "count": 109,
+    "min_pitch": 41,
+    "max_pitch": 86,
+    "pitch_span_semitones": 45,
+    "durations_sec": {
+      "min": 0.0696,
+      "median": 0.3947,
+      "mean": 0.5302,
+      "max": 3.0083
+    },
+    "velocities": {
+      "min": 49,
+      "mean": 71.84,
+      "max": 104
+    },
+    "confidences": {
+      "min": 0.2944,
+      "mean": 0.4985,
+      "max": 0.7939
+    },
+    "short_notes_lt_55ms": 0,
+    "suspected_octave_duplicates": 24,
+    "rapid_same_pitch_reattacks_le_60ms": 46
+  },
+  "refined_notes_summary": {
+    "count": 100,
+    "min_pitch": 41,
+    "max_pitch": 86,
+    "pitch_span_semitones": 45,
+    "durations_sec": {
+      "min": 0.0696,
+      "median": 0.4063,
+      "mean": 0.5647,
+      "max": 3.1012
+    },
+    "velocities": {
+      "min": 35,
+      "mean": 69.06,
+      "max": 115
+    },
+    "confidences": {
+      "min": 0.2944,
+      "mean": 0.5052,
+      "max": 0.7939
+    },
+    "short_notes_lt_55ms": 0,
+    "suspected_octave_duplicates": 18,
+    "rapid_same_pitch_reattacks_le_60ms": 39
+  },
+  "refiner_stats": {
+    "enabled": true,
+    "raw_count": 109,
+    "filtered_short_or_low_conf": 0,
+    "reattack_merges": 4,
+    "reattack_retained": 42,
+    "reattack_trimmed": 0,
+    "octave_ghosts_suppressed": 5,
+    "refined_count": 100
+  },
+  "score_summary": {
+    "score_note_count": 100,
+    "chord_count": 8,
+    "chord_symbols": [
+      "Fsus4",
+      "Bb",
+      "Dm7",
+      "Fmaj7",
+      "Fsus4",
+      "Bbmaj7",
+      "F",
+      "Fsus2"
+    ],
+    "chords": [
+      {
+        "measure": 1,
+        "beat": 1.0,
+        "onset_sec": 0.0,
+        "symbol": "Fsus4"
+      },
+      {
+        "measure": 1,
+        "beat": 3.0,
+        "onset_sec": 1.626,
+        "symbol": "Bb"
+      },
+      {
+        "measure": 2,
+        "beat": 1.0,
+        "onset_sec": 3.252,
+        "symbol": "Dm7"
+      },
+      {
+        "measure": 2,
+        "beat": 3.0,
+        "onset_sec": 4.878,
+        "symbol": "Fmaj7"
+      },
+      {
+        "measure": 3,
+        "beat": 1.0,
+        "onset_sec": 6.504,
+        "symbol": "Fsus4"
+      },
+      {
+        "measure": 3,
+        "beat": 3.0,
+        "onset_sec": 8.13,
+        "symbol": "Bbmaj7"
+      },
+      {
+        "measure": 4,
+        "beat": 1.0,
+        "onset_sec": 9.756,
+        "symbol": "F"
+      },
+      {
+        "measure": 4,
+        "beat": 3.0,
+        "onset_sec": 11.382,
+        "symbol": "Fsus2"
+      }
+    ]
+  },
+  "musicxml_integrity": {
+    "music21_parse_ok": true,
+    "music21_parse_error": null,
+    "music21_parts": 2,
+    "music21_measures_per_part": [
+      4,
+      4
+    ],
+    "xml_parts": 2,
+    "xml_measures_per_part": [
+      4,
+      4
+    ],
+    "overflow_measure_count": 0,
+    "underflow_measure_count": 0,
+    "overflow_measures_sample": [],
+    "underflow_measures_sample": [],
+    "structural_integrity_ok": true
+  },
+  "pdf_summary": {
+    "bytes": 49856,
+    "valid_pdf_header": true
+  },
+  "midi_summary": {
+    "bytes": 667
+  },
+  "ground_truth_eval": null,
+  "artifacts_dir": "C:\\Users\\PC\\Documents\\.WEBSITES\\scribasheet\\benchmarks\\runs\\20261116_overhaul_f_major\\artifacts"
+}

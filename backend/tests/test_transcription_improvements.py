@@ -348,3 +348,75 @@ def test_evaluator_tempo_parity_and_provenance(tmp_path: Path, monkeypatch) -> N
         assert key in prov
     assert prov["tempo_analysis_config"]["uses_refined_notes"] is True
     assert report["tempo"]["estimated_bpm"] == 90.0
+
+
+def test_preprocessing_profiles_and_dc_removal(tmp_path: Path) -> None:
+    sr = 44100
+    t = np.arange(int(1.5 * sr), dtype=np.float32) / sr
+    # 55 Hz low piano/bass tone + 0.15 DC offset
+    sig = 0.15 + 0.3 * np.sin(2.0 * np.pi * 55.0 * t)
+    src = tmp_path / "dc_low.wav"
+    out_piano = tmp_path / "piano.wav"
+    out_vocal = tmp_path / "vocal.wav"
+    _write_wav(src, sig, sr=sr)
+
+    meta_p = preprocess_to_wav(src, out_piano, target_sr=22050, profile="piano")
+    meta_v = preprocess_to_wav(src, out_vocal, target_sr=22050, profile="vocal")
+    assert meta_p.profile == "piano"
+    assert meta_v.profile == "vocal"
+    y_p, _ = sf.read(str(out_piano), dtype="float32")
+    assert abs(float(np.mean(y_p))) < 0.01
+
+
+def test_octave_suppression_preserves_legitimate_octave_doubling() -> None:
+    raw = [
+        # Legitimate octave doubling (comparable confidence and duration) -> MUST keep both
+        DetectedNote(pitch_midi=57, onset_sec=0.50, offset_sec=1.00, velocity=82, confidence=0.58),
+        DetectedNote(pitch_midi=69, onset_sec=0.50, offset_sec=1.00, velocity=80, confidence=0.56),
+        # Harmonic ghost (strong fundamental 0.72, weak overtone 0.31, shorter) -> MUST suppress upper
+        DetectedNote(pitch_midi=53, onset_sec=1.50, offset_sec=2.00, velocity=90, confidence=0.72),
+        DetectedNote(pitch_midi=77, onset_sec=1.51, offset_sec=1.75, velocity=50, confidence=0.31),
+    ]
+    res = refine_detected_notes(raw, NoteRefinerConfig())
+    pitches = [n.pitch_midi for n in res.notes]
+    assert 57 in pitches and 69 in pitches
+    assert 53 in pitches and 77 not in pitches
+    assert res.stats["octave_ghosts_suppressed"] == 1
+
+
+def test_key_formatting_tempo_diagnostics_and_versioning(tmp_path: Path) -> None:
+    from app.notation.analyzer import estimate_key_signature, estimate_tempo_with_diagnostics
+    from app.notation.generator import _parse_key_to_music21
+    from app.transcription.versioning import (
+        PIPELINE_VERSION,
+        build_transcription_provenance,
+        compute_config_hash,
+    )
+
+    f_major_notes = [
+        DetectedNote(pitch_midi=53, onset_sec=0.0, offset_sec=1.0, velocity=80, confidence=0.8),
+        DetectedNote(pitch_midi=57, onset_sec=0.0, offset_sec=1.0, velocity=80, confidence=0.8),
+        DetectedNote(pitch_midi=60, onset_sec=0.0, offset_sec=1.0, velocity=80, confidence=0.8),
+        DetectedNote(pitch_midi=65, onset_sec=1.0, offset_sec=2.0, velocity=80, confidence=0.8),
+    ]
+    key_str, est = estimate_key_signature(f_major_notes)
+    assert est is True
+    assert key_str.endswith(" major") or key_str.endswith(" minor")
+    m21_k = _parse_key_to_music21("F major")
+    assert m21_k.tonic.name == "F" and m21_k.mode == "major"
+
+    wav = tmp_path / "t.wav"
+    _write_wav(wav, np.zeros(22050, dtype=np.float32), sr=22050)
+    diag = estimate_tempo_with_diagnostics(wav, tempo_mode="manual", manual_tempo_bpm=75.0)
+    assert diag["tempo_bpm"] == 75.0
+    assert diag["ambiguous"] is False
+    assert len(diag["candidates"]) == 1
+
+    cfg1 = NoteRefinerConfig()
+    cfg2 = NoteRefinerConfig(min_duration_sec=0.08)
+    assert compute_config_hash(cfg1) != compute_config_hash(cfg2)
+    prov = build_transcription_provenance(
+        source_audio_path=wav, preprocessing_config={"profile": "piano"}, refiner_config=cfg1
+    )
+    assert prov["pipeline_version"] == PIPELINE_VERSION
+    assert len(prov["source_audio_sha256"]) == 64

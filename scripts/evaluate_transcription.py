@@ -25,10 +25,15 @@ BACKEND_DIR = REPO_ROOT / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.audio.processor import preprocess_to_wav, probe_media
+from app.audio.processor import (
+    get_preprocessing_profile,
+    preprocess_to_wav,
+    probe_media,
+)
 from app.notation.analyzer import (
     estimate_key_signature,
     estimate_tempo,
+    estimate_tempo_with_diagnostics,
 )
 from app.notation.generator import (
     build_score_data,
@@ -42,6 +47,7 @@ from app.transcription.basic_pitch_provider import (
     resolve_onnx_model_path,
     verify_onnx_cpu_runtime,
 )
+from app.transcription.versioning import build_transcription_provenance
 
 
 def _count_suspected_octave_duplicates(notes: list[DetectedNote], max_onset_diff_sec: float = 0.04) -> int:
@@ -331,9 +337,16 @@ def main() -> int:
     verify_onnx_cpu_runtime(resolve_onnx_model_path())
     raw_meta = probe_media(audio_path)
 
+    prep_profile_name = (
+        "piano"
+        if "piano" in args.instrument.lower()
+        else ("vocal" if "vocal" in args.instrument.lower() else "general")
+    )
+    prep_profile = get_preprocessing_profile(prep_profile_name)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         wav_path = Path(tmpdir) / "preprocessed.wav"
-        wav_meta = preprocess_to_wav(audio_path, wav_path)
+        wav_meta = preprocess_to_wav(audio_path, wav_path, profile=prep_profile_name)
 
         provider = BasicPitchProvider()
         tx_out = provider.transcribe(wav_path)
@@ -362,6 +375,7 @@ def main() -> int:
         if uses_refined_notes_for_tempo:
             tempo_kwargs["notes"] = refined_notes
         tempo_bpm, tempo_estimated = estimate_tempo(wav_path, **tempo_kwargs)
+        tempo_diag = estimate_tempo_with_diagnostics(wav_path, **tempo_kwargs)
         key_sig, key_estimated = estimate_key_signature(refined_notes, key_setting="auto")
 
         title = args.title or audio_path.stem
@@ -434,9 +448,21 @@ def main() -> int:
     git_prov = _get_git_provenance(REPO_ROOT)
     wav_sha256 = _compute_sha256(audio_path)
     eval_ts = datetime.now(UTC).isoformat()
+    tx_prov = build_transcription_provenance(
+        source_audio_path=audio_path,
+        preprocessing_config=prep_profile,
+        refiner_config=refiner_config_dict or {},
+        repo_root=REPO_ROOT,
+    )
 
     report: dict[str, Any] = {
         "provenance": {
+            "run_id": tx_prov["run_id"],
+            "pipeline_version": tx_prov["pipeline_version"],
+            "model_version": tx_prov["model_version"],
+            "preprocessing_profile": prep_profile_name,
+            "preprocessing_config_hash": tx_prov["preprocessing_config_hash"],
+            "refiner_config_hash": tx_prov["refiner_config_hash"],
             "wav_sha256": wav_sha256,
             "git_commit_sha": git_prov["git_commit_sha"],
             "git_dirty": git_prov["git_dirty"],
@@ -463,7 +489,12 @@ def main() -> int:
             "preprocessed_sample_rate": wav_meta.sample_rate,
             "is_silent": wav_meta.is_silent,
         },
-        "tempo": tempo_eval,
+        "tempo": {
+            **tempo_eval,
+            "candidates": tempo_diag.get("candidates", []),
+            "confidence": tempo_diag.get("confidence"),
+            "ambiguous": tempo_diag.get("ambiguous"),
+        },
         "key": key_eval,
         "time_signature": args.expected_time_signature,
         "raw_notes_summary": _summarize_notes(raw_notes),

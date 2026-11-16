@@ -29,10 +29,10 @@ from urllib.parse import urlparse
 
 import httpx
 
-from app.audio.processor import preprocess_to_wav, probe_media
+from app.audio.processor import get_preprocessing_profile, preprocess_to_wav, probe_media
 from app.notation.analyzer import (
     estimate_key_signature,
-    estimate_tempo,
+    estimate_tempo_with_diagnostics,
     get_instrument_program_and_clef,
 )
 from app.notation.generator import (
@@ -48,7 +48,8 @@ from app.transcription.basic_pitch_provider import (
     resolve_onnx_model_path,
     verify_onnx_cpu_runtime,
 )
-from app.transcription.note_refiner import refine_detected_notes
+from app.transcription.note_refiner import NoteRefinerConfig, refine_detected_notes
+from app.transcription.versioning import build_transcription_provenance
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -200,8 +201,13 @@ class RealTranscriptionHandler:
 
             # 3. Preprocess to 22.05 kHz mono WAV (25%)
             self._check_cancelled(job_id, cancel_event)
-            report_progress("preprocessing", 25, "Preprocessing Audio", "Normalizing audio to 22.05 kHz mono WAV.")
-            proc_meta = preprocess_to_wav(local_source, processed_wav, target_sr=22050)
+            prep_profile_name = (
+                "piano"
+                if "piano" in settings.instrument.lower()
+                else ("vocal" if "vocal" in settings.instrument.lower() else "general")
+            )
+            report_progress("preprocessing", 25, "Preprocessing Audio", f"Normalizing audio ({prep_profile_name} profile) to 22.05 kHz mono WAV.")
+            proc_meta = preprocess_to_wav(local_source, processed_wav, target_sr=22050, profile=prep_profile_name)
 
             # 4. Load AI model & run Basic Pitch ONNX inference (35% -> 60%)
             self._check_cancelled(job_id, cancel_event)
@@ -230,7 +236,8 @@ class RealTranscriptionHandler:
                     "No valid musical notes were detected in the audio recording.",
                 )
 
-            refinement = refine_detected_notes(t_out.notes)
+            refiner_cfg = NoteRefinerConfig()
+            refinement = refine_detected_notes(t_out.notes, config=refiner_cfg)
             refined_notes = refinement.notes or t_out.notes
 
             # 5. Extract musical notes, tempo, key, and timing (70%)
@@ -241,12 +248,21 @@ class RealTranscriptionHandler:
                 "Extracting Musical Notes",
                 f"Detected {len(t_out.notes)} raw note events ({len(refined_notes)} refined); analyzing tempo, key, and harmony.",
             )
-            tempo_bpm, tempo_est = estimate_tempo(
+            tempo_diag = estimate_tempo_with_diagnostics(
                 processed_wav, settings.tempo_mode, settings.manual_tempo_bpm, notes=refined_notes
             )
+            tempo_bpm = float(tempo_diag["tempo_bpm"])
+            tempo_est = bool(tempo_diag["tempo_estimated"])
             key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
             time_sig = "4/4" if settings.time_signature == "auto" else settings.time_signature
             time_est = settings.time_signature == "auto"
+
+            provenance = build_transcription_provenance(
+                source_audio_path=local_source,
+                preprocessing_config=get_preprocessing_profile(prep_profile_name),
+                refiner_config=refiner_cfg,
+                run_id=job_id,
+            )
 
             score_data = build_score_data(
                 title=Path(safe_name).stem or "ScribaSheet Transcription",
@@ -266,6 +282,9 @@ class RealTranscriptionHandler:
                     "raw_note_count": len(t_out.notes),
                     "note_count": len(refined_notes),
                     "refiner": refinement.stats,
+                    "tempo_diagnostics": tempo_diag,
+                    "provenance": provenance,
+                    "preprocessing_profile": prep_profile_name,
                     "is_silent_audio": proc_meta.is_silent,
                     "mode": settings.mode,
                     "concert_pitch_hz": settings.concert_pitch_hz,

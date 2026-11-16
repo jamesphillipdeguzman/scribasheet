@@ -26,12 +26,34 @@ ALLOWED_MIME_PREFIXES = (
 
 
 @dataclass
+class PreprocessingProfile:
+    name: str
+    highpass_hz: float
+    target_peak_dbfs: float
+    remove_dc: bool = True
+
+
+PREPROCESSING_PROFILES: dict[str, PreprocessingProfile] = {
+    "general": PreprocessingProfile(name="general", highpass_hz=25.0, target_peak_dbfs=-1.0),
+    "piano": PreprocessingProfile(name="piano", highpass_hz=24.0, target_peak_dbfs=-1.0),
+    "vocal": PreprocessingProfile(name="vocal", highpass_hz=70.0, target_peak_dbfs=-1.0),
+    "mixed": PreprocessingProfile(name="mixed", highpass_hz=25.0, target_peak_dbfs=-1.5),
+}
+
+
+def get_preprocessing_profile(profile: str = "general") -> PreprocessingProfile:
+    return PREPROCESSING_PROFILES.get((profile or "general").lower(), PREPROCESSING_PROFILES["general"])
+
+
+@dataclass
 class AudioMetadata:
     duration_seconds: float
     sample_rate: int
     channels: int
     has_audio_stream: bool
     is_silent: bool = False
+    profile: str = "general"
+    clipping_ratio: float = 0.0
 
 
 class MediaValidationError(Exception):
@@ -110,9 +132,15 @@ def probe_media(file_path: Path) -> AudioMetadata:
         ) from exc
 
 
-def preprocess_to_wav(input_path: Path, output_wav_path: Path, target_sr: int = 22050) -> AudioMetadata:
+def preprocess_to_wav(
+    input_path: Path,
+    output_wav_path: Path,
+    target_sr: int = 22050,
+    profile: str = "general",
+) -> AudioMetadata:
     """Extract/convert audio to normalized mono WAV at target_sr using FFmpeg (or librosa fallback)."""
     settings = get_settings()
+    prof = get_preprocessing_profile(profile)
     output_wav_path.parent.mkdir(parents=True, exist_ok=True)
 
     meta = probe_media(input_path)
@@ -154,17 +182,20 @@ def preprocess_to_wav(input_path: Path, output_wav_path: Path, target_sr: int = 
     if y.ndim > 1:
         y = np.mean(y, axis=1)
 
+    if prof.remove_dc and len(y) > 0:
+        y = (y - float(np.mean(y))).astype(np.float32)
+
+    clipping_ratio = float(np.mean(np.abs(y) >= 0.999)) if len(y) > 0 else 0.0
     rms = float(np.sqrt(np.mean(np.square(y)))) if len(y) > 0 else 0.0
     is_silent = rms < 1e-4
 
-    # Gentle zero-phase high-pass filter (~27.5 Hz, lowest piano A0) to remove sub-bass/DC rumble
-    # while preserving t = 0.0 onset alignment.
-    if not is_silent and sr > 100 and len(y) > 24:
-        sos = signal.butter(2, 27.5, btype="highpass", fs=sr, output="sos")
+    # Gentle zero-phase high-pass filter per profile (e.g. 24 Hz for piano preserves A0=27.5 Hz)
+    if not is_silent and prof.highpass_hz > 0 and sr > 100 and len(y) > 24:
+        sos = signal.butter(2, prof.highpass_hz, btype="highpass", fs=sr, output="sos")
         y = signal.sosfiltfilt(sos, y).astype(np.float32)
 
-    # Peak normalize to ~ -1.0 dBFS (0.89125) to avoid clipping and keep consistent headroom
-    target_peak = float(10.0 ** (-1.0 / 20.0))
+    # Peak normalize to profile target dBFS (preserves dynamic range without clipping)
+    target_peak = float(10.0 ** (prof.target_peak_dbfs / 20.0))
     peak = float(np.max(np.abs(y))) if len(y) > 0 else 0.0
     if peak > 1e-4:
         y = ((y / peak) * target_peak).astype(np.float32)
@@ -177,4 +208,6 @@ def preprocess_to_wav(input_path: Path, output_wav_path: Path, target_sr: int = 
         channels=1,
         has_audio_stream=True,
         is_silent=is_silent,
+        profile=prof.name,
+        clipping_ratio=round(clipping_ratio, 6),
     )

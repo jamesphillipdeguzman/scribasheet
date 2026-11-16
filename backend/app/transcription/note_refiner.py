@@ -32,7 +32,9 @@ class NoteRefinerConfig:
     reattack_genuine_vel_boost: int = 12
     enable_octave_ghost_suppression: bool = True
     octave_onset_window_sec: float = 0.035
-    octave_confidence_ratio: float = 0.90
+    octave_confidence_ratio: float = 0.72
+    octave_strong_fundamental_min_conf: float = 0.48
+    octave_melodic_window_sec: float = 0.35
     max_note_duration_sec: float = 6.0
     enable_velocity_rescaling: bool = True
     velocity_min: int = 35
@@ -53,17 +55,21 @@ def _note_conf(note: DetectedNote) -> float:
 
 def _has_melodic_neighbor(
     candidate: DetectedNote,
+    fundamental: DetectedNote,
     all_notes: list[DetectedNote],
-    window_sec: float = 0.6,
-    max_semitone_step: int = 5,
+    window_sec: float = 0.35,
+    max_semitone_step: int = 4,
 ) -> bool:
     for other in all_notes:
-        if other is candidate:
+        if other is candidate or other is fundamental:
             continue
         if abs(other.onset_sec - candidate.onset_sec) <= window_sec:
             diff = abs(other.pitch_midi - candidate.pitch_midi)
-            if 1 <= diff <= max_semitone_step:
-                return True
+            # Require a true stepwise/small-leap neighbor with reasonable confidence
+            # that is not merely a harmonic of the fundamental.
+            if 1 <= diff <= max_semitone_step and _note_conf(other) >= 0.45:
+                if abs(other.pitch_midi - fundamental.pitch_midi) not in (12, 24):
+                    return True
     return False
 
 
@@ -246,13 +252,29 @@ def refine_detected_notes(
                 high = stage_b[high_idx]
                 low_conf = _note_conf(low)
                 high_conf = _note_conf(high)
+                low_dur = max(0.01, low.offset_sec - low.onset_sec)
+                high_dur = max(0.01, high.offset_sec - high.onset_sec)
 
-                # Upper harmonic ghost check: weaker/comparable confidence and lacks independent melodic support
-                high_is_weaker = (
-                    high_conf <= low_conf * cfg.octave_confidence_ratio
-                    or (high_conf < 0.55 and high.velocity <= low.velocity)
+                # Upper harmonic ghost check: fundamental is noticeably stronger than upper octave
+                has_melodic_support = _has_melodic_neighbor(
+                    high, low, stage_b, window_sec=cfg.octave_melodic_window_sec
                 )
-                if high_is_weaker and not _has_melodic_neighbor(high, stage_b):
+                ratio_limit = (
+                    cfg.octave_confidence_ratio * 0.83
+                    if has_melodic_support
+                    else cfg.octave_confidence_ratio
+                )
+                strong_ratio_drop = (
+                    low_conf >= cfg.octave_strong_fundamental_min_conf
+                    and high_conf <= low_conf * ratio_limit
+                )
+                weak_short_overtone = (
+                    not has_melodic_support
+                    and high_conf < 0.42
+                    and high_dur <= low_dur * 0.65
+                    and high.velocity <= low.velocity
+                )
+                if strong_ratio_drop or weak_short_overtone:
                     dropped_indices.add(high_idx)
                     octave_ghosts_suppressed += 1
                     decisions.append(
@@ -277,8 +299,6 @@ def refine_detected_notes(
                     continue
 
                 # Sub-harmonic ghost check: very weak lower octave with short duration
-                low_dur = low.offset_sec - low.onset_sec
-                high_dur = high.offset_sec - high.onset_sec
                 if low_conf < 0.38 and high_conf > low_conf * 1.5 and low_dur < high_dur * 0.6:
                     dropped_indices.add(low_idx)
                     octave_ghosts_suppressed += 1

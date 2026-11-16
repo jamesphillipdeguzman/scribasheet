@@ -1,6 +1,11 @@
 import io
+import os
+import shutil
+import subprocess
+import tempfile
 import uuid
 from collections.abc import Iterable
+from pathlib import Path
 
 import music21
 import numpy as np
@@ -91,9 +96,17 @@ def build_score_data(
 
 
 def _parse_key_to_music21(key_str: str) -> music21.key.Key:
-    clean = (key_str or "C").strip()
-    is_minor = clean.endswith("m") and len(clean) > 1
-    tonic = clean[:-1] if is_minor else clean
+    clean = (key_str or "C major").strip()
+    lower = clean.lower()
+    if lower.endswith(" major"):
+        is_minor = False
+        tonic = clean[:-6].strip()
+    elif lower.endswith(" minor"):
+        is_minor = True
+        tonic = clean[:-6].strip()
+    else:
+        is_minor = clean.endswith("m") and len(clean) > 1
+        tonic = clean[:-1] if is_minor else clean
     tonic = tonic.replace("b", "-")
     try:
         return music21.key.Key(tonic, "minor" if is_minor else "major")
@@ -366,8 +379,59 @@ def _midi_to_diatonic_step(midi_pitch: int) -> int:
     return octave * 7 + _PC_TO_DIATONIC[midi_pitch % 12]
 
 
+def _find_musescore_binary() -> str | None:
+    env_bin = os.environ.get("MUSESCORE_BINARY")
+    if env_bin and Path(env_bin).exists():
+        return env_bin
+    for name in ("MuseScore4", "mscore4", "mscore", "musescore"):
+        found = shutil.which(name)
+        if found:
+            return found
+    win_default = Path(r"C:\Program Files\MuseScore 4\bin\MuseScore4.exe")
+    if win_default.exists():
+        return str(win_default)
+    return None
+
+
+def _render_pdf_via_musescore(score: ScoreData) -> bytes | None:
+    if os.environ.get("DISABLE_MUSESCORE_PDF", "").lower() in ("1", "true", "yes"):
+        return None
+    mscore_bin = _find_musescore_binary()
+    if not mscore_bin:
+        return None
+    try:
+        xml_str = score_data_to_musicxml(score)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            xml_path = tmp / "score.musicxml"
+            pdf_path = tmp / "score.pdf"
+            xml_path.write_text(xml_str, encoding="utf-8")
+            res = subprocess.run(
+                [mscore_bin, "-o", str(pdf_path), str(xml_path)],
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=False,
+            )
+            if res.returncode == 0 and pdf_path.exists():
+                pdf_bytes = pdf_path.read_bytes()
+                if pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 500:
+                    return pdf_bytes
+    except Exception:
+        return None
+    return None
+
+
 def render_score_pdf(score: ScoreData) -> bytes:
-    """Render a clean, printable multi-page PDF grand-staff sheet music document."""
+    """Render a clean, printable multi-page PDF sheet music document.
+
+    Uses MuseScore CLI engraving from MusicXML when available locally,
+    falling back to the ReportLab grand-staff renderer in headless environments.
+    """
+    musescore_pdf = _render_pdf_via_musescore(score)
+    if musescore_pdf is not None:
+        return musescore_pdf
+
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=letter)
     width, height = letter
@@ -401,7 +465,7 @@ def render_score_pdf(score: ScoreData) -> bytes:
         )
         c.drawCentredString(width / 2, height - 64, meta)
         c.setFont("Helvetica", 8)
-        c.drawRightString(width - 42, 26, f"ScribaSheet • Page {page_num}")
+        c.drawRightString(width - 42, 26, f"ScribaSheet - Page {page_num}")
         return height - 108
 
     def draw_staff_system(y_treble_top: float, measures_in_sys: int) -> None:
