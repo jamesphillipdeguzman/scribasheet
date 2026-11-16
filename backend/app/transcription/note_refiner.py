@@ -316,8 +316,9 @@ def refine_detected_notes(
 
     refined = [n for idx, n in enumerate(stage_b) if idx not in dropped_indices]
 
-    # Stage D: Dynamic velocity mapping
-    if cfg.enable_velocity_rescaling and refined:
+    # Stage D: Dynamic velocity mapping (skip rescaling when model provides no confidence scores, e.g., Transkun)
+    has_any_conf = any(n.confidence is not None for n in refined)
+    if cfg.enable_velocity_rescaling and refined and has_any_conf:
         raw_scores = [
             0.65 * float(n.velocity) + 0.35 * (_note_conf(n) * 127.0)
             for n in refined

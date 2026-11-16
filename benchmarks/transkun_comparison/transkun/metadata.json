@@ -1,0 +1,231 @@
+{
+  "provenance": {
+    "run_id": "c2e584365312",
+    "pipeline_version": "2.1.0",
+    "model_version": "basic-pitch-0.4.0-nmp-onnx",
+    "preprocessing_profile": "piano",
+    "preprocessing_config_hash": "4846fc7456179c01",
+    "refiner_config_hash": "24a1e041fa478587",
+    "wav_sha256": "908E18DF558BF4CC2BBDD2CBAA8E7D4DCE972B3CB24E45E59293CCD636DCF497",
+    "git_commit_sha": "daf47c502cf3d6f94c020e2546b4032582f94b81",
+    "git_dirty": true,
+    "expected_bpm": 75.0,
+    "expected_key": "F major",
+    "expected_time_signature": "4/4",
+    "requested_engine": "transkun",
+    "actual_engine": "transkun",
+    "fallback_used": false,
+    "fallback_reason": null,
+    "transcription_engine": "transkun",
+    "provider_model": "transkun-2.0",
+    "checkpoint_sha256": "50A80010EFFC2A59FFCD068A95CD2B29BD7F23A27A3515BC3CCD209C89A3D44C",
+    "inference_provider": "PyTorch (cpu)",
+    "inference_duration_sec": 23.506,
+    "python_version": "3.12.10",
+    "refiner_config": {
+      "min_duration_sec": 0.055,
+      "high_conf_short_min_duration_sec": 0.035,
+      "high_conf_short_threshold": 0.72,
+      "min_confidence": 0.28,
+      "reattack_gap_sec": 0.06,
+      "min_distinct_reattack_onset_sec": 0.11,
+      "reattack_tail_min_conf_ratio": 0.55,
+      "reattack_tail_max_duration_sec": 0.12,
+      "reattack_trim_margin_sec": 0.005,
+      "min_trimmed_duration_sec": 0.03,
+      "reattack_genuine_conf_boost": 1.15,
+      "reattack_genuine_vel_boost": 12,
+      "enable_octave_ghost_suppression": true,
+      "octave_onset_window_sec": 0.035,
+      "octave_confidence_ratio": 0.72,
+      "octave_strong_fundamental_min_conf": 0.48,
+      "octave_melodic_window_sec": 0.35,
+      "max_note_duration_sec": 6.0,
+      "enable_velocity_rescaling": true,
+      "velocity_min": 35,
+      "velocity_max": 115
+    },
+    "tempo_analysis_config": {
+      "tempo_mode": "auto",
+      "manual_tempo_bpm": null,
+      "uses_refined_notes": true
+    },
+    "source_duration_sec": 13.2,
+    "evaluation_timestamp": "2026-11-16T11:04:34.603524+00:00"
+  },
+  "audio_file": "C:\\Users\\PC\\Documents\\.WEBSITES\\scribasheet\\assets\\test_audio\\soft-easy-piano-calming-melody_75bpm_F_major.wav",
+  "audio_metadata": {
+    "source_duration_sec": 13.2,
+    "source_sample_rate": 44100,
+    "source_channels": 2,
+    "preprocessed_duration_sec": 13.2,
+    "preprocessed_sample_rate": 44100,
+    "is_silent": false
+  },
+  "tempo": {
+    "estimated_bpm": 73.8,
+    "expected_bpm": 75.0,
+    "abs_error_bpm": 1.2,
+    "ratio_to_expected": 0.984,
+    "candidates": [
+      {
+        "bpm": 152.0,
+        "relation": "primary",
+        "energy": 0.5443,
+        "score": 1.0
+      },
+      {
+        "bpm": 73.8,
+        "relation": "half_time",
+        "energy": 0.4931,
+        "score": 0.906
+      }
+    ],
+    "confidence": 0.897,
+    "ambiguous": true
+  },
+  "key": {
+    "estimated_key": "F major",
+    "expected_key": "F major",
+    "exact_match": true
+  },
+  "time_signature": "4/4",
+  "raw_notes_summary": {
+    "count": 52,
+    "min_pitch": 41,
+    "max_pitch": 86,
+    "pitch_span_semitones": 45,
+    "durations_sec": {
+      "min": 0.0758,
+      "median": 0.7423,
+      "mean": 1.0815,
+      "max": 4.1652
+    },
+    "velocities": {
+      "min": 40,
+      "mean": 58.65,
+      "max": 88
+    },
+    "confidences": {
+      "min": null,
+      "mean": null,
+      "max": null
+    },
+    "short_notes_lt_55ms": 0,
+    "suspected_octave_duplicates": 3,
+    "rapid_same_pitch_reattacks_le_60ms": 1
+  },
+  "refined_notes_summary": {
+    "count": 52,
+    "min_pitch": 41,
+    "max_pitch": 86,
+    "pitch_span_semitones": 45,
+    "durations_sec": {
+      "min": 0.0758,
+      "median": 0.7423,
+      "mean": 1.0815,
+      "max": 4.1652
+    },
+    "velocities": {
+      "min": 40,
+      "mean": 58.65,
+      "max": 88
+    },
+    "confidences": {
+      "min": null,
+      "mean": null,
+      "max": null
+    },
+    "short_notes_lt_55ms": 0,
+    "suspected_octave_duplicates": 3,
+    "rapid_same_pitch_reattacks_le_60ms": 1
+  },
+  "refiner_stats": {
+    "enabled": true,
+    "raw_count": 52,
+    "filtered_short_or_low_conf": 0,
+    "reattack_merges": 0,
+    "reattack_retained": 1,
+    "reattack_trimmed": 0,
+    "octave_ghosts_suppressed": 0,
+    "refined_count": 52
+  },
+  "score_summary": {
+    "score_note_count": 52,
+    "chord_count": 6,
+    "chord_symbols": [
+      "Fsus4",
+      "Dm7",
+      "Fmaj7",
+      "Bbsus2",
+      "Bbmaj7",
+      "F"
+    ],
+    "chords": [
+      {
+        "measure": 1,
+        "beat": 1.0,
+        "onset_sec": 0.0,
+        "symbol": "Fsus4"
+      },
+      {
+        "measure": 2,
+        "beat": 1.0,
+        "onset_sec": 3.252,
+        "symbol": "Dm7"
+      },
+      {
+        "measure": 2,
+        "beat": 3.0,
+        "onset_sec": 4.878,
+        "symbol": "Fmaj7"
+      },
+      {
+        "measure": 3,
+        "beat": 1.0,
+        "onset_sec": 6.504,
+        "symbol": "Bbsus2"
+      },
+      {
+        "measure": 3,
+        "beat": 3.0,
+        "onset_sec": 8.13,
+        "symbol": "Bbmaj7"
+      },
+      {
+        "measure": 4,
+        "beat": 1.0,
+        "onset_sec": 9.756,
+        "symbol": "F"
+      }
+    ]
+  },
+  "musicxml_integrity": {
+    "music21_parse_ok": true,
+    "music21_parse_error": null,
+    "music21_parts": 2,
+    "music21_measures_per_part": [
+      5,
+      5
+    ],
+    "xml_parts": 2,
+    "xml_measures_per_part": [
+      5,
+      5
+    ],
+    "overflow_measure_count": 0,
+    "underflow_measure_count": 0,
+    "overflow_measures_sample": [],
+    "underflow_measures_sample": [],
+    "structural_integrity_ok": true
+  },
+  "pdf_summary": {
+    "bytes": 46499,
+    "valid_pdf_header": true
+  },
+  "midi_summary": {
+    "bytes": 381
+  },
+  "ground_truth_eval": null,
+  "artifacts_dir": "C:\\Users\\PC\\Documents\\.WEBSITES\\scribasheet\\benchmarks\\transkun_comparison\\transkun"
+}

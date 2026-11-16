@@ -8,9 +8,11 @@ import hashlib
 import inspect
 import itertools
 import json
+import platform
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -43,9 +45,13 @@ from app.notation.generator import (
 )
 from app.transcription.base import DetectedNote
 from app.transcription.basic_pitch_provider import (
-    BasicPitchProvider,
     resolve_onnx_model_path,
     verify_onnx_cpu_runtime,
+)
+from app.transcription.provider_factory import (
+    get_target_sample_rate_for_engine,
+    resolve_requested_engine,
+    transcribe_with_provider,
 )
 from app.transcription.versioning import build_transcription_provenance
 
@@ -317,6 +323,8 @@ def main() -> int:
     parser.add_argument("--expected-key", type=str, default=None)
     parser.add_argument("--expected-time-signature", type=str, default="4/4")
     parser.add_argument("--instrument", type=str, default="piano")
+    parser.add_argument("--engine", type=str, default=None, choices=["basic_pitch", "transkun"])
+    parser.add_argument("--allow-fallback", action="store_true", default=False)
     parser.add_argument("--title", type=str, default=None)
     parser.add_argument("--output", required=True, type=Path, help="Output JSON report path")
     parser.add_argument("--artifacts-dir", type=Path, default=None, help="Directory to save MIDI/MusicXML/PDF/raw JSON")
@@ -334,7 +342,10 @@ def main() -> int:
     artifacts_dir = (args.artifacts_dir or (output_path.parent / f"{output_path.stem}_artifacts")).resolve()
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    verify_onnx_cpu_runtime(resolve_onnx_model_path())
+    requested_engine = resolve_requested_engine(args.engine)
+    target_sr = get_target_sample_rate_for_engine(requested_engine)
+    if requested_engine == "basic_pitch" or args.allow_fallback:
+        verify_onnx_cpu_runtime(resolve_onnx_model_path())
     raw_meta = probe_media(audio_path)
 
     prep_profile_name = (
@@ -346,10 +357,16 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         wav_path = Path(tmpdir) / "preprocessed.wav"
-        wav_meta = preprocess_to_wav(audio_path, wav_path, profile=prep_profile_name)
+        wav_meta = preprocess_to_wav(audio_path, wav_path, target_sr=target_sr, profile=prep_profile_name)
 
-        provider = BasicPitchProvider()
-        tx_out = provider.transcribe(wav_path)
+        t_inf_start = time.perf_counter()
+        exec_res = transcribe_with_provider(
+            wav_path,
+            engine=requested_engine,
+            allow_fallback=args.allow_fallback,
+        )
+        inference_duration_sec = round(time.perf_counter() - t_inf_start, 3)
+        tx_out = exec_res.output
         raw_notes = tx_out.notes
 
         # Use note refiner if available in codebase
@@ -469,8 +486,16 @@ def main() -> int:
             "expected_bpm": args.expected_bpm,
             "expected_key": args.expected_key,
             "expected_time_signature": args.expected_time_signature,
+            "requested_engine": exec_res.requested_engine,
+            "actual_engine": exec_res.actual_engine,
+            "fallback_used": exec_res.fallback_used,
+            "fallback_reason": exec_res.fallback_reason,
             "transcription_engine": tx_out.engine,
+            "provider_model": tx_out.metadata.get("model"),
+            "checkpoint_sha256": tx_out.metadata.get("checkpoint_sha256"),
             "inference_provider": tx_out.metadata.get("provider", "CPUExecutionProvider"),
+            "inference_duration_sec": inference_duration_sec,
+            "python_version": platform.python_version(),
             "refiner_config": refiner_config_dict,
             "tempo_analysis_config": {
                 "tempo_mode": "auto",
