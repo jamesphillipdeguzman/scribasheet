@@ -259,3 +259,59 @@ def test_provider_factory_returns_expected_classes() -> None:
     with pytest.raises(TranscriptionInferenceError) as exc_info:
         get_transcription_provider("unknown_engine")
     assert exc_info.value.code == "UNSUPPORTED_ENGINE"
+
+
+def test_transkun_velocity_duration_and_note_off_survive_midi_and_wav_export() -> None:
+    import mido
+
+    from app.notation.generator import render_score_wav
+
+    detected = [
+        DetectedNote(pitch_midi=53, onset_sec=0.00, offset_sec=0.80, velocity=42, confidence=None),
+        DetectedNote(pitch_midi=53, onset_sec=0.80, offset_sec=1.60, velocity=78, confidence=None),
+        DetectedNote(pitch_midi=69, onset_sec=0.00, offset_sec=1.20, velocity=64, confidence=None),
+        DetectedNote(pitch_midi=72, onset_sec=1.20, offset_sec=2.40, velocity=88, confidence=None),
+    ]
+    refined = refine_detected_notes(detected).notes
+    assert len(refined) == 4
+    assert [n.velocity for n in refined] == [42, 64, 78, 88]
+
+    score = build_score_data(
+        title="Velocity & Duration Preservation",
+        detected_notes=refined,
+        tempo_bpm=75.0,
+        tempo_estimated=True,
+        time_signature="4/4",
+        time_signature_estimated=True,
+        key_signature="F major",
+        key_signature_estimated=True,
+        duration_seconds=2.5,
+        instrument="piano",
+        quantization="sixteenth",
+    )
+    midi_bytes = score_data_to_midi_bytes(score)
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
+    pm_notes = sorted(
+        (n.pitch, round(n.start, 3), round(n.end - n.start, 3), n.velocity)
+        for inst in pm.instruments
+        for n in inst.notes
+    )
+    assert len(pm_notes) == 4
+    assert sorted(n[3] for n in pm_notes) == [42, 64, 78, 88]
+    # Repeated F3 (53) notes remain two separate note_on / note_off pairs
+    f3_notes = [n for n in pm_notes if n[0] == 53]
+    assert len(f3_notes) == 2
+    assert f3_notes[0][2] >= 0.75
+    assert f3_notes[1][2] >= 0.75
+
+    mf = mido.MidiFile(file=io.BytesIO(midi_bytes))
+    on_msgs = [m for tr in mf.tracks for m in tr if m.type == "note_on" and m.velocity > 0]
+    off_msgs = [m for tr in mf.tracks for m in tr if m.type == "note_off" or (m.type == "note_on" and m.velocity == 0)]
+    assert len(on_msgs) == 4
+    assert len(off_msgs) == 4
+
+    wav_bytes = render_score_wav(score)
+    assert wav_bytes[:4] == b"RIFF"
+    audio, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
+    assert sr == 22050
+    assert float(np.max(np.abs(audio))) > 0.05
