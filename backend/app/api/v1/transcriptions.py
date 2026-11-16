@@ -1,0 +1,196 @@
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_user, get_owned_project, get_user_usage_metrics
+from app.core.security import decode_token
+from app.db.session import SessionLocal, get_db
+from app.models import MediaAsset, Project, TranscriptionJob, User
+from app.schemas.transcription import TranscriptionCreateRequest, TranscriptionJobResponse
+from app.workers.job_runner import enqueue_transcription_job
+from app.workers.ws_manager import job_ws_manager
+
+router = APIRouter(tags=["Transcriptions"])
+
+
+@router.post(
+    "/projects/{project_id}/transcriptions",
+    response_model=TranscriptionJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def start_transcription(
+    payload: TranscriptionCreateRequest,
+    project: Project = Depends(get_owned_project),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    usage = get_user_usage_metrics(db, current_user)
+    if float(usage["monthly_minutes_used"]) >= float(usage["monthly_minutes_limit"]):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Monthly transcription allowance reached ({usage['monthly_minutes_limit']} min) "
+                f"for your {current_user.plan_tier} plan."
+            ),
+        )
+
+    asset = None
+    if payload.source_asset_id:
+        asset = (
+            db.query(MediaAsset)
+            .filter(MediaAsset.id == payload.source_asset_id, MediaAsset.project_id == project.id)
+            .first()
+        )
+    else:
+        asset = (
+            db.query(MediaAsset)
+            .filter(MediaAsset.project_id == project.id, MediaAsset.asset_type == "original")
+            .order_by(MediaAsset.created_at.desc())
+            .first()
+        )
+    if not asset:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please upload or record an audio/video file before starting transcription.",
+        )
+
+    job = TranscriptionJob(
+        project_id=project.id,
+        user_id=current_user.id,
+        source_asset_id=asset.id,
+        status="queued",
+        progress=0,
+        current_stage="Queued",
+        engine="basic_pitch",
+        settings_json=payload.settings.model_dump(),
+    )
+    project.status = "processing"
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    task_id = enqueue_transcription_job(job.id)
+    if task_id:
+        job.celery_task_id = task_id
+        db.commit()
+        db.refresh(job)
+
+    return job
+
+
+@router.get("/projects/{project_id}/transcriptions", response_model=list[TranscriptionJobResponse])
+def list_project_transcriptions(
+    project: Project = Depends(get_owned_project),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(TranscriptionJob)
+        .filter(TranscriptionJob.project_id == project.id)
+        .order_by(TranscriptionJob.created_at.desc())
+        .all()
+    )
+
+
+@router.get("/transcriptions/{job_id}", response_model=TranscriptionJobResponse)
+def get_transcription_job(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = db.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcription job not found.")
+    if job.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+    return job
+
+
+@router.post("/transcriptions/{job_id}/cancel", response_model=TranscriptionJobResponse)
+def cancel_transcription_job(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = db.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcription job not found.")
+    if job.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+    if job.status in ("completed", "failed", "cancelled"):
+        return job
+
+    job.status = "cancelled"
+    job.current_stage = "Cancelled"
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@router.post("/transcriptions/{job_id}/retry", response_model=TranscriptionJobResponse, status_code=status.HTTP_202_ACCEPTED)
+def retry_transcription_job(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    old_job = db.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    if not old_job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcription job not found.")
+    if old_job.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+
+    new_job = TranscriptionJob(
+        project_id=old_job.project_id,
+        user_id=current_user.id,
+        source_asset_id=old_job.source_asset_id,
+        status="queued",
+        progress=0,
+        current_stage="Queued",
+        engine=old_job.engine,
+        settings_json=old_job.settings_json,
+    )
+    db.add(new_job)
+    db.commit()
+    db.refresh(new_job)
+
+    task_id = enqueue_transcription_job(new_job.id)
+    if task_id:
+        new_job.celery_task_id = task_id
+        db.commit()
+        db.refresh(new_job)
+    return new_job
+
+
+@router.websocket("/ws/jobs/{job_id}")
+async def job_updates_ws(websocket: WebSocket, job_id: str, token: str | None = None):
+    if not token:
+        await websocket.close(code=1008)
+        return
+    try:
+        claims = decode_token(token)
+        user_id = claims.get("sub")
+    except Exception:
+        await websocket.close(code=1008)
+        return
+
+    db = SessionLocal()
+    try:
+        job = db.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+        if not job or job.user_id != user_id:
+            await websocket.close(code=1008)
+            return
+        initial_payload = {
+            "job_id": job.id,
+            "status": job.status,
+            "progress": job.progress,
+            "current_stage": job.current_stage,
+            "error_message": job.error_message,
+        }
+    finally:
+        db.close()
+
+    await job_ws_manager.connect(job_id, websocket)
+    try:
+        await websocket.send_json(initial_payload)
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        job_ws_manager.disconnect(job_id, websocket)
