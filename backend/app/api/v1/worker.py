@@ -33,6 +33,8 @@ ACTIVE_WORKER_STATUSES = (
     "finalizing",
 )
 
+TERMINAL_JOB_STATUSES = ("completed", "failed", "cancelled")
+
 
 def require_worker_token(
     authorization: str | None = Header(default=None),
@@ -60,6 +62,14 @@ def require_worker_token(
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
 
 
 def _validate_project_key(key: str | None, user_id: str, project_id: str) -> str | None:
@@ -105,14 +115,23 @@ class WorkerFailRequest(BaseModel):
     error_message: str = Field(default="Worker reported a processing failure.", max_length=4000)
 
 
-def _get_claimed_job(db: Session, job_id: str, worker_id: str) -> TranscriptionJob:
+def _get_active_claimed_job(db: Session, job_id: str, worker_id: str, now: datetime) -> TranscriptionJob:
+    """Validate job existence, terminal state, worker ownership, and active non-expired lease."""
     job = db.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcription job not found.")
+    if job.status in TERMINAL_JOB_STATUSES:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Job is already {job.status}.")
     if job.locked_by_worker != worker_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Job is not currently claimed by this worker.",
+        )
+    lease_exp = _ensure_utc(job.lease_expires_at)
+    if lease_exp is None or lease_exp < now:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Worker lease has expired.",
         )
     return job
 
@@ -126,22 +145,58 @@ def claim_next_job(
     settings = get_settings()
     now = _utcnow()
     lease_expires = now + timedelta(seconds=settings.WORKER_LEASE_SECONDS)
+    max_attempts = max(1, settings.MAX_JOB_ATTEMPTS)
 
-    # 1. Recover expired leases atomically before selecting the next queued job
-    db.execute(
-        update(TranscriptionJob)
-        .where(
+    # 1. Atomically recover expired leases (and enforce max_attempts on abandoned jobs)
+    expired_jobs = (
+        db.query(TranscriptionJob.id, TranscriptionJob.project_id, TranscriptionJob.attempt_count)
+        .filter(
             TranscriptionJob.status.in_(ACTIVE_WORKER_STATUSES),
             TranscriptionJob.lease_expires_at.is_not(None),
             TranscriptionJob.lease_expires_at < now,
         )
-        .values(
-            status="queued",
-            current_stage="Queued (lease recovered)",
-            locked_by_worker=None,
-            lease_expires_at=None,
-        )
+        .all()
     )
+    for exp_id, exp_project_id, attempts in expired_jobs:
+        if attempts >= max_attempts:
+            res = db.execute(
+                update(TranscriptionJob)
+                .where(
+                    TranscriptionJob.id == exp_id,
+                    TranscriptionJob.status.in_(ACTIVE_WORKER_STATUSES),
+                    TranscriptionJob.lease_expires_at < now,
+                )
+                .values(
+                    status="failed",
+                    current_stage="Failed",
+                    error_code="MAX_ATTEMPTS_EXCEEDED",
+                    error_message=f"Job exceeded maximum worker attempts ({max_attempts}) after lease expiration.",
+                    locked_by_worker=None,
+                    lease_expires_at=None,
+                    completed_at=now,
+                )
+            )
+            if res.rowcount == 1:
+                db.execute(
+                    update(Project)
+                    .where(Project.id == exp_project_id)
+                    .values(status="failed")
+                )
+        else:
+            db.execute(
+                update(TranscriptionJob)
+                .where(
+                    TranscriptionJob.id == exp_id,
+                    TranscriptionJob.status.in_(ACTIVE_WORKER_STATUSES),
+                    TranscriptionJob.lease_expires_at < now,
+                )
+                .values(
+                    status="queued",
+                    current_stage="Queued (lease recovered)",
+                    locked_by_worker=None,
+                    lease_expires_at=None,
+                )
+            )
     db.commit()
 
     # 2. Attempt atomic conditional claim of the oldest queued job
@@ -232,12 +287,10 @@ def heartbeat_job(
     _: str = Depends(require_worker_token),
     db: Session = Depends(get_db),
 ):
-    job = _get_claimed_job(db, job_id, payload.worker_id)
-    if job.status in ("completed", "failed", "cancelled"):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Job is already {job.status}.")
+    now = _utcnow()
+    job = _get_active_claimed_job(db, job_id, payload.worker_id, now)
 
     settings = get_settings()
-    now = _utcnow()
     job.last_heartbeat_at = now
     job.lease_expires_at = now + timedelta(seconds=settings.WORKER_LEASE_SECONDS)
     db.commit()
@@ -255,15 +308,13 @@ def report_job_progress(
     _: str = Depends(require_worker_token),
     db: Session = Depends(get_db),
 ):
-    job = _get_claimed_job(db, job_id, payload.worker_id)
-    if job.status in ("completed", "failed", "cancelled"):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Job is already {job.status}.")
+    now = _utcnow()
+    job = _get_active_claimed_job(db, job_id, payload.worker_id, now)
 
     if payload.status not in ACTIVE_WORKER_STATUSES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid active job status.")
 
     settings = get_settings()
-    now = _utcnow()
     job.status = payload.status
     job.progress = payload.progress
     job.current_stage = payload.current_stage
@@ -298,21 +349,28 @@ def complete_job(
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcription job not found.")
 
-    # Idempotent completion guard
+    if job.status in ("failed", "cancelled"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot complete job in terminal status '{job.status}'.",
+        )
+
+    # Idempotent completion guard for already-completed jobs
     if job.status == "completed":
+        if job.locked_by_worker and job.locked_by_worker != payload.worker_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Job was completed by another worker.",
+            )
         return {"job_id": job.id, "status": "completed", "idempotent": True}
 
-    if job.locked_by_worker != payload.worker_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Job is not currently claimed by this worker.",
-        )
+    now = _utcnow()
+    job = _get_active_claimed_job(db, job_id, payload.worker_id, now)
 
     midi_key = _validate_project_key(payload.midi_key, job.user_id, job.project_id)
     xml_key = _validate_project_key(payload.musicxml_key, job.user_id, job.project_id)
 
     project = db.query(Project).filter(Project.id == job.project_id).first()
-    now = _utcnow()
 
     midi_asset_id: str | None = None
     if midi_key:
@@ -422,16 +480,23 @@ def fail_job(
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcription job not found.")
 
-    if job.status == "failed":
-        return {"job_id": job.id, "status": "failed", "idempotent": True}
-
-    if job.locked_by_worker != payload.worker_id:
+    if job.status in ("completed", "cancelled"):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Job is not currently claimed by this worker.",
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot fail job in terminal status '{job.status}'.",
         )
 
+    if job.status == "failed":
+        if job.locked_by_worker and job.locked_by_worker != payload.worker_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Job was failed by another worker.",
+            )
+        return {"job_id": job.id, "status": "failed", "idempotent": True}
+
     now = _utcnow()
+    job = _get_active_claimed_job(db, job_id, payload.worker_id, now)
+
     job.status = "failed"
     job.current_stage = "Failed"
     job.error_code = payload.error_code

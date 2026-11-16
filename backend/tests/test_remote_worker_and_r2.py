@@ -289,3 +289,257 @@ def test_worker_agent_run_once_end_to_end(client, db_session):
     job_row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
     assert job_row.status == "completed"
     assert job_row.locked_by_worker == "win11-test-pc"
+
+
+def test_strict_lease_expiration_blocks_heartbeat_progress_complete_and_fail(client, db_session):
+    _, _, job_id, w_headers = _setup_project_and_job(client, db_session)
+
+    c1 = client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-1"}, headers=w_headers)
+    assert c1.json()["job"]["id"] == job_id
+
+    # Expire the lease without another worker reclaiming yet
+    job_row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    job_row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=5)
+    db_session.commit()
+
+    # Worker 1 must be rejected on heartbeat, progress, complete, and fail even before reclaim
+    assert (
+        client.post(
+            f"/api/v1/worker/jobs/{job_id}/heartbeat",
+            json={"worker_id": "worker-1"},
+            headers=w_headers,
+        ).status_code
+        == 409
+    )
+    assert (
+        client.post(
+            f"/api/v1/worker/jobs/{job_id}/progress",
+            json={"worker_id": "worker-1", "status": "preprocessing", "progress": 50, "current_stage": "Preprocessing"},
+            headers=w_headers,
+        ).status_code
+        == 409
+    )
+    assert (
+        client.post(
+            f"/api/v1/worker/jobs/{job_id}/complete",
+            json={"worker_id": "worker-1"},
+            headers=w_headers,
+        ).status_code
+        == 409
+    )
+    assert (
+        client.post(
+            f"/api/v1/worker/jobs/{job_id}/fail",
+            json={"worker_id": "worker-1", "error_code": "ERR", "error_message": "Late fail"},
+            headers=w_headers,
+        ).status_code
+        == 409
+    )
+
+
+def test_stale_worker_rejected_after_reclaim_and_no_resurrection_after_fail_or_cancel(client, db_session):
+    user_headers, _, job_id, w_headers = _setup_project_and_job(client, db_session)
+
+    # Worker 1 claims, then lease expires, then Worker 2 reclaims
+    client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-1"}, headers=w_headers)
+    job_row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    job_row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=10)
+    db_session.commit()
+
+    c2 = client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-2"}, headers=w_headers)
+    assert c2.json()["job"]["id"] == job_id
+
+    # Stale Worker 1 is rejected with 403 on all endpoints
+    assert (
+        client.post(f"/api/v1/worker/jobs/{job_id}/heartbeat", json={"worker_id": "worker-1"}, headers=w_headers).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/api/v1/worker/jobs/{job_id}/progress",
+            json={"worker_id": "worker-1", "status": "transcribing", "progress": 70, "current_stage": "Transcribing"},
+            headers=w_headers,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(f"/api/v1/worker/jobs/{job_id}/complete", json={"worker_id": "worker-1"}, headers=w_headers).status_code
+        == 403
+    )
+
+    # Worker 2 fails the job -> Worker 2 cannot later complete/resurrect it
+    assert (
+        client.post(
+            f"/api/v1/worker/jobs/{job_id}/fail",
+            json={"worker_id": "worker-2", "error_code": "BAD_AUDIO", "error_message": "Corrupt"},
+            headers=w_headers,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(f"/api/v1/worker/jobs/{job_id}/complete", json={"worker_id": "worker-2"}, headers=w_headers).status_code
+        == 409
+    )
+
+    # Cancelled job also cannot be completed or heartbeated
+    user2_headers, _, job2_id, _ = _setup_project_and_job(client, db_session)
+    client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-2"}, headers=w_headers)
+    assert client.post(f"/api/v1/transcriptions/{job2_id}/cancel", headers=user2_headers).status_code == 200
+    assert (
+        client.post(f"/api/v1/worker/jobs/{job2_id}/heartbeat", json={"worker_id": "worker-2"}, headers=w_headers).status_code
+        == 409
+    )
+    assert (
+        client.post(f"/api/v1/worker/jobs/{job2_id}/complete", json={"worker_id": "worker-2"}, headers=w_headers).status_code
+        == 409
+    )
+
+
+def test_max_job_attempts_enforced_on_repeated_lease_expiration(client, db_session):
+    os.environ["MAX_JOB_ATTEMPTS"] = "3"
+    get_settings.cache_clear()
+    _, _, job_id, w_headers = _setup_project_and_job(client, db_session)
+
+    for expected_attempt in (1, 2, 3):
+        c = client.post("/api/v1/worker/jobs/claim", json={"worker_id": f"worker-{expected_attempt}"}, headers=w_headers)
+        assert c.json()["job"] is not None
+        assert c.json()["job"]["attempt_count"] == expected_attempt
+        # Expire lease
+        row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+        row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=10)
+        db_session.commit()
+
+    # 4th claim should mark the abandoned job permanently failed and return None
+    c4 = client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-4"}, headers=w_headers)
+    assert c4.status_code == 200
+    assert c4.json()["job"] is None
+
+    db_session.expire_all()
+    final_row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    assert final_row.status == "failed"
+    assert final_row.error_code == "MAX_ATTEMPTS_EXCEEDED"
+    assert final_row.locked_by_worker is None
+
+
+def test_concurrent_lease_recovery_and_claim(client, db_session):
+    import concurrent.futures
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.session import get_db
+    from app.main import app
+
+    _, _, job_id, w_headers = _setup_project_and_job(client, db_session)
+    client.post("/api/v1/worker/jobs/claim", json={"worker_id": "initial-worker"}, headers=w_headers)
+
+    row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=10)
+    db_session.commit()
+
+    LocalSession = sessionmaker(autocommit=False, autoflush=False, bind=db_session.get_bind())
+
+    def _per_request_db():
+        db = LocalSession()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = _per_request_db
+    with TestClient(app) as concurrent_client:
+        def _attempt(wid: str):
+            return concurrent_client.post("/api/v1/worker/jobs/claim", json={"worker_id": wid}, headers=w_headers).json()["job"]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(_attempt, "racer-1")
+            f2 = pool.submit(_attempt, "racer-2")
+            r1, r2 = f1.result(), f2.result()
+
+    claimed = [r for r in (r1, r2) if r is not None]
+    assert len(claimed) == 1
+    assert claimed[0]["id"] == job_id
+
+
+def test_worker_agent_cooperative_cancel_on_lease_loss_and_reconnect(client, db_session):
+    from app.worker_agent import PhaseATestHandler
+
+    _, _, job_id, w_headers = _setup_project_and_job(client, db_session, worker_token="coop-token")
+
+    # Handler runs 1.5s, heartbeat runs every 0.25s; we expire & reclaim mid-flight to trigger 403 on heartbeat
+    agent_http = httpx.Client(transport=client._transport, base_url="http://testserver")
+    agent = RemoteWorkerAgent(
+        api_base_url="http://testserver/api/v1",
+        worker_token="coop-token",
+        worker_id="coop-worker",
+        heartbeat_interval_sec=0.2,
+        handler=PhaseATestHandler(test_duration_sec=1.5),
+        http_client=agent_http,
+    )
+
+    import threading
+    import time
+
+    def _steal_lease():
+        time.sleep(0.35)
+        row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+        row.locked_by_worker = "other-worker"
+        db_session.commit()
+
+    t = threading.Thread(target=_steal_lease, daemon=True)
+    t.start()
+    agent.run_once()
+    t.join(timeout=2.0)
+
+    db_session.expire_all()
+    row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    # Original worker must NOT have marked the stolen job completed or failed
+    assert row.status != "completed"
+    assert row.locked_by_worker == "other-worker"
+
+
+def test_r2_confirm_missing_object_and_unauthorized_asset_access(client, db_session):
+    os.environ["STORAGE_BACKEND"] = "s3"
+    get_settings.cache_clear()
+    try:
+        reg1 = client.post(
+            "/api/v1/auth/register",
+            json={"email": "owner_r2@example.com", "password": "StrongPassword123!", "display_name": "Owner"},
+        )
+        h1 = {"Authorization": f"Bearer {reg1.json()['access_token']}"}
+        reg2 = client.post(
+            "/api/v1/auth/register",
+            json={"email": "intruder_r2@example.com", "password": "StrongPassword123!", "display_name": "Intruder"},
+        )
+        h2 = {"Authorization": f"Bearer {reg2.json()['access_token']}"}
+
+        proj = client.post("/api/v1/projects", headers=h1, json={"title": "Private R2"}).json()
+        owner_id = reg1.json()["user"]["id"]
+        missing_key = f"users/{owner_id}/projects/{proj['id']}/originals/missing.wav"
+
+        with patch.object(storage_service, "exists", return_value=False):
+            res = client.post(
+                "/api/v1/uploads/confirm",
+                headers=h1,
+                json={
+                    "project_id": proj["id"],
+                    "storage_key": missing_key,
+                    "filename": "missing.wav",
+                    "content_type": "audio/wav",
+                    "size_bytes": 1000,
+                },
+            )
+            assert res.status_code == 400
+
+        # Intruder cannot presign or confirm for owner's project
+        assert (
+            client.post(
+                "/api/v1/uploads/presign",
+                headers=h2,
+                json={"project_id": proj["id"], "filename": "x.wav", "content_type": "audio/wav", "size_bytes": 1000},
+            ).status_code
+            == 403
+        )
+    finally:
+        os.environ["STORAGE_BACKEND"] = "local"
+        get_settings.cache_clear()
