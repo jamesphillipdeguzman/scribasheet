@@ -28,8 +28,13 @@ export function SheetMusicViewer({ musicxml }: SheetMusicViewerProps) {
             autoResize: true,
             backend: "svg",
             drawTitle: true,
+            drawSubtitle: false,
+            drawComposer: true,
             drawCredits: false,
+            drawMeasureNumbers: true,
+            measureNumberInterval: 4,
             drawingParameters: "default",
+            pageBackgroundColor: "#F8FAFC",
           });
         }
         const osmd = osmdRef.current;
