@@ -9,6 +9,8 @@ class ScoreNote(BaseModel):
     pitch_midi: int = Field(ge=0, le=127)
     onset_sec: float = Field(ge=0.0)
     offset_sec: float = Field(gt=0.0)
+    raw_onset_sec: float | None = Field(default=None, ge=0.0)
+    raw_offset_sec: float | None = Field(default=None, gt=0.0)
     velocity: int = Field(default=80, ge=1, le=127)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     track_index: int = Field(default=0, ge=0)

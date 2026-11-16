@@ -52,6 +52,8 @@ def build_score_data(
                 pitch_midi=n.pitch_midi,
                 onset_sec=onset,
                 offset_sec=offset,
+                raw_onset_sec=round(n.onset_sec, 4),
+                raw_offset_sec=round(n.offset_sec, 4),
                 velocity=n.velocity,
                 confidence=n.confidence,
                 track_index=0,

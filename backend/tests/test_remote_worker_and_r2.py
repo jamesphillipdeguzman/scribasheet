@@ -276,14 +276,17 @@ def test_r2_presigned_url_generation_with_mocked_boto3(client, db_session):
 
 
 def test_worker_agent_run_once_end_to_end(client, db_session):
+    from app.worker_agent import PhaseATestHandler
+
     _, _, job_id, _ = _setup_project_and_job(client, db_session, worker_token="agent-token-123")
 
-    # Point RemoteWorkerAgent at the FastAPI TestClient transport
+    # Point RemoteWorkerAgent at the FastAPI TestClient transport with PhaseATestHandler
     agent_http = httpx.Client(transport=client._transport, base_url="http://testserver")
     agent = RemoteWorkerAgent(
         api_base_url="http://testserver/api/v1",
         worker_token="agent-token-123",
         worker_id="win11-test-pc",
+        handler=PhaseATestHandler(),
         http_client=agent_http,
     )
 

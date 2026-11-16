@@ -1,3 +1,4 @@
+import base64
 import hmac
 import logging
 from datetime import UTC, datetime, timedelta
@@ -106,6 +107,8 @@ class WorkerCompleteRequest(BaseModel):
     is_simulated: bool = False
     midi_key: str | None = None
     musicxml_key: str | None = None
+    midi_base64: str | None = None
+    musicxml_content: str | None = None
     score_json: dict[str, Any] = Field(default_factory=dict)
     duration_seconds: float | None = Field(default=None, ge=0.0)
     metadata_json: dict[str, Any] = Field(default_factory=dict)
@@ -396,6 +399,24 @@ def complete_job(
 
     project = db.query(Project).filter(Project.id == job.project_id).first()
 
+    # Persist inline MIDI / MusicXML payloads when STORAGE_BACKEND=local (no direct R2 PUT)
+    midi_size_bytes = 0
+    if not midi_key and payload.midi_base64 and not is_simulated:
+        try:
+            midi_bytes = base64.b64decode(payload.midi_base64, validate=True)
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid midi_base64 payload.")
+        midi_key = storage_service.build_key(job.user_id, job.project_id, "midi", "transcription.mid")
+        storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
+        midi_size_bytes = len(midi_bytes)
+
+    xml_size_bytes = 0
+    if not xml_key and payload.musicxml_content and not is_simulated:
+        xml_bytes = payload.musicxml_content.encode("utf-8")
+        xml_key = storage_service.build_key(job.user_id, job.project_id, "musicxml", "score.musicxml")
+        storage_service.save_bytes(xml_key, xml_bytes, content_type="application/vnd.recordare.musicxml+xml")
+        xml_size_bytes = len(xml_bytes)
+
     midi_asset_id: str | None = None
     if midi_key:
         midi_asset = MediaAsset(
@@ -405,7 +426,7 @@ def complete_job(
             storage_path=midi_key,
             original_filename=f"{project.title if project else 'transcription'}.mid",
             mime_type="audio/midi",
-            size_bytes=0,
+            size_bytes=midi_size_bytes,
             duration_seconds=payload.duration_seconds,
         )
         db.add(midi_asset)
@@ -421,7 +442,7 @@ def complete_job(
             storage_path=xml_key,
             original_filename=f"{project.title if project else 'score'}.musicxml",
             mime_type="application/vnd.recordare.musicxml+xml",
-            size_bytes=0,
+            size_bytes=xml_size_bytes,
             duration_seconds=payload.duration_seconds,
         )
         db.add(xml_asset)
