@@ -26,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit
 
 import httpx
 
@@ -66,6 +66,63 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("scribasheet.worker_agent")
+
+
+API_V1_PREFIX = "/api/v1"
+
+
+def normalize_api_base_url(raw_url: str, api_prefix: str = API_V1_PREFIX) -> str:
+    """Normalize SCRIBASHEET_API_URL so it always ends cleanly with /api/v1."""
+    cleaned = raw_url.strip().rstrip("/")
+    parsed = urlsplit(cleaned)
+    prefix = "/" + api_prefix.strip("/")
+    path = parsed.path.rstrip("/")
+
+    # Collapse accidental duplicate /api/v1 suffixes
+    while path.endswith(f"{prefix}{prefix}"):
+        path = path[: -len(prefix)]
+
+    if path != prefix and not path.endswith(prefix):
+        path = f"{path}{prefix}" if path else prefix
+
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def build_coordinator_url(
+    api_base_url: str,
+    endpoint_or_url: str,
+    query: dict[str, Any] | None = None,
+) -> str:
+    """Build a coordinator endpoint URL, supporting origin-only or /api/v1 base URLs and preserving query params."""
+    raw = endpoint_or_url.strip()
+    if raw.startswith("http://") or raw.startswith("https://"):
+        if not query:
+            return raw
+        parts = urlsplit(raw)
+        extra = urlencode(query)
+        merged_query = f"{parts.query}&{extra}" if parts.query else extra
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, merged_query, parts.fragment))
+
+    normalized_base = normalize_api_base_url(api_base_url)
+    base_parts = urlsplit(normalized_base)
+    origin = f"{base_parts.scheme}://{base_parts.netloc}" if base_parts.scheme and base_parts.netloc else ""
+    base_path = base_parts.path.rstrip("/")
+
+    rel = urlsplit(raw)
+    rel_path = "/" + rel.path.lstrip("/")
+    if rel_path == API_V1_PREFIX or rel_path.startswith(f"{API_V1_PREFIX}/"):
+        full_path = rel_path
+    else:
+        full_path = f"{base_path}{rel_path}"
+
+    merged_query = rel.query
+    if query:
+        extra = urlencode(query)
+        merged_query = f"{merged_query}&{extra}" if merged_query else extra
+
+    return urlunsplit((base_parts.scheme, base_parts.netloc, full_path, merged_query, rel.fragment)) if origin else (
+        f"{full_path}?{merged_query}" if merged_query else full_path
+    )
 
 
 class LeaseLostError(Exception):
@@ -149,7 +206,7 @@ class RealTranscriptionHandler:
         api_base_url: str,
         http_client: httpx.Client | None = None,
     ) -> None:
-        self.api_base_url = api_base_url.rstrip("/")
+        self.api_base_url = normalize_api_base_url(api_base_url)
         parsed = urlparse(self.api_base_url)
         self._api_origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
         self._client = http_client or httpx.Client(timeout=120.0)
@@ -179,9 +236,7 @@ class RealTranscriptionHandler:
             raise LeaseLostError(f"Job {job_id} cancelled due to lease loss or shutdown.")
 
     def _resolve_download_url(self, raw_url: str) -> str:
-        if raw_url.startswith("http://") or raw_url.startswith("https://"):
-            return raw_url
-        return f"{self._api_origin}{raw_url}"
+        return build_coordinator_url(self.api_base_url, raw_url)
 
     def handle(
         self,
@@ -459,7 +514,7 @@ class RemoteWorkerAgent:
         handler: JobHandler | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
-        self.api_base_url = api_base_url.rstrip("/")
+        self.api_base_url = normalize_api_base_url(api_base_url)
         self.worker_token = worker_token
         self.worker_id = worker_id or f"win-{socket.gethostname()}"
         self.poll_interval_sec = max(0.2, poll_interval_sec)
@@ -482,6 +537,9 @@ class RemoteWorkerAgent:
 
     def _headers(self) -> dict[str, str]:
         return {"X-Worker-Token": self.worker_token}
+
+    def _url(self, endpoint: str, query: dict[str, Any] | None = None) -> str:
+        return build_coordinator_url(self.api_base_url, endpoint, query=query)
 
     @staticmethod
     def _compute_backoff(current_backoff: float, *, max_backoff: float = 45.0) -> tuple[float, float]:
@@ -549,7 +607,7 @@ class RemoteWorkerAgent:
         while not job_done.wait(self.heartbeat_interval_sec) and not self._stop_event.is_set():
             try:
                 resp = self._client.post(
-                    f"{self.api_base_url}/worker/jobs/{job_id}/heartbeat",
+                    self._url(f"/worker/jobs/{job_id}/heartbeat"),
                     json={"worker_id": self.worker_id},
                     headers=self._headers(),
                 )
@@ -583,7 +641,7 @@ class RemoteWorkerAgent:
     def run_once(self) -> bool:
         """Poll for and process at most one job. Returns True if a job was claimed."""
         resp = self._client.post(
-            f"{self.api_base_url}/worker/jobs/claim",
+            self._url("/worker/jobs/claim"),
             json={"worker_id": self.worker_id},
             headers=self._headers(),
         )
@@ -624,7 +682,7 @@ class RemoteWorkerAgent:
             if lease_lost.is_set():
                 raise LeaseLostError(f"Aborting progress report for job {job_id}: lease lost.")
             p_resp = self._client.post(
-                f"{self.api_base_url}/worker/jobs/{job_id}/progress",
+                self._url(f"/worker/jobs/{job_id}/progress"),
                 json={
                     "worker_id": self.worker_id,
                     "status": status_str,
@@ -648,7 +706,7 @@ class RemoteWorkerAgent:
                 raise LeaseLostError(f"Lease lost before completion of job {job_id}.")
 
             c_resp = self._post_with_retry(
-                f"{self.api_base_url}/worker/jobs/{job_id}/complete",
+                self._url(f"/worker/jobs/{job_id}/complete"),
                 json_payload={
                     "worker_id": self.worker_id,
                     "is_simulated": result.is_simulated,
@@ -682,7 +740,7 @@ class RemoteWorkerAgent:
             if not lease_lost.is_set() and not self._stop_event.is_set():
                 try:
                     self._client.post(
-                        f"{self.api_base_url}/worker/jobs/{job_id}/fail",
+                        self._url(f"/worker/jobs/{job_id}/fail"),
                         json={
                             "worker_id": self.worker_id,
                             "error_code": err_code,
@@ -743,7 +801,7 @@ class RemoteWorkerAgent:
         finally:
             try:
                 self._client.post(
-                    f"{self.api_base_url}/worker/offline",
+                    self._url("/worker/offline"),
                     json={"worker_id": self.worker_id},
                     headers=self._headers(),
                     timeout=5.0,

@@ -9,7 +9,12 @@ from pathlib import Path
 import httpx
 
 from app.models import TranscriptionJob, WorkerNode
-from app.worker_agent import PhaseATestHandler, RemoteWorkerAgent
+from app.worker_agent import (
+    PhaseATestHandler,
+    RemoteWorkerAgent,
+    build_coordinator_url,
+    normalize_api_base_url,
+)
 from app.worker_lock import WorkerSingleInstanceLock
 
 BACKEND_DIR = str(Path(__file__).resolve().parents[1])
@@ -270,3 +275,46 @@ def test_worker_status_empty_naive_tz_cors_and_db_error(client, db_session, monk
     err_res = client.get("/api/v1/worker/status", headers=headers)
     assert err_res.status_code == 500
     assert err_res.headers.get("access-control-allow-origin") == "https://scribasheet.vercel.app"
+
+
+def test_worker_coordinator_url_builder_supports_origin_and_api_v1_bases():
+    from app.main import app
+
+    base_variants = [
+        "https://scribasheet-production.up.railway.app",
+        "https://scribasheet-production.up.railway.app/",
+        "https://scribasheet-production.up.railway.app/api/v1",
+        "https://scribasheet-production.up.railway.app/api/v1/",
+        "https://scribasheet-production.up.railway.app/api/v1/api/v1",
+    ]
+    for raw in base_variants:
+        assert normalize_api_base_url(raw) == "https://scribasheet-production.up.railway.app/api/v1"
+
+    endpoints = {
+        "/worker/jobs/claim": "https://scribasheet-production.up.railway.app/api/v1/worker/jobs/claim",
+        "/worker/jobs/job-123/heartbeat": "https://scribasheet-production.up.railway.app/api/v1/worker/jobs/job-123/heartbeat",
+        "/worker/jobs/job-123/progress": "https://scribasheet-production.up.railway.app/api/v1/worker/jobs/job-123/progress",
+        "/worker/jobs/job-123/complete": "https://scribasheet-production.up.railway.app/api/v1/worker/jobs/job-123/complete",
+        "/worker/jobs/job-123/fail": "https://scribasheet-production.up.railway.app/api/v1/worker/jobs/job-123/fail",
+        "/worker/offline": "https://scribasheet-production.up.railway.app/api/v1/worker/offline",
+        "/api/v1/uploads/up-1/stream?sig=abc&exp=999": "https://scribasheet-production.up.railway.app/api/v1/uploads/up-1/stream?sig=abc&exp=999",
+    }
+    for base in base_variants:
+        for path, expected in endpoints.items():
+            built = build_coordinator_url(base, path)
+            assert built == expected
+            assert "/api/v1/api/v1" not in built
+
+    # Presigned absolute URL is preserved untouched
+    r2_url = "https://bucket.r2.cloudflarestorage.com/obj.wav?X-Amz-Signature=deadbeef"
+    assert build_coordinator_url(base_variants[0], r2_url) == r2_url
+
+    # Verify generated paths match actual FastAPI registered routes
+    registered_paths = set(app.openapi()["paths"].keys())
+    assert "/api/v1/worker/jobs/claim" in registered_paths
+    assert "/api/v1/worker/jobs/{job_id}/heartbeat" in registered_paths
+    assert "/api/v1/worker/jobs/{job_id}/progress" in registered_paths
+    assert "/api/v1/worker/jobs/{job_id}/complete" in registered_paths
+    assert "/api/v1/worker/jobs/{job_id}/fail" in registered_paths
+    assert "/api/v1/worker/offline" in registered_paths
+    assert "/api/v1/uploads/{upload_id}/stream" in registered_paths
