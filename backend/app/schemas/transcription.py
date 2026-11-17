@@ -1,7 +1,8 @@
-from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from app.schemas.common import UTCDatetime
 
 
 class TranscriptionSettings(BaseModel):
@@ -40,9 +41,9 @@ class TranscriptionJobResponse(BaseModel):
     settings_json: dict[str, Any]
     error_code: str | None = None
     error_message: str | None = None
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
-    created_at: datetime
+    started_at: UTCDatetime | None = None
+    completed_at: UTCDatetime | None = None
+    created_at: UTCDatetime
     worker_online: bool | None = None
 
     model_config = {"from_attributes": True}

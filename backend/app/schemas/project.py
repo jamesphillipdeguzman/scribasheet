@@ -1,6 +1,6 @@
-from datetime import datetime
-
 from pydantic import BaseModel, Field, field_validator
+
+from app.schemas.common import UTCDatetime
 
 
 class ProjectCreateRequest(BaseModel):
@@ -39,7 +39,7 @@ class MediaAssetResponse(BaseModel):
     duration_seconds: float | None = None
     sample_rate: int | None = None
     channels: int | None = None
-    created_at: datetime
+    created_at: UTCDatetime
 
     model_config = {"from_attributes": True}
 
@@ -53,8 +53,8 @@ class ProjectResponse(BaseModel):
     instrument: str
     transcription_mode: str
     duration_seconds: float | None = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: UTCDatetime
+    updated_at: UTCDatetime
     media_assets: list[MediaAssetResponse] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}

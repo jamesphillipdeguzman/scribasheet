@@ -5,14 +5,49 @@ import { Button } from "@/components/ui/Button";
 
 interface SheetMusicViewerProps {
   musicxml: string | null;
+  showChordSymbols?: boolean;
+  onToggleChordSymbols?: (value: boolean) => void;
 }
 
-export function SheetMusicViewer({ musicxml }: SheetMusicViewerProps) {
+export function stripHarmonyFromMusicXml(xml: string): string {
+  if (typeof DOMParser !== "undefined" && typeof XMLSerializer !== "undefined") {
+    try {
+      const doc = new DOMParser().parseFromString(xml, "application/xml");
+      if (!doc.querySelector("parsererror")) {
+        const harmonies = Array.from(doc.getElementsByTagName("harmony"));
+        for (const el of harmonies) {
+          el.parentNode?.removeChild(el);
+        }
+        return new XMLSerializer().serializeToString(doc);
+      }
+    } catch {
+      // Fall back to regex removal below
+    }
+  }
+  return xml.replace(/<harmony\b[^>]*>[\s\S]*?<\/harmony>/gi, "");
+}
+
+export function SheetMusicViewer({
+  musicxml,
+  showChordSymbols = true,
+  onToggleChordSymbols,
+}: SheetMusicViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
   const [zoom, setZoom] = useState(0.9);
+  const [localShowChords, setLocalShowChords] = useState(true);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
+
+  const effectiveShowChords = onToggleChordSymbols ? showChordSymbols : localShowChords;
+  const handleToggleChords = () => {
+    const next = !effectiveShowChords;
+    if (onToggleChordSymbols) {
+      onToggleChordSymbols(next);
+    } else {
+      setLocalShowChords(next);
+    }
+  };
 
   useEffect(() => {
     if (!containerRef.current || !musicxml) return;
@@ -39,7 +74,12 @@ export function SheetMusicViewer({ musicxml }: SheetMusicViewerProps) {
         }
         const osmd = osmdRef.current;
         if (!osmd) return;
-        await osmd.load(musicxml);
+        const rules = osmd.EngravingRules as unknown as Record<string, unknown> | undefined;
+        if (rules && "RenderChordSymbols" in rules) {
+          rules.RenderChordSymbols = effectiveShowChords;
+        }
+        const displayXml = effectiveShowChords ? musicxml : stripHarmonyFromMusicXml(musicxml);
+        await osmd.load(displayXml);
         if (cancelled) return;
         osmd.Zoom = zoom;
         osmd.render();
@@ -56,7 +96,7 @@ export function SheetMusicViewer({ musicxml }: SheetMusicViewerProps) {
     return () => {
       cancelled = true;
     };
-  }, [musicxml, zoom]);
+  }, [musicxml, zoom, effectiveShowChords]);
 
   if (!musicxml) {
     return (
@@ -72,7 +112,20 @@ export function SheetMusicViewer({ musicxml }: SheetMusicViewerProps) {
         <span className="text-xs font-medium text-[#A1A1AA]">
           Sheet Music Notation (OpenSheetMusicDisplay)
         </span>
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            aria-label="Show chord symbols"
+            aria-pressed={effectiveShowChords}
+            onClick={handleToggleChords}
+            className={`h-8 rounded-lg border px-2.5 text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${
+              effectiveShowChords
+                ? "border-[#A78BFA]/60 bg-[#7C3AED]/20 text-[#F5F3FF]"
+                : "border-[#27273A] bg-[#11111B] text-[#A1A1AA] hover:text-[#F5F3FF]"
+            }`}
+          >
+            Chords
+          </button>
           <Button
             size="sm"
             variant="secondary"

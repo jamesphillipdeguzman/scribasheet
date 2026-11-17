@@ -1,7 +1,8 @@
-from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from app.schemas.common import UTCDatetime
 
 
 class ScoreNote(BaseModel):
@@ -59,7 +60,7 @@ class ProjectScoreResponse(BaseModel):
     version: int
     score_json: dict[str, Any]
     musicxml: str | None = None
-    updated_at: datetime
+    updated_at: UTCDatetime
 
 
 class ProjectScoreUpdateRequest(BaseModel):

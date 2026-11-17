@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { useAuth } from "@/features/auth/AuthContext";
-import { formatDuration, SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
+import { formatDuration, formatLocalDateTime, SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
 import { api } from "@/services/api";
 import type { Project } from "@/types/api";
 
@@ -289,7 +289,7 @@ export function DashboardPage() {
                   </div>
 
                   <div className="text-xs text-[#71717A]">
-                    Updated {new Date(p.updated_at).toLocaleDateString()}
+                    Updated {formatLocalDateTime(p.updated_at)}
                   </div>
 
                   <div className="pt-2 border-t border-[#27273A] flex items-center justify-between gap-2">

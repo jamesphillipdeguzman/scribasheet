@@ -56,6 +56,28 @@ export function ProjectStudioPage() {
   const [saveStatus, setSaveStatus] = useState<"saved" | "unsaved" | "saving" | "error">("saved");
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Shared chord-symbol display & export preference
+  const chordPrefKey = projectId ? `scribasheet:show_chords:${projectId}` : null;
+  const [showChordSymbols, setShowChordSymbols] = useState<boolean>(() => {
+    if (!chordPrefKey) return true;
+    try {
+      const saved = window.localStorage.getItem(chordPrefKey);
+      return saved === null ? true : saved === "true";
+    } catch {
+      return true;
+    }
+  });
+  const handleToggleChordSymbols = (next: boolean) => {
+    setShowChordSymbols(next);
+    if (chordPrefKey) {
+      try {
+        window.localStorage.setItem(chordPrefKey, String(next));
+      } catch {
+        // Ignore storage restrictions
+      }
+    }
+  };
+
   // Job tracking
   const [activeJob, setActiveJob] = useState<TranscriptionJob | null>(null);
   const [isStartingJob, setIsStartingJob] = useState(false);
@@ -709,7 +731,11 @@ export function ProjectStudioPage() {
                     </p>
                   </div>
                 ) : (
-                  <SheetMusicViewer musicxml={musicxml} />
+                  <SheetMusicViewer
+                    musicxml={musicxml}
+                    showChordSymbols={showChordSymbols}
+                    onToggleChordSymbols={handleToggleChordSymbols}
+                  />
                 ))}
 
               {activeTab === "pianoroll" &&
@@ -748,6 +774,8 @@ export function ProjectStudioPage() {
                   projectId={project.id}
                   projectTitle={project.title}
                   hasScore={Boolean(scoreData)}
+                  showChordSymbols={showChordSymbols}
+                  onToggleChordSymbols={handleToggleChordSymbols}
                 />
               )}
             </div>

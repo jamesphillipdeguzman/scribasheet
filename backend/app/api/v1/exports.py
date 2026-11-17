@@ -25,7 +25,6 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
-from app.notation.satb_audio import render_satb_audio_tracks
 from app.schemas.export import ExportCreateRequest, ExportResponse
 from app.schemas.score import ScoreData
 from app.storage.service import sanitize_filename, storage_service
@@ -265,6 +264,8 @@ def export_satb_audio(
 
     score = ScoreData(**score_row.score_json)
     score.title = project.title
+    from app.notation.satb_audio import render_satb_audio_tracks
+
     rendered = render_satb_audio_tracks(
         score,
         part_volumes=payload.volumes,

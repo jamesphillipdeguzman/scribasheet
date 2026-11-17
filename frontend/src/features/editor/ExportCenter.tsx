@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, FileAudio, FileMusic, FileText, Loader2, Music } from "lucide-react";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { formatLocalDateTime } from "@/lib/utils";
 import { api, ApiError } from "@/services/api";
 import type { ExportRecord } from "@/types/api";
 
@@ -10,6 +11,8 @@ interface ExportCenterProps {
   projectId: string;
   projectTitle: string;
   hasScore: boolean;
+  showChordSymbols?: boolean;
+  onToggleChordSymbols?: (value: boolean) => void;
 }
 
 const FORMATS: Array<{
@@ -25,11 +28,25 @@ const FORMATS: Array<{
   { id: "wav", label: "WAV Audio", ext: ".wav", desc: "Synthesized playback render", icon: FileAudio },
 ];
 
-export function ExportCenter({ projectId, projectTitle, hasScore }: ExportCenterProps) {
+export function ExportCenter({
+  projectId,
+  projectTitle,
+  hasScore,
+  showChordSymbols,
+  onToggleChordSymbols,
+}: ExportCenterProps) {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [activeFmt, setActiveFmt] = useState<string | null>(null);
-  const [includeChords, setIncludeChords] = useState<boolean>(true);
+  const [localIncludeChords, setLocalIncludeChords] = useState<boolean>(true);
+  const includeChords = showChordSymbols ?? localIncludeChords;
+  const setIncludeChords = (next: boolean) => {
+    if (onToggleChordSymbols) {
+      onToggleChordSymbols(next);
+    } else {
+      setLocalIncludeChords(next);
+    }
+  };
 
   const { data: exportsList = [] } = useQuery({
     queryKey: ["exports", projectId],
@@ -74,7 +91,7 @@ export function ExportCenter({ projectId, projectTitle, hasScore }: ExportCenter
         <div className="space-y-0.5">
           <div className="text-sm font-medium text-[#FAFAFA]">Show Chord Symbols</div>
           <p className="text-xs text-[#A1A1AA]">
-            Display automatically detected chord labels above the piano staff in the exported PDF.
+            Display automatically detected chord labels above the piano staff in the viewer, MusicXML, and PDF.
           </p>
         </div>
         <button
@@ -82,7 +99,7 @@ export function ExportCenter({ projectId, projectTitle, hasScore }: ExportCenter
           role="switch"
           aria-checked={includeChords}
           aria-label="Show Chord Symbols"
-          onClick={() => setIncludeChords((prev) => !prev)}
+          onClick={() => setIncludeChords(!includeChords)}
           className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-[#27273A] transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${
             includeChords ? "bg-[#7C3AED]" : "bg-[#27273A]"
           }`}
@@ -139,7 +156,7 @@ export function ExportCenter({ projectId, projectTitle, hasScore }: ExportCenter
                 <div className="flex items-center gap-3">
                   <span className="font-mono uppercase text-[#A78BFA]">{ex.format}</span>
                   <StatusBadge status={ex.status} />
-                  <span className="text-[#71717A]">{new Date(ex.created_at).toLocaleString()}</span>
+                  <span className="text-[#71717A]">{formatLocalDateTime(ex.completed_at || ex.created_at)}</span>
                 </div>
                 {ex.download_url && (
                   <Button

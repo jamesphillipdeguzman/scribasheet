@@ -1,6 +1,6 @@
-from datetime import datetime
-
 from pydantic import BaseModel, Field
+
+from app.schemas.common import UTCDatetime
 
 
 class ExportCreateRequest(BaseModel):
@@ -15,7 +15,7 @@ class ExportResponse(BaseModel):
     status: str
     error_message: str | None = None
     download_url: str | None = None
-    created_at: datetime
-    completed_at: datetime | None = None
+    created_at: UTCDatetime
+    completed_at: UTCDatetime | None = None
 
     model_config = {"from_attributes": True}

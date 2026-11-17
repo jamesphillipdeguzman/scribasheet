@@ -15,11 +15,14 @@ import subprocess
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import music21
 from pypdf import PdfReader
 
 from app.schemas.score import ScoreData, ScoreNote, ScoreTrack
+
+if TYPE_CHECKING:
+    import music21
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +141,8 @@ def find_homr_executable() -> Path | None:
 
 def _merge_multipage_scores(page_xml_paths: list[Path]) -> tuple[music21.stream.Score, list[str]]:
     """Merge recognized page MusicXML files sequentially by part index."""
+    import music21
+
     warnings: list[str] = []
     if len(page_xml_paths) == 1:
         return music21.converter.parse(str(page_xml_paths[0])), warnings
@@ -181,6 +186,8 @@ def _merge_multipage_scores(page_xml_paths: list[Path]) -> tuple[music21.stream.
 
 def run_homr_on_images(image_paths: list[Path], *, timeout_per_page: int = 180) -> tuple[str, list[str]]:
     """Run homr OMR on rendered page images and return merged MusicXML + warnings."""
+    import music21
+
     homr_bin = find_homr_executable()
     if homr_bin is None:
         raise OMRError(
@@ -220,6 +227,8 @@ def run_homr_on_images(image_paths: list[Path], *, timeout_per_page: int = 180) 
 
 def _extract_part_streams(m21_score: music21.stream.Score) -> list[tuple[int, str, str, str | None, list[music21.note.NotRest]]]:
     """Extract logical voice streams from 4-staff or shared-staff SATB MusicXML."""
+    import music21
+
     extracted: list[tuple[int, str, str, str | None, list[music21.note.NotRest]]] = []
     parts = list(m21_score.parts)
 
@@ -252,6 +261,8 @@ def _extract_part_streams(m21_score: music21.stream.Score) -> list[tuple[int, st
 
 def identify_satb_parts(m21_score: music21.stream.Score) -> tuple[list[SATBPartAssignment], list[str], bool]:
     """Identify Soprano, Alto, Tenor, Bass parts using labels, staff order, clefs, and pitch range."""
+    import music21
+
     raw_streams = _extract_part_streams(m21_score)
     warnings: list[str] = []
     assignments: list[SATBPartAssignment] = []
@@ -345,6 +356,8 @@ def musicxml_to_satb_score_data(
     extra_warnings: list[str] | None = None,
 ) -> tuple[ScoreData, list[SATBPartAssignment], list[str], bool]:
     """Convert MusicXML into a multi-track SATB ScoreData."""
+    import music21
+
     m21_score = music21.converter.parseData(xml_str, format="musicxml")
     assignments, warnings, needs_review = identify_satb_parts(m21_score)
     if extra_warnings:
