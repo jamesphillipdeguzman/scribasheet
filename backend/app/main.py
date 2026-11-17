@@ -48,26 +48,6 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-_allowed_cors_origins = list(
-    dict.fromkeys(
-        [
-            *settings.BACKEND_CORS_ORIGINS,
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "https://scribasheet.vercel.app",
-        ]
-    )
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_allowed_cors_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-)
-
-
 @app.middleware("http")
 async def request_context_and_security_headers(request: Request, call_next):
     req_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
@@ -81,6 +61,27 @@ async def request_context_and_security_headers(request: Request, call_next):
         return response
     finally:
         request_id_ctx.reset(token)
+
+
+_allowed_cors_origins = list(
+    dict.fromkeys(
+        [
+            *settings.BACKEND_CORS_ORIGINS,
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "https://scribasheet.vercel.app",
+        ]
+    )
+)
+
+# Register CORSMiddleware last so it is outermost and handles OPTIONS preflight and errors cleanly.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/", tags=["Operations"])
