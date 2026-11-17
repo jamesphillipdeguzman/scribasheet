@@ -113,6 +113,7 @@ class WorkerCompleteRequest(BaseModel):
     musicxml_key: str | None = None
     midi_base64: str | None = None
     musicxml_content: str | None = None
+    pdf_base64: str | None = None
     score_json: dict[str, Any] = Field(default_factory=dict)
     duration_seconds: float | None = Field(default=None, ge=0.0)
     metadata_json: dict[str, Any] = Field(default_factory=dict)
@@ -569,6 +570,7 @@ def complete_job(
                 existing_score.musicxml_path = xml_key
             if midi_key:
                 existing_score.midi_path = midi_key
+            persisted_score_version = existing_score.version
         else:
             db.add(
                 ProjectScore(
@@ -579,12 +581,41 @@ def complete_job(
                     midi_path=midi_key,
                 )
             )
+            persisted_score_version = 1
+    else:
+        persisted_score_version = None
+
+    pdf_asset_id: str | None = None
+    if payload.pdf_base64 and not is_simulated:
+        try:
+            pdf_bytes = base64.b64decode(payload.pdf_base64, validate=True)
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid pdf_base64 payload.")
+        if pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 500:
+            pdf_key = storage_service.build_key(job.user_id, job.project_id, "scores", "score.pdf")
+            storage_service.save_bytes(pdf_key, pdf_bytes, content_type="application/pdf")
+            pdf_asset = MediaAsset(
+                project_id=job.project_id,
+                user_id=job.user_id,
+                asset_type="pdf",
+                storage_path=pdf_key,
+                original_filename=f"{project.title if project else 'score'}.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(pdf_bytes),
+                duration_seconds=payload.duration_seconds,
+            )
+            db.add(pdf_asset)
+            db.flush()
+            pdf_asset_id = pdf_asset.id
 
     existing_result = db.query(TranscriptionResult).filter(TranscriptionResult.job_id == job.id).first()
     if not existing_result:
         meta = dict(payload.metadata_json or {})
         if is_simulated:
             meta["simulated"] = True
+        if pdf_asset_id and persisted_score_version is not None:
+            meta["pdf_asset_id"] = pdf_asset_id
+            meta["pdf_score_version"] = persisted_score_version
         db.add(
             TranscriptionResult(
                 job_id=job.id,

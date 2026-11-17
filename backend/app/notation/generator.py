@@ -584,14 +584,20 @@ def _find_musescore_binary() -> str | None:
     return None
 
 
-def _render_pdf_via_musescore(score: ScoreData) -> bytes | None:
+def count_pdf_pages(pdf_bytes: bytes) -> int:
+    """Count individual PDF /Page objects (excluding the parent /Pages catalog)."""
+    if not pdf_bytes or not pdf_bytes.startswith(b"%PDF-"):
+        return 0
+    return len(re.findall(rb"/Type\s*/Page\b(?!s)", pdf_bytes))
+
+
+def _render_pdf_from_musicxml_via_musescore(xml_str: str) -> bytes | None:
     if os.environ.get("DISABLE_MUSESCORE_PDF", "").lower() in ("1", "true", "yes"):
         return None
     mscore_bin = _find_musescore_binary()
-    if not mscore_bin:
+    if not mscore_bin or not xml_str:
         return None
     try:
-        xml_str = score_data_to_musicxml(score)
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             xml_path = tmp / "score.musicxml"
@@ -606,11 +612,23 @@ def _render_pdf_via_musescore(score: ScoreData) -> bytes | None:
             )
             if res.returncode == 0 and pdf_path.exists():
                 pdf_bytes = pdf_path.read_bytes()
-                if pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 500:
+                if pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 500 and count_pdf_pages(pdf_bytes) >= 1:
                     return pdf_bytes
     except Exception:
         return None
     return None
+
+
+def _render_pdf_via_musescore(score: ScoreData) -> bytes | None:
+    if os.environ.get("DISABLE_MUSESCORE_PDF", "").lower() in ("1", "true", "yes"):
+        return None
+    if not _find_musescore_binary():
+        return None
+    try:
+        xml_str = score_data_to_musicxml(score)
+        return _render_pdf_from_musicxml_via_musescore(xml_str)
+    except Exception:
+        return None
 
 
 def render_score_pdf(score: ScoreData) -> bytes:

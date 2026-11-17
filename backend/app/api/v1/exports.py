@@ -6,8 +6,18 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_owned_project
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models import Export, Project, ProjectScore, User
+from app.models import (
+    Export,
+    MediaAsset,
+    Project,
+    ProjectScore,
+    TranscriptionJob,
+    TranscriptionResult,
+    User,
+)
 from app.notation.generator import (
+    _render_pdf_via_musescore,
+    count_pdf_pages,
     render_score_pdf,
     render_score_wav,
     score_data_to_midi_bytes,
@@ -25,6 +35,42 @@ EXPORT_MIME_TYPES = {
     "pdf": ("application/pdf", "pdf"),
     "wav": ("audio/wav", "wav"),
 }
+
+
+def _resolve_pdf_export_bytes(
+    db: Session,
+    project_id: str,
+    score_version: int,
+    score: ScoreData,
+) -> bytes:
+    """Prefer MuseScore 4 PDF (local or worker-generated for current score version) over ReportLab fallback."""
+    musescore_local = _render_pdf_via_musescore(score)
+    if musescore_local is not None:
+        return musescore_local
+
+    # Look for a worker-generated MuseScore PDF matching this score version
+    results = (
+        db.query(TranscriptionResult)
+        .join(TranscriptionJob, TranscriptionJob.id == TranscriptionResult.job_id)
+        .filter(TranscriptionJob.project_id == project_id)
+        .order_by(TranscriptionResult.created_at.desc())
+        .all()
+    )
+    for res in results:
+        meta = res.metadata_json or {}
+        pdf_asset_id = meta.get("pdf_asset_id")
+        pdf_ver = meta.get("pdf_score_version")
+        if pdf_asset_id and pdf_ver == score_version:
+            asset = db.query(MediaAsset).filter(MediaAsset.id == pdf_asset_id).first()
+            if asset:
+                try:
+                    data = storage_service.read_bytes(asset.storage_path)
+                    if data.startswith(b"%PDF-") and count_pdf_pages(data) >= 1:
+                        return data
+                except FileNotFoundError:
+                    pass
+
+    return render_score_pdf(score)
 
 
 @router.get("/projects/{project_id}/exports", response_model=list[ExportResponse])
@@ -91,7 +137,7 @@ def create_export(
         elif payload.format == "musicxml":
             content = score_data_to_musicxml(score).encode("utf-8")
         elif payload.format == "pdf":
-            content = render_score_pdf(score)
+            content = _resolve_pdf_export_bytes(db, project.id, score_row.version, score)
         elif payload.format == "wav":
             content = render_score_wav(score)
         else:

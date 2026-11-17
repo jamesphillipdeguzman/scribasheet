@@ -37,6 +37,7 @@ from app.notation.analyzer import (
 )
 from app.notation.beat_tracker import track_beats_and_downbeats
 from app.notation.generator import (
+    _render_pdf_from_musicxml_via_musescore,
     build_score_data,
     clean_score_title,
     score_data_to_midi_bytes,
@@ -140,6 +141,7 @@ class JobCompletionResult:
     musicxml_key: str | None = None
     midi_base64: str | None = None
     musicxml_content: str | None = None
+    pdf_base64: str | None = None
     score_json: dict[str, Any] = field(default_factory=dict)
     duration_seconds: float | None = None
     metadata_json: dict[str, Any] = field(default_factory=dict)
@@ -456,6 +458,9 @@ class RealTranscriptionHandler:
             self._check_cancelled(job_id, cancel_event)
             report_progress("finalizing", 95, "Persisting Score", "Saving MIDI, MusicXML, and score.")
 
+            musescore_pdf = _render_pdf_from_musicxml_via_musescore(musicxml_str)
+            pdf_b64 = base64.b64encode(musescore_pdf).decode("ascii") if musescore_pdf else None
+
             artifact_urls = job.get("artifact_upload_urls") or {}
             midi_key: str | None = None
             xml_key: str | None = None
@@ -483,6 +488,7 @@ class RealTranscriptionHandler:
                 musicxml_key=xml_key,
                 midi_base64=midi_b64,
                 musicxml_content=xml_inline,
+                pdf_base64=pdf_b64,
                 score_json=score_data.model_dump(),
                 duration_seconds=proc_meta.duration_seconds,
                 metadata_json={
@@ -714,6 +720,7 @@ class RemoteWorkerAgent:
                     "musicxml_key": result.musicxml_key,
                     "midi_base64": result.midi_base64,
                     "musicxml_content": result.musicxml_content,
+                    "pdf_base64": result.pdf_base64,
                     "score_json": result.score_json,
                     "duration_seconds": result.duration_seconds,
                     "metadata_json": result.metadata_json,
