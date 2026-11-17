@@ -1,8 +1,10 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "@/App";
+import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
+import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { ProjectStudioPage } from "@/features/projects/ProjectStudioPage";
 import { api, ApiError } from "@/services/api";
 import { midiToNoteName, formatDuration, formatBytes } from "@/lib/utils";
@@ -87,5 +89,104 @@ describe("ScribaSheet Frontend", () => {
     expect(soft.holdEndSec).toBeCloseTo(0.8, 3);
     expect(soft.sustainGain).toBeGreaterThan(soft.peakGain * 0.3);
     expect(soft.releaseSec).toBeGreaterThanOrEqual(0.14);
+  });
+
+  it("displays desktop worker offline status and waiting-for-worker queue choice", async () => {
+    vi.spyOn(api, "getWorkerStatus").mockResolvedValue({
+      worker_online: false,
+      status: "offline",
+      last_seen_seconds: 120,
+      worker_id: "win-desktop",
+      active_job_count: 0,
+      queue_depth: 1,
+      freshness_threshold_seconds: 45,
+    });
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <WorkerStatusBadge />
+      </QueryClientProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Desktop Worker Offline/i)).toBeInTheDocument();
+      expect(screen.getByText(/1 queued/i)).toBeInTheDocument();
+    });
+
+    const onStart = vi.fn();
+    const onCancel = vi.fn();
+    render(
+      <TranscriptionConfigPanel
+        hasMedia={true}
+        activeJob={null}
+        workerOnline={false}
+        defaultInstrument="piano"
+        defaultMode="single_instrument"
+        onStart={onStart}
+        onCancel={onCancel}
+        onRetry={vi.fn()}
+        isStarting={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Start AI Transcription/i }));
+    expect(screen.getByText(/Queue this song to transcribe automatically/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Queue for Later/i }));
+    expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders waiting-for-worker state and cancel action for unclaimed queued jobs", () => {
+    const onCancel = vi.fn();
+    render(
+      <TranscriptionConfigPanel
+        hasMedia={true}
+        workerOnline={false}
+        activeJob={{
+          id: "job-1",
+          project_id: "p1",
+          user_id: "u1",
+          source_asset_id: "a1",
+          status: "queued",
+          progress: 0,
+          current_stage: "Waiting for Desktop Worker",
+          engine: "basic_pitch",
+          settings_json: {
+            mode: "single_instrument",
+            instrument: "piano",
+            tempo_mode: "auto",
+            manual_tempo_bpm: null,
+            time_signature: "auto",
+            key_signature: "auto",
+            concert_pitch_hz: 440,
+            transpose_semitones: 0,
+            quantization: "sixteenth",
+            onset_threshold: 0.5,
+            frame_threshold: 0.3,
+            min_note_length_ms: 58,
+            min_midi_pitch: 21,
+            max_midi_pitch: 108,
+            enable_source_separation: false,
+          },
+          error_code: null,
+          error_message: null,
+          started_at: null,
+          completed_at: null,
+          created_at: new Date().toISOString(),
+          worker_online: false,
+        }}
+        defaultInstrument="piano"
+        defaultMode="single_instrument"
+        onStart={vi.fn()}
+        onCancel={onCancel}
+        onRetry={vi.fn()}
+        isStarting={false}
+      />
+    );
+
+    expect(screen.getByText(/Waiting for Desktop Worker/i)).toBeInTheDocument();
+    expect(screen.getByText(/desktop transcription worker is currently offline/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Cancel/i }));
+    expect(onCancel).toHaveBeenCalledWith("job-1");
   });
 });

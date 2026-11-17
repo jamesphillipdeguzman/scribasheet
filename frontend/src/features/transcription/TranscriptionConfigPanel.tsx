@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { AlertTriangle, ChevronDown, Loader2, Play, RotateCcw, Square } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AlertTriangle, ChevronDown, Clock, Loader2, Play, RotateCcw, Square } from "lucide-react";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
@@ -8,6 +8,7 @@ import type { TranscriptionJob, TranscriptionSettings } from "@/types/api";
 interface Props {
   hasMedia: boolean;
   activeJob: TranscriptionJob | null;
+  workerOnline?: boolean | null;
   defaultInstrument: string;
   defaultMode: string;
   onStart: (settings: TranscriptionSettings) => void;
@@ -19,6 +20,7 @@ interface Props {
 export function TranscriptionConfigPanel({
   hasMedia,
   activeJob,
+  workerOnline = null,
   defaultInstrument,
   defaultMode,
   onStart,
@@ -27,6 +29,8 @@ export function TranscriptionConfigPanel({
   isStarting,
 }: Props) {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [confirmOfflineQueue, setConfirmOfflineQueue] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [settings, setSettings] = useState<TranscriptionSettings>({
     mode: defaultMode || "single_instrument",
     instrument: defaultInstrument || "piano",
@@ -48,6 +52,28 @@ export function TranscriptionConfigPanel({
   const isRunning =
     activeJob &&
     !["completed", "failed", "cancelled"].includes(activeJob.status);
+  const isQueued = activeJob?.status === "queued";
+  const effectiveWorkerOnline = workerOnline ?? activeJob?.worker_online ?? null;
+  const isWaitingOffline = Boolean(isQueued && effectiveWorkerOnline === false);
+
+  useEffect(() => {
+    if (!isQueued) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 5000);
+    return () => window.clearInterval(timer);
+  }, [isQueued]);
+
+  const createdMs = activeJob?.created_at ? Date.parse(activeJob.created_at) : NaN;
+  const waitedLong =
+    isQueued && Number.isFinite(createdMs) && nowMs - createdMs >= 30000;
+
+  const handlePrimaryClick = () => {
+    if (effectiveWorkerOnline === false && !confirmOfflineQueue) {
+      setConfirmOfflineQueue(true);
+      return;
+    }
+    setConfirmOfflineQueue(false);
+    onStart(settings);
+  };
 
   return (
     <div className="space-y-4">
@@ -212,23 +238,56 @@ export function TranscriptionConfigPanel({
 
       {/* Action & Live Progress */}
       {isRunning && activeJob ? (
-        <div className="rounded-xl border border-[#A78BFA]/30 bg-[#181825] p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <Loader2 className="h-4 w-4 animate-spin text-[#A78BFA]" />
-              <span>{activeJob.current_stage}</span>
+        <div
+          className={`rounded-xl border p-4 space-y-3 ${
+            isWaitingOffline
+              ? "border-amber-500/30 bg-amber-500/10"
+              : "border-[#A78BFA]/30 bg-[#181825]"
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-sm font-medium min-w-0">
+              {isQueued ? (
+                <Clock className={`h-4 w-4 shrink-0 ${isWaitingOffline ? "text-amber-300" : "text-[#A78BFA]"}`} />
+              ) : (
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#A78BFA]" />
+              )}
+              <span className="truncate">
+                {isWaitingOffline ? "Waiting for Desktop Worker" : activeJob.current_stage}
+              </span>
             </div>
-            <StatusBadge status={activeJob.status} />
+            <StatusBadge status={isWaitingOffline ? "waiting_for_worker" : activeJob.status} />
           </div>
-          <div className="h-2 w-full rounded-full bg-[#09090F] overflow-hidden">
-            <div
-              className="h-full bg-[#8B5CF6] transition-all duration-300"
-              style={{ width: `${activeJob.progress}%` }}
-            />
-          </div>
-          <div className="flex items-center justify-between text-xs text-[#A1A1AA]">
-            <span>{activeJob.progress}% complete</span>
-            <Button size="sm" variant="ghost" onClick={() => onCancel(activeJob.id)}>
+
+          {isQueued ? (
+            <p className="text-xs text-[#A1A1AA]">
+              {isWaitingOffline
+                ? "Your song is safely queued. ScribaSheet's desktop transcription worker is currently offline. Keep your Windows PC awake and the ScribaSheet worker running to begin transcription."
+                : "Desktop transcription worker online. Your queued songs will be processed automatically."}
+            </p>
+          ) : (
+            <div className="h-2 w-full rounded-full bg-[#09090F] overflow-hidden">
+              <div
+                className="h-full bg-[#8B5CF6] transition-all duration-300"
+                style={{ width: `${activeJob.progress}%` }}
+              />
+            </div>
+          )}
+
+          {waitedLong && (
+            <p className="text-xs text-amber-200">
+              Still waiting for a desktop worker to claim this job. You can keep it queued or cancel below.
+            </p>
+          )}
+
+          <div className="flex items-center justify-between gap-2 text-xs text-[#A1A1AA]">
+            <span>{isQueued ? "Queued (not yet claimed)" : `${activeJob.progress}% complete`}</span>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => onCancel(activeJob.id)}
+              className="min-h-[40px]"
+            >
               <Square className="h-3 w-3 mr-1" />
               Cancel
             </Button>
@@ -239,20 +298,54 @@ export function TranscriptionConfigPanel({
           {activeJob?.status === "failed" && (
             <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300 space-y-2">
               <p>{activeJob.error_message || "Transcription failed."}</p>
-              <Button size="sm" variant="outline" onClick={() => onRetry(activeJob.id)}>
+              <Button size="sm" variant="outline" onClick={() => onRetry(activeJob.id)} className="min-h-[40px]">
                 <RotateCcw className="h-3.5 w-3.5" />
                 Retry Job
               </Button>
             </div>
           )}
-          <Button
-            className="w-full"
-            disabled={!hasMedia || isStarting}
-            onClick={() => onStart(settings)}
-          >
-            <Play className="h-4 w-4" />
-            {isStarting ? "Starting..." : activeJob?.status === "completed" ? "Re-Transcribe Audio" : "Start AI Transcription"}
-          </Button>
+          {activeJob?.status === "cancelled" && (
+            <div className="rounded-lg border border-[#27273A] bg-[#09090F] p-2.5 text-xs text-[#A1A1AA]">
+              Previous transcription job was cancelled.
+            </div>
+          )}
+          {confirmOfflineQueue ? (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 space-y-3 text-xs">
+              <p className="text-amber-100">
+                Desktop worker is currently offline. Queue this song to transcribe automatically when your Windows PC comes online?
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setConfirmOfflineQueue(false);
+                    onStart(settings);
+                  }}
+                  disabled={isStarting}
+                  className="flex-1 min-h-[44px]"
+                >
+                  Queue for Later
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setConfirmOfflineQueue(false)}
+                  className="min-h-[44px]"
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Button
+              className="w-full min-h-[44px]"
+              disabled={!hasMedia || isStarting}
+              onClick={handlePrimaryClick}
+            >
+              <Play className="h-4 w-4" />
+              {isStarting ? "Starting..." : activeJob?.status === "completed" ? "Re-Transcribe Audio" : "Start AI Transcription"}
+            </Button>
+          )}
         </div>
       )}
     </div>

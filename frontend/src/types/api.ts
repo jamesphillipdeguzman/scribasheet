@@ -103,6 +103,17 @@ export interface TranscriptionJob {
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
+  worker_online?: boolean | null;
+}
+
+export interface WorkerStatus {
+  worker_online: boolean;
+  status: "online" | "offline";
+  last_seen_seconds: number | null;
+  worker_id: string | null;
+  active_job_count: number;
+  queue_depth: number;
+  freshness_threshold_seconds: number;
 }
 
 export interface ScoreNote {

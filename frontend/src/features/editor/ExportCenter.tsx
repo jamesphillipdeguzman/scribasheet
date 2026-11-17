@@ -68,12 +68,12 @@ export function ExportCenter({ projectId, projectTitle, hasScore }: ExportCenter
         </div>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 min-w-0">
         {FORMATS.map((f) => {
           const Icon = f.icon;
           const loading = activeFmt === f.id;
           return (
-            <div key={f.id} className="rounded-xl border border-[#27273A] bg-[#09090F] p-4 flex flex-col justify-between space-y-3">
+            <div key={f.id} className="min-w-0 rounded-xl border border-[#27273A] bg-[#09090F] p-4 flex flex-col justify-between space-y-3">
               <div>
                 <div className="flex items-center justify-between">
                   <Icon className="h-5 w-5 text-[#A78BFA]" />
@@ -87,6 +87,7 @@ export function ExportCenter({ projectId, projectTitle, hasScore }: ExportCenter
                 variant="secondary"
                 disabled={!hasScore || loading}
                 onClick={() => exportMutation.mutate(f.id)}
+                className="w-full min-h-[44px]"
               >
                 {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
                 {loading ? "Generating..." : `Export ${f.id.toUpperCase()}`}

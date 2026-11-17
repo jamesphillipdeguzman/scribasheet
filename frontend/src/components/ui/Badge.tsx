@@ -5,6 +5,7 @@ const STATUS_STYLES: Record<string, string> = {
   completed: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
   processing: "bg-[#A78BFA]/15 text-[#A78BFA] border-[#A78BFA]/30",
   queued: "bg-amber-500/15 text-amber-300 border-amber-500/30",
+  waiting_for_worker: "bg-amber-500/15 text-amber-200 border-amber-500/30",
   validating: "bg-[#A78BFA]/15 text-[#A78BFA] border-[#A78BFA]/30",
   preprocessing: "bg-[#A78BFA]/15 text-[#A78BFA] border-[#A78BFA]/30",
   separating: "bg-[#A78BFA]/15 text-[#A78BFA] border-[#A78BFA]/30",

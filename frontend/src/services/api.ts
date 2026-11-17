@@ -10,6 +10,7 @@ import type {
   TranscriptionSettings,
   UsageSummary,
   User,
+  WorkerStatus,
 } from "@/types/api";
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api/v1";
@@ -224,6 +225,7 @@ export const api = {
     URL.revokeObjectURL(url);
   },
 
-  // Billing
+  // Billing & Worker
   getPlans: () => request<{ billing_active: boolean; plans: Array<{ id: string; name: string; description: string; features: string[] }> }>("/billing/plans"),
+  getWorkerStatus: () => request<WorkerStatus>("/worker/status"),
 };

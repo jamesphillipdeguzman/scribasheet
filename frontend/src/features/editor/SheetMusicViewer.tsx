@@ -67,8 +67,8 @@ export function SheetMusicViewer({ musicxml }: SheetMusicViewerProps) {
   }
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
+    <div className="space-y-3 w-full min-w-0 max-w-full">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-xs font-medium text-[#A1A1AA]">
           Sheet Music Notation (OpenSheetMusicDisplay)
         </span>
@@ -99,7 +99,7 @@ export function SheetMusicViewer({ musicxml }: SheetMusicViewerProps) {
         </div>
       )}
 
-      <div className="relative overflow-x-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-4 min-h-[280px]">
+      <div className="relative w-full max-w-full overflow-x-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 min-h-[280px] touch-pan-x touch-pan-y">
         {isRendering && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/20 text-xs text-zinc-700">
             Rendering notation...

@@ -12,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
+import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
@@ -88,15 +89,16 @@ export function DashboardPage() {
       <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 space-y-6">
         {/* Top Welcome & CTA */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">
+          <div className="min-w-0 space-y-2">
+            <h1 className="text-xl sm:text-2xl font-bold tracking-tight break-words">
               Welcome back, {user?.display_name || "Musician"}
             </h1>
             <p className="text-sm text-[#A1A1AA]">
               Manage your transcription projects, review sheet music, and export your scores.
             </p>
+            <WorkerStatusBadge />
           </div>
-          <Button onClick={() => setShowCreateModal(true)}>
+          <Button onClick={() => setShowCreateModal(true)} className="w-full sm:w-auto min-h-[44px] shrink-0">
             <Plus className="h-4 w-4" />
             New Transcription
           </Button>
@@ -173,7 +175,7 @@ export function DashboardPage() {
 
         {/* Project List */}
         {isLoading ? (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {[1, 2, 3].map((i) => (
               <div key={i} className="h-44 rounded-xl border border-[#27273A] bg-[#11111B] animate-pulse" />
             ))}
@@ -196,21 +198,21 @@ export function DashboardPage() {
                   Create your first project to upload an audio or video performance and transcribe it into editable sheet music.
                 </p>
               </div>
-              <Button onClick={() => setShowCreateModal(true)}>
+              <Button onClick={() => setShowCreateModal(true)} className="min-h-[44px]">
                 <Plus className="h-4 w-4" />
                 Create First Project
               </Button>
             </CardContent>
           </Card>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {projects.map((p: Project) => (
-              <Card key={p.id} className="hover:border-[#A78BFA]/40 transition-colors flex flex-col justify-between">
-                <CardContent className="p-5 space-y-4">
-                  <div className="flex items-start justify-between gap-2">
+              <Card key={p.id} className="min-w-0 hover:border-[#A78BFA]/40 transition-colors flex flex-col justify-between">
+                <CardContent className="p-4 sm:p-5 space-y-4 min-w-0">
+                  <div className="flex items-start justify-between gap-2 min-w-0">
                     {renamingId === p.id ? (
                       <form
-                        className="flex-1 flex gap-2"
+                        className="flex-1 flex gap-2 min-w-0"
                         onSubmit={(e) => {
                           e.preventDefault();
                           if (renameValue.trim()) {
@@ -222,7 +224,7 @@ export function DashboardPage() {
                           value={renameValue}
                           onChange={(e) => setRenameValue(e.target.value)}
                           autoFocus
-                          className="flex-1 h-8 rounded border border-[#A78BFA] bg-[#09090F] px-2 text-sm text-[#F5F3FF]"
+                          className="flex-1 min-w-0 h-9 rounded border border-[#A78BFA] bg-[#09090F] px-2 text-sm text-[#F5F3FF]"
                         />
                         <Button type="submit" size="sm">Save</Button>
                       </form>
@@ -230,7 +232,7 @@ export function DashboardPage() {
                       <button
                         type="button"
                         onClick={() => navigate(`/projects/${p.id}`)}
-                        className="text-left font-semibold text-[#F5F3FF] hover:text-[#A78BFA] transition-colors line-clamp-1"
+                        className="min-w-0 flex-1 text-left font-semibold text-[#F5F3FF] hover:text-[#A78BFA] transition-colors truncate"
                       >
                         {p.title}
                       </button>
