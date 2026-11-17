@@ -96,7 +96,7 @@ def build_score_data(
         )
 
     score_notes.sort(key=lambda x: (x.onset_sec, x.pitch_midi))
-    chords = detect_chords(score_notes, effective_bpm, time_signature)
+    chords = detect_chords(score_notes, effective_bpm, time_signature, key_signature=key_signature)
 
     track = ScoreTrack(
         index=0,
@@ -450,6 +450,10 @@ def _populate_part_from_notes(
 
         part.append(m)
 
+    try:
+        part.makeBeams(inPlace=True)
+    except Exception:
+        pass
     _apply_key_signature_and_accidentals(part, key_str)
 
 

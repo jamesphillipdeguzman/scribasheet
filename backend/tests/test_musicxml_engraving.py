@@ -98,3 +98,61 @@ def test_accidentals_f_major_no_redundant_naturals_and_preserves_cancellation() 
 
     pdf_bytes = render_score_pdf(score)
     assert pdf_bytes.startswith(b"%PDF-")
+
+
+def test_music21_chord_symbols_and_beaming_preserve_midi_parity() -> None:
+    import io
+
+    import pretty_midi
+
+    from app.notation.analyzer import detect_chords
+    from app.notation.generator import score_data_to_midi_bytes
+
+    # F major chord (m1) + C7 chord (m2) + 8th-note passage for beaming
+    detected = [
+        DetectedNote(pitch_midi=53, onset_sec=0.0, offset_sec=1.0, velocity=80),
+        DetectedNote(pitch_midi=57, onset_sec=0.0, offset_sec=1.0, velocity=80),
+        DetectedNote(pitch_midi=60, onset_sec=0.0, offset_sec=1.0, velocity=80),
+        DetectedNote(pitch_midi=65, onset_sec=1.0, offset_sec=1.25, velocity=82),
+        DetectedNote(pitch_midi=69, onset_sec=1.25, offset_sec=1.5, velocity=82),
+        DetectedNote(pitch_midi=72, onset_sec=1.5, offset_sec=1.75, velocity=82),
+        DetectedNote(pitch_midi=70, onset_sec=1.75, offset_sec=2.0, velocity=82),
+        DetectedNote(pitch_midi=48, onset_sec=2.0, offset_sec=3.0, velocity=78),
+        DetectedNote(pitch_midi=52, onset_sec=2.0, offset_sec=3.0, velocity=78),
+        DetectedNote(pitch_midi=55, onset_sec=2.0, offset_sec=3.0, velocity=78),
+        DetectedNote(pitch_midi=58, onset_sec=2.0, offset_sec=3.0, velocity=78),
+    ]
+    score = build_score_data(
+        title="Harmony & Beaming Test",
+        detected_notes=detected,
+        tempo_bpm=120.0,
+        tempo_estimated=False,
+        time_signature="4/4",
+        time_signature_estimated=False,
+        key_signature="F major",
+        key_signature_estimated=False,
+        duration_seconds=3.0,
+        instrument="piano",
+    )
+    chords = detect_chords(score.notes, 120.0, "4/4", key_signature="F major")
+    symbols = [c.symbol for c in chords]
+    assert "F" in symbols
+    assert "C7" in symbols
+
+    xml_str = score_data_to_musicxml(score)
+    root = ET.fromstring(xml_str)
+    assert len(root.findall(".//beam")) >= 2
+
+    # Verify strict MIDI/MusicXML sounding pitch parity
+    midi_bytes = score_data_to_midi_bytes(score)
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
+    midi_pitches = sorted({n.pitch for inst in pm.instruments for n in inst.notes})
+    parsed = music21.converter.parseData(xml_str, format="musicxml")
+    xml_pitches = sorted(
+        {
+            p.midi
+            for n in parsed.recurse().notes
+            for p in (n.pitches if hasattr(n, "pitches") else [n.pitch])
+        }
+    )
+    assert midi_pitches == xml_pitches
