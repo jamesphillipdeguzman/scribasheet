@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class ExportCreateRequest(BaseModel):
     format: str = Field(pattern="^(midi|musicxml|pdf|wav)$")
+    include_chords: bool = True
 
 
 class ExportResponse(BaseModel):

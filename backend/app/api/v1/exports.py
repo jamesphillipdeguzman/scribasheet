@@ -42,13 +42,15 @@ def _resolve_pdf_export_bytes(
     project_id: str,
     score_version: int,
     score: ScoreData,
+    *,
+    include_chords: bool = True,
 ) -> bytes:
     """Prefer MuseScore 4 PDF (local or worker-generated for current score version) over ReportLab fallback."""
-    musescore_local = _render_pdf_via_musescore(score)
+    musescore_local = _render_pdf_via_musescore(score, include_chords=include_chords)
     if musescore_local is not None:
         return musescore_local
 
-    # Look for a worker-generated MuseScore PDF matching this score version
+    # Look for a worker-generated MuseScore PDF matching this score version & chord visibility
     results = (
         db.query(TranscriptionResult)
         .join(TranscriptionJob, TranscriptionJob.id == TranscriptionResult.job_id)
@@ -60,7 +62,8 @@ def _resolve_pdf_export_bytes(
         meta = res.metadata_json or {}
         pdf_asset_id = meta.get("pdf_asset_id")
         pdf_ver = meta.get("pdf_score_version")
-        if pdf_asset_id and pdf_ver == score_version:
+        pdf_include_chords = meta.get("pdf_include_chords", True)
+        if pdf_asset_id and pdf_ver == score_version and bool(pdf_include_chords) == bool(include_chords):
             asset = db.query(MediaAsset).filter(MediaAsset.id == pdf_asset_id).first()
             if asset:
                 try:
@@ -70,7 +73,7 @@ def _resolve_pdf_export_bytes(
                 except FileNotFoundError:
                     pass
 
-    return render_score_pdf(score)
+    return render_score_pdf(score, include_chords=include_chords)
 
 
 @router.get("/projects/{project_id}/exports", response_model=list[ExportResponse])
@@ -135,9 +138,15 @@ def create_export(
         if payload.format == "midi":
             content = score_data_to_midi_bytes(score)
         elif payload.format == "musicxml":
-            content = score_data_to_musicxml(score).encode("utf-8")
+            content = score_data_to_musicxml(score, include_chords=payload.include_chords).encode("utf-8")
         elif payload.format == "pdf":
-            content = _resolve_pdf_export_bytes(db, project.id, score_row.version, score)
+            content = _resolve_pdf_export_bytes(
+                db,
+                project.id,
+                score_row.version,
+                score,
+                include_chords=payload.include_chords,
+            )
         elif payload.format == "wav":
             content = render_score_wav(score)
         else:

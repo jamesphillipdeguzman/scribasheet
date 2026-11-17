@@ -545,7 +545,7 @@ def _attach_ottava_spanners(
     return attached
 
 
-def score_data_to_musicxml(score: ScoreData) -> str:
+def score_data_to_musicxml(score: ScoreData, *, include_chords: bool = True) -> str:
     m21_score = music21.stream.Score()
     m21_score.metadata = music21.metadata.Metadata()
     clean_title = clean_score_title(score.title)
@@ -580,7 +580,8 @@ def score_data_to_musicxml(score: ScoreData) -> str:
                 grid_ql=grid_ql,
             )
             _attach_ottava_spanners(p_treble)
-            _attach_chord_symbols(p_treble, score.chords)
+            if include_chords:
+                _attach_chord_symbols(p_treble, score.chords)
             m21_score.insert(0, p_treble)
 
             p_bass = music21.stream.Part()
@@ -615,7 +616,8 @@ def score_data_to_musicxml(score: ScoreData) -> str:
             )
             if track.clef == "treble":
                 _attach_ottava_spanners(p)
-            _attach_chord_symbols(p, score.chords)
+            if include_chords:
+                _attach_chord_symbols(p, score.chords)
             m21_score.insert(0, p)
 
     exporter = music21.musicxml.m21ToXml.GeneralObjectExporter(m21_score)
@@ -712,25 +714,25 @@ def _render_pdf_from_musicxml_via_musescore(xml_str: str) -> bytes | None:
     return None
 
 
-def _render_pdf_via_musescore(score: ScoreData) -> bytes | None:
+def _render_pdf_via_musescore(score: ScoreData, *, include_chords: bool = True) -> bytes | None:
     if os.environ.get("DISABLE_MUSESCORE_PDF", "").lower() in ("1", "true", "yes"):
         return None
     if not _find_musescore_binary():
         return None
     try:
-        xml_str = score_data_to_musicxml(score)
+        xml_str = score_data_to_musicxml(score, include_chords=include_chords)
         return _render_pdf_from_musicxml_via_musescore(xml_str)
     except Exception:
         return None
 
 
-def render_score_pdf(score: ScoreData) -> bytes:
+def render_score_pdf(score: ScoreData, *, include_chords: bool = True) -> bytes:
     """Render a clean, printable multi-page PDF sheet music document.
 
     Uses MuseScore CLI engraving from MusicXML when available locally,
     falling back to the ReportLab grand-staff renderer in headless environments.
     """
-    musescore_pdf = _render_pdf_via_musescore(score)
+    musescore_pdf = _render_pdf_via_musescore(score, include_chords=include_chords)
     if musescore_pdf is not None:
         return musescore_pdf
 
@@ -837,15 +839,16 @@ def render_score_pdf(score: ScoreData) -> bytes:
         sys_end_sec = sys_start_sec + sys_dur_sec
 
         # Draw chords in dedicated lane above treble staff (no collision with measure numbers)
-        last_chord_x = -100.0
-        for ch in score.chords:
-            if sys_start_sec <= ch.onset_sec < sys_end_sec:
-                x = note_area_left + ((ch.onset_sec - sys_start_sec) / sys_dur_sec) * usable_w
-                if x - last_chord_x < 24.0:
-                    x = last_chord_x + 24.0
-                c.setFont("Helvetica-Bold", 8.5)
-                c.drawString(x, y_cursor + 12, ch.symbol)
-                last_chord_x = x
+        if include_chords:
+            last_chord_x = -100.0
+            for ch in score.chords:
+                if sys_start_sec <= ch.onset_sec < sys_end_sec:
+                    x = note_area_left + ((ch.onset_sec - sys_start_sec) / sys_dur_sec) * usable_w
+                    if x - last_chord_x < 24.0:
+                        x = last_chord_x + 24.0
+                    c.setFont("Helvetica-Bold", 8.5)
+                    c.drawString(x, y_cursor + 12, ch.symbol)
+                    last_chord_x = x
 
         y_treble_bottom = y_cursor - staff_height
         y_bass_bottom = (y_cursor - bass_offset) - staff_height

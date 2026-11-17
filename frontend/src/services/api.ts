@@ -319,10 +319,17 @@ export const api = {
 
   // Exports
   listExports: (projectId: string) => request<ExportRecord[]>(`/projects/${projectId}/exports`),
-  createExport: (projectId: string, format: "midi" | "musicxml" | "pdf" | "wav") =>
+  createExport: (
+    projectId: string,
+    format: "midi" | "musicxml" | "pdf" | "wav",
+    options?: { include_chords?: boolean },
+  ) =>
     request<ExportRecord>(`/projects/${projectId}/exports`, {
       method: "POST",
-      body: JSON.stringify({ format }),
+      body: JSON.stringify({
+        format,
+        ...(options?.include_chords !== undefined ? { include_chords: options.include_chords } : {}),
+      }),
     }),
   downloadExportBlob: async (downloadUrl: string, filename: string) => {
     const { accessToken } = getStoredTokens();

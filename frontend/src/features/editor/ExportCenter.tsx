@@ -29,6 +29,7 @@ export function ExportCenter({ projectId, projectTitle, hasScore }: ExportCenter
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [activeFmt, setActiveFmt] = useState<string | null>(null);
+  const [includeChords, setIncludeChords] = useState<boolean>(true);
 
   const { data: exportsList = [] } = useQuery({
     queryKey: ["exports", projectId],
@@ -39,7 +40,7 @@ export function ExportCenter({ projectId, projectTitle, hasScore }: ExportCenter
     mutationFn: async (fmt: "midi" | "musicxml" | "pdf" | "wav") => {
       setError(null);
       setActiveFmt(fmt);
-      const record = await api.createExport(projectId, fmt);
+      const record = await api.createExport(projectId, fmt, { include_chords: includeChords });
       if (record.download_url) {
         const ext = FORMATS.find((f) => f.id === fmt)?.ext || `.${fmt}`;
         await api.downloadExportBlob(record.download_url, `${projectTitle || "score"}${ext}`);
@@ -67,6 +68,32 @@ export function ExportCenter({ projectId, projectTitle, hasScore }: ExportCenter
           {error}
         </div>
       )}
+
+      {/* Export Options */}
+      <div className="rounded-xl border border-[#27273A] bg-[#09090F] p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="space-y-0.5">
+          <div className="text-sm font-medium text-[#FAFAFA]">Show Chord Symbols</div>
+          <p className="text-xs text-[#A1A1AA]">
+            Display automatically detected chord labels above the piano staff in the exported PDF.
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={includeChords}
+          aria-label="Show Chord Symbols"
+          onClick={() => setIncludeChords((prev) => !prev)}
+          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-[#27273A] transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${
+            includeChords ? "bg-[#7C3AED]" : "bg-[#27273A]"
+          }`}
+        >
+          <span
+            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+              includeChords ? "translate-x-6" : "translate-x-1"
+            }`}
+          />
+        </button>
+      </div>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 min-w-0">
         {FORMATS.map((f) => {
