@@ -31,7 +31,7 @@ def start_transcription(
     db: Session = Depends(get_db),
 ):
     usage = get_user_usage_metrics(db, current_user)
-    if float(usage["monthly_minutes_used"]) >= float(usage["monthly_minutes_limit"]):
+    if not usage["is_unlimited"] and float(usage["monthly_minutes_used"]) >= float(usage["monthly_minutes_limit"]):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(

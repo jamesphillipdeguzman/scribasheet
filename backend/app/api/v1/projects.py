@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import PLAN_LIMITS, get_current_user, get_owned_project
+from app.api.deps import PLAN_LIMITS, get_current_user, get_owned_project, is_user_unlimited
 from app.api.v1.worker import ACTIVE_WORKER_STATUSES
 from app.db.session import get_db
 from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob, User
@@ -57,13 +57,14 @@ def create_project(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    limits = PLAN_LIMITS.get(current_user.plan_tier, PLAN_LIMITS["free"])
-    current_count = db.query(Project).filter(Project.user_id == current_user.id).count()
-    if current_count >= int(limits["projects"]):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Project limit reached ({limits['projects']}) for your {current_user.plan_tier} plan.",
-        )
+    if not is_user_unlimited(current_user):
+        limits = PLAN_LIMITS.get(current_user.plan_tier, PLAN_LIMITS["free"])
+        current_count = db.query(Project).filter(Project.user_id == current_user.id).count()
+        if current_count >= int(limits["projects"]):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Project limit reached ({limits['projects']}) for your {current_user.plan_tier} plan.",
+            )
 
     project = Project(
         user_id=current_user.id,

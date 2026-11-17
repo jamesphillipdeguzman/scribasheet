@@ -316,71 +316,84 @@ export function ProjectStudioPage() {
     <AppShell>
       <div className="mx-auto max-w-[1600px] px-3 sm:px-4 py-4 space-y-4 min-w-0">
         {/* Top Studio Toolbar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#27273A] bg-[#11111B] px-3 sm:px-4 py-3 min-w-0">
-          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
-            <Link
-              to="/dashboard"
-              className="rounded-lg p-2 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] shrink-0"
-              aria-label="Back to Dashboard"
-            >
-              <ArrowLeft className="h-4 w-4" />
-            </Link>
-            <button
-              type="button"
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="rounded-lg p-2 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] shrink-0"
-              aria-label="Toggle ingestion panel"
-            >
-              {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
-            </button>
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2 min-w-0">
-                <h1 className="text-sm sm:text-base font-semibold truncate max-w-full">{project.title}</h1>
-                <StatusBadge status={project.status} />
-                <WorkerStatusBadge />
-              </div>
+        <div
+          data-testid="studio-header"
+          className="flex flex-col gap-3 rounded-xl border border-[#27273A] bg-[#11111B] px-3 sm:px-4 py-3 min-w-0 sm:flex-row sm:items-center sm:justify-between"
+        >
+          {/* Row 1 on mobile: Navigation (left) + Actions (right); on sm+: contents flatten into single row */}
+          <div className="flex items-center justify-between gap-2 w-full sm:w-auto sm:contents">
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 sm:order-1">
+              <Link
+                to="/dashboard"
+                className="rounded-lg p-2 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] shrink-0"
+                aria-label="Back to Dashboard"
+              >
+                <ArrowLeft className="h-4 w-4" />
+              </Link>
+              <button
+                type="button"
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="rounded-lg p-2 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] shrink-0"
+                aria-label="Toggle ingestion panel"
+              >
+                {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
+              </button>
+            </div>
+
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 sm:order-3">
               {scoreData && (
-                <div className="text-xs text-[#A1A1AA] flex flex-wrap items-center gap-2 mt-0.5">
-                  <span>{scoreData.tempo_bpm} BPM {scoreData.tempo_estimated ? "(est.)" : ""}</span>
-                  <span>•</span>
-                  <span>{scoreData.time_signature}</span>
-                  <span>•</span>
-                  <span>Key: {scoreData.key_signature} {scoreData.key_signature_estimated ? "(est.)" : ""}</span>
-                  <span>•</span>
-                  <span>{scoreData.notes.length} notes</span>
-                </div>
+                <>
+                  <Button size="sm" variant="ghost" onClick={handleUndo} disabled={undoStack.length === 0} aria-label="Undo" className="shrink-0">
+                    <Undo2 className="h-4 w-4" />
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={handleRedo} disabled={redoStack.length === 0} aria-label="Redo" className="shrink-0">
+                    <Redo2 className="h-4 w-4" />
+                  </Button>
+                  <span className="text-xs text-[#A1A1AA] hidden md:inline px-2 whitespace-nowrap">
+                    {saveStatus === "saving" && "Saving..."}
+                    {saveStatus === "saved" && (
+                      <span className="inline-flex items-center gap-1 text-emerald-400">
+                        <Check className="h-3.5 w-3.5" /> Saved
+                      </span>
+                    )}
+                    {saveStatus === "unsaved" && <span className="text-amber-300">Unsaved changes</span>}
+                    {saveStatus === "error" && <span className="text-red-400">{saveError || "Save error"}</span>}
+                  </span>
+                  <Button
+                    size="sm"
+                    onClick={() => persistScore(scoreData, scoreVersion)}
+                    disabled={saveStatus === "saving"}
+                    className="whitespace-nowrap shrink-0"
+                  >
+                    <Save className="h-3.5 w-3.5" />
+                    Save Score
+                  </Button>
+                </>
               )}
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          {/* Row 2 on mobile: Project title, badges, and score metadata */}
+          <div className="min-w-0 flex-1 sm:order-2">
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              <h1 className="text-sm sm:text-base font-semibold truncate min-w-0 max-w-full">{project.title}</h1>
+              <StatusBadge status={project.status} />
+              <WorkerStatusBadge />
+            </div>
             {scoreData && (
-              <>
-                <Button size="sm" variant="ghost" onClick={handleUndo} disabled={undoStack.length === 0} aria-label="Undo">
-                  <Undo2 className="h-4 w-4" />
-                </Button>
-                <Button size="sm" variant="ghost" onClick={handleRedo} disabled={redoStack.length === 0} aria-label="Redo">
-                  <Redo2 className="h-4 w-4" />
-                </Button>
-                <span className="text-xs text-[#A1A1AA] hidden sm:inline px-2">
-                  {saveStatus === "saving" && "Saving..."}
-                  {saveStatus === "saved" && (
-                    <span className="inline-flex items-center gap-1 text-emerald-400">
-                      <Check className="h-3.5 w-3.5" /> Saved
-                    </span>
-                  )}
-                  {saveStatus === "unsaved" && <span className="text-amber-300">Unsaved changes</span>}
-                  {saveStatus === "error" && <span className="text-red-400">{saveError || "Save error"}</span>}
+              <div className="text-xs text-[#A1A1AA] flex flex-wrap items-center gap-x-2 gap-y-1 mt-1">
+                <span className="whitespace-nowrap">
+                  {scoreData.tempo_bpm} BPM {scoreData.tempo_estimated ? "(est.)" : ""}
                 </span>
-                <Button
-                  size="sm"
-                  onClick={() => persistScore(scoreData, scoreVersion)}
-                  disabled={saveStatus === "saving"}
-                >
-                  <Save className="h-3.5 w-3.5" />
-                  Save Score
-                </Button>
-              </>
+                <span aria-hidden="true">•</span>
+                <span className="whitespace-nowrap">{scoreData.time_signature}</span>
+                <span aria-hidden="true">•</span>
+                <span className="whitespace-nowrap">
+                  Key: {scoreData.key_signature} {scoreData.key_signature_estimated ? "(est.)" : ""}
+                </span>
+                <span aria-hidden="true">•</span>
+                <span className="whitespace-nowrap">{scoreData.notes.length} notes</span>
+              </div>
             )}
           </div>
         </div>

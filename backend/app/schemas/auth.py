@@ -37,6 +37,8 @@ class UserResponse(BaseModel):
     display_name: str
     email_verified: bool
     plan_tier: str
+    is_unlimited: bool = False
+    plan_label: str = "FREE"
     created_at: datetime
     updated_at: datetime
 
@@ -56,6 +58,8 @@ class TokenResponse(BaseModel):
 
 class UsageSummaryResponse(BaseModel):
     plan_tier: str
+    plan_label: str = "FREE"
+    is_unlimited: bool = False
     monthly_minutes_used: float
     monthly_minutes_limit: float
     project_count: int

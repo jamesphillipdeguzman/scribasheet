@@ -55,17 +55,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {usage && (
-              <div className="hidden md:flex items-center gap-2 rounded-lg border border-[#27273A] bg-[#11111B] px-3 py-1 text-xs text-[#A1A1AA]">
-                <Music className="h-3.5 w-3.5 text-[#A78BFA]" />
-                <span>
-                  {usage.monthly_minutes_used} / {usage.monthly_minutes_limit} min
-                </span>
-                <span className="rounded bg-[#181825] px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-[#A78BFA]">
-                  {usage.plan_tier}
-                </span>
-              </div>
-            )}
+            {usage && (() => {
+              const isUnlimited = Boolean(usage.is_unlimited || user?.is_unlimited);
+              const planLabel = usage.plan_label || (isUnlimited ? "UNLIMITED" : usage.plan_tier);
+              return (
+                <div
+                  data-testid="navbar-usage-indicator"
+                  className="hidden md:flex items-center gap-2 rounded-lg border border-[#27273A] bg-[#11111B] px-3 py-1 text-xs text-[#A1A1AA]"
+                >
+                  <Music className="h-3.5 w-3.5 text-[#A78BFA]" />
+                  <span>
+                    {isUnlimited
+                      ? `${usage.monthly_minutes_used} min used`
+                      : `${usage.monthly_minutes_used} / ${usage.monthly_minutes_limit} min`}
+                  </span>
+                  <span className="rounded bg-[#181825] px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-[#A78BFA]">
+                    {planLabel}
+                  </span>
+                </div>
+              );
+            })()}
             <div className="hidden sm:flex items-center gap-2 text-xs text-[#A1A1AA]">
               <UserIcon className="h-3.5 w-3.5" />
               <span className="max-w-[140px] truncate">{user?.display_name || user?.email}</span>

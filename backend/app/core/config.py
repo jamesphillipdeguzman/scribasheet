@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    ADMIN_EMAILS: str = ""
+
+    @property
+    def admin_email_set(self) -> set[str]:
+        return {
+            email.strip().lower()
+            for email in (self.ADMIN_EMAILS or "").split(",")
+            if email.strip()
+        }
 
     # Optional Supabase Auth
     SUPABASE_URL: str = ""

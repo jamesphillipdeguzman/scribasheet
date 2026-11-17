@@ -4,7 +4,12 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_user_usage_metrics
+from app.api.deps import (
+    get_current_user,
+    get_user_plan_label,
+    get_user_usage_metrics,
+    is_user_unlimited,
+)
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -29,6 +34,13 @@ from app.schemas.auth import (
 from app.storage.service import storage_service
 
 router = APIRouter(tags=["Authentication & Users"])
+
+
+def _serialize_user(user: User) -> UserResponse:
+    resp = UserResponse.model_validate(user)
+    resp.is_unlimited = is_user_unlimited(user)
+    resp.plan_label = get_user_plan_label(user)
+    return resp
 
 
 @router.post("/auth/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
@@ -56,7 +68,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     return TokenResponse(
         access_token=create_access_token(user.id, {"email": user.email}),
         refresh_token=create_refresh_token(user.id),
-        user=UserResponse.model_validate(user),
+        user=_serialize_user(user),
     )
 
 
@@ -73,7 +85,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     return TokenResponse(
         access_token=create_access_token(user.id, {"email": user.email}),
         refresh_token=create_refresh_token(user.id),
-        user=UserResponse.model_validate(user),
+        user=_serialize_user(user),
     )
 
 
@@ -94,7 +106,7 @@ def refresh_token(payload: RefreshRequest, db: Session = Depends(get_db)):
     return TokenResponse(
         access_token=create_access_token(user.id, {"email": user.email}),
         refresh_token=create_refresh_token(user.id),
-        user=UserResponse.model_validate(user),
+        user=_serialize_user(user),
     )
 
 
@@ -146,7 +158,7 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
 
 @router.get("/users/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
-    return current_user
+    return _serialize_user(current_user)
 
 
 @router.patch("/users/me", response_model=UserResponse)
@@ -159,7 +171,7 @@ def update_me(
         current_user.display_name = payload.display_name.strip()
     db.commit()
     db.refresh(current_user)
-    return current_user
+    return _serialize_user(current_user)
 
 
 @router.get("/users/me/usage", response_model=UsageSummaryResponse)

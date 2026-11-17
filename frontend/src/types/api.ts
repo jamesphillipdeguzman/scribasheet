@@ -3,7 +3,9 @@ export interface User {
   email: string;
   display_name: string;
   email_verified: boolean;
-  plan_tier: "free" | "pro" | "studio" | string;
+  plan_tier: "free" | "pro" | "studio" | "unlimited" | string;
+  is_unlimited?: boolean;
+  plan_label?: string;
   created_at: string;
   updated_at: string;
 }
@@ -17,6 +19,8 @@ export interface TokenResponse {
 
 export interface UsageSummary {
   plan_tier: string;
+  plan_label?: string;
+  is_unlimited?: boolean;
   monthly_minutes_used: number;
   monthly_minutes_limit: number;
   project_count: number;

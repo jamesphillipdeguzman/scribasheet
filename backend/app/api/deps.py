@@ -5,6 +5,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.security import decode_token
 from app.db.session import get_db
 from app.models import MediaAsset, Project, UsageRecord, User
@@ -75,8 +76,23 @@ def get_owned_project(
     return project
 
 
-def get_user_usage_metrics(db: Session, user: User) -> dict[str, float | int | str]:
+def is_user_unlimited(user: User) -> bool:
+    """Resolve unlimited entitlement exclusively on the backend from ADMIN_EMAILS or plan_tier."""
+    email_norm = (user.email or "").strip().lower()
+    if email_norm and email_norm in get_settings().admin_email_set:
+        return True
+    return (user.plan_tier or "").strip().lower() == "unlimited"
+
+
+def get_user_plan_label(user: User) -> str:
+    if is_user_unlimited(user):
+        return "UNLIMITED"
+    return (user.plan_tier or "free").strip().upper()
+
+
+def get_user_usage_metrics(db: Session, user: User) -> dict[str, float | int | str | bool]:
     limits = PLAN_LIMITS.get(user.plan_tier, PLAN_LIMITS["free"])
+    unlimited = is_user_unlimited(user)
     month_start = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     minutes_used = (
@@ -98,6 +114,8 @@ def get_user_usage_metrics(db: Session, user: User) -> dict[str, float | int | s
     )
     return {
         "plan_tier": user.plan_tier,
+        "plan_label": get_user_plan_label(user),
+        "is_unlimited": unlimited,
         "monthly_minutes_used": round(float(minutes_used), 2),
         "monthly_minutes_limit": float(limits["monthly_minutes"]),
         "project_count": int(project_count),

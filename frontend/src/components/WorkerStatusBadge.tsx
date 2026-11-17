@@ -88,7 +88,7 @@ export function WorkerStatusBadge({ className }: { className?: string }) {
     <span
       data-status={online ? "online" : "offline"}
       className={cn(
-        "inline-flex max-w-full flex-wrap items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium",
+        "inline-flex max-w-full items-center gap-1.5 whitespace-nowrap shrink-0 rounded-full border px-3 py-1 text-xs font-medium",
         online
           ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
           : "border-amber-500/30 bg-amber-500/10 text-amber-200",

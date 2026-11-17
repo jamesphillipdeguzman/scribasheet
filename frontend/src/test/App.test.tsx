@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "@/App";
+import { AppShell } from "@/components/AppShell";
+import * as AuthCtx from "@/features/auth/AuthContext";
 import { AuthProvider } from "@/features/auth/AuthContext";
 import { LoginPage } from "@/features/auth/AuthPages";
 import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
@@ -605,5 +607,116 @@ describe("ScribaSheet Frontend", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("renders UNLIMITED, FREE, PRO, and legacy usage indicators in AppShell navbar", () => {
+    const baseUser = {
+      id: "u1",
+      email: "test@example.com",
+      display_name: "Tester",
+      email_verified: true,
+      plan_tier: "free",
+      created_at: "",
+      updated_at: "",
+    };
+
+    // 1. Unlimited user -> shows UNLIMITED and consumed minutes without / 30 min cap
+    const authSpy = vi.spyOn(AuthCtx, "useAuth").mockReturnValue({
+      user: { ...baseUser, is_unlimited: true, plan_label: "UNLIMITED" },
+      usage: {
+        plan_tier: "free",
+        plan_label: "UNLIMITED",
+        is_unlimited: true,
+        monthly_minutes_used: 42.5,
+        monthly_minutes_limit: 30,
+        project_count: 20,
+        project_limit: 15,
+        storage_used_mb: 310,
+        storage_limit_mb: 250,
+      },
+      isLoading: false,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+      refreshUser: vi.fn(),
+    });
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { rerender } = render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <AppShell>
+            <div>Body</div>
+          </AppShell>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    const navUsage = screen.getByTestId("navbar-usage-indicator");
+    expect(navUsage).toHaveTextContent("42.5 min used");
+    expect(navUsage).toHaveTextContent("UNLIMITED");
+    expect(navUsage).not.toHaveTextContent("/ 30 min");
+
+    // 2. PRO user -> preserves PRO limit display
+    authSpy.mockReturnValue({
+      user: { ...baseUser, plan_tier: "pro", is_unlimited: false, plan_label: "PRO" },
+      usage: {
+        plan_tier: "pro",
+        plan_label: "PRO",
+        is_unlimited: false,
+        monthly_minutes_used: 12,
+        monthly_minutes_limit: 300,
+        project_count: 5,
+        project_limit: 200,
+        storage_used_mb: 20,
+        storage_limit_mb: 5120,
+      },
+      isLoading: false,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+      refreshUser: vi.fn(),
+    });
+    rerender(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <AppShell>
+            <div>Body</div>
+          </AppShell>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("navbar-usage-indicator")).toHaveTextContent("12 / 300 min");
+    expect(screen.getByTestId("navbar-usage-indicator")).toHaveTextContent("PRO");
+
+    // 3. Legacy FREE payload missing is_unlimited / plan_label -> falls back safely to FREE
+    authSpy.mockReturnValue({
+      user: baseUser,
+      usage: {
+        plan_tier: "free",
+        monthly_minutes_used: 19.34,
+        monthly_minutes_limit: 30,
+        project_count: 2,
+        project_limit: 15,
+        storage_used_mb: 10,
+        storage_limit_mb: 250,
+      },
+      isLoading: false,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+      refreshUser: vi.fn(),
+    });
+    rerender(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <AppShell>
+            <div>Body</div>
+          </AppShell>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("navbar-usage-indicator")).toHaveTextContent("19.34 / 30 min");
+    expect(screen.getByTestId("navbar-usage-indicator")).toHaveTextContent("free");
+    authSpy.mockRestore();
   });
 });

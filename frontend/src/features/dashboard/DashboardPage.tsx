@@ -108,37 +108,50 @@ export function DashboardPage() {
         <WorkerControlPanel />
 
         {/* Usage Summary */}
-        {usage && (
-          <div className="grid gap-4 sm:grid-cols-3">
-            <Card>
-              <CardContent className="p-4">
-                <div className="text-xs text-[#A1A1AA]">Monthly Transcription Allowance</div>
-                <div className="mt-1 flex items-baseline justify-between">
-                  <span className="text-xl font-semibold">
-                    {usage.monthly_minutes_used} <span className="text-sm font-normal text-[#A1A1AA]">/ {usage.monthly_minutes_limit} min</span>
-                  </span>
-                  <span className="text-xs uppercase text-[#A78BFA]">{usage.plan_tier}</span>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="p-4">
-                <div className="text-xs text-[#A1A1AA]">Active Projects</div>
-                <div className="mt-1 text-xl font-semibold">
-                  {usage.project_count} <span className="text-sm font-normal text-[#A1A1AA]">/ {usage.project_limit}</span>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="p-4">
-                <div className="text-xs text-[#A1A1AA]">Private Media Storage</div>
-                <div className="mt-1 text-xl font-semibold">
-                  {usage.storage_used_mb} <span className="text-sm font-normal text-[#A1A1AA]">/ {usage.storage_limit_mb} MB</span>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        )}
+        {usage && (() => {
+          const isUnlimited = Boolean(usage.is_unlimited || user?.is_unlimited);
+          const planLabel = usage.plan_label || (isUnlimited ? "UNLIMITED" : usage.plan_tier);
+          return (
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Card>
+                <CardContent className="p-4">
+                  <div className="text-xs text-[#A1A1AA]">Monthly Transcription Allowance</div>
+                  <div className="mt-1 flex items-baseline justify-between">
+                    <span className="text-xl font-semibold">
+                      {usage.monthly_minutes_used}{" "}
+                      <span className="text-sm font-normal text-[#A1A1AA]">
+                        {isUnlimited ? "min used" : `/ ${usage.monthly_minutes_limit} min`}
+                      </span>
+                    </span>
+                    <span className="text-xs uppercase text-[#A78BFA]">{planLabel}</span>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="p-4">
+                  <div className="text-xs text-[#A1A1AA]">Active Projects</div>
+                  <div className="mt-1 text-xl font-semibold">
+                    {usage.project_count}{" "}
+                    {!isUnlimited && (
+                      <span className="text-sm font-normal text-[#A1A1AA]">/ {usage.project_limit}</span>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="p-4">
+                  <div className="text-xs text-[#A1A1AA]">Private Media Storage</div>
+                  <div className="mt-1 text-xl font-semibold">
+                    {usage.storage_used_mb}{" "}
+                    <span className="text-sm font-normal text-[#A1A1AA]">
+                      {isUnlimited ? "MB" : `/ ${usage.storage_limit_mb} MB`}
+                    </span>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          );
+        })()}
 
         {/* Search, Filter & Sort Bar */}
         <div className="flex flex-col sm:flex-row gap-3">

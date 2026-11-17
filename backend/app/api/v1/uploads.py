@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import PLAN_LIMITS, get_current_user, is_user_unlimited
 from app.audio.processor import (
     MediaValidationError,
     probe_media,
@@ -40,6 +40,26 @@ class ConfirmUploadRequest(BaseModel):
     filename: str
     content_type: str
     size_bytes: int
+
+
+def _enforce_storage_quota(db: Session, user: User, incoming_bytes: int) -> None:
+    if is_user_unlimited(user):
+        return
+    limits = PLAN_LIMITS.get(user.plan_tier, PLAN_LIMITS["free"])
+    limit_bytes = int(float(limits["storage_mb"]) * 1024 * 1024)
+    from sqlalchemy import func
+
+    used_bytes = (
+        db.query(func.coalesce(func.sum(MediaAsset.size_bytes), 0))
+        .filter(MediaAsset.user_id == user.id)
+        .scalar()
+        or 0
+    )
+    if int(used_bytes) + int(incoming_bytes) > limit_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Storage quota reached ({limits['storage_mb']} MB) for your {user.plan_tier} plan.",
+        )
 
 
 @router.post("/presign")
@@ -128,6 +148,9 @@ def confirm_presigned_upload(
                 detail="Uploaded object size does not match declared size.",
             )
 
+    asset_bytes = actual_size if actual_size is not None else payload.size_bytes
+    _enforce_storage_quota(db, current_user, asset_bytes)
+
     asset = MediaAsset(
         project_id=project.id,
         user_id=current_user.id,
@@ -135,7 +158,7 @@ def confirm_presigned_upload(
         storage_path=payload.storage_key,
         original_filename=sanitize_filename(payload.filename),
         mime_type=payload.content_type,
-        size_bytes=actual_size if actual_size is not None else payload.size_bytes,
+        size_bytes=asset_bytes,
     )
     db.add(asset)
     db.commit()
@@ -185,6 +208,7 @@ async def upload_media(
             raise
 
     try:
+        _enforce_storage_quota(db, current_user, total_bytes)
         meta = probe_media(tmp_path)
         if meta.duration_seconds > settings.MAX_AUDIO_DURATION_SECONDS:
             raise HTTPException(

@@ -17,13 +17,14 @@ const STATUS_STYLES: Record<string, string> = {
   draft: "bg-[#181825] text-[#A1A1AA] border-[#27273A]",
 };
 
-export function StatusBadge({ status }: { status: string }) {
+export function StatusBadge({ status, className }: { status: string; className?: string }) {
   const key = status.toLowerCase();
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium capitalize",
-        STATUS_STYLES[key] || STATUS_STYLES.draft
+        "inline-flex items-center whitespace-nowrap shrink-0 rounded-full border px-2.5 py-0.5 text-xs font-medium capitalize",
+        STATUS_STYLES[key] || STATUS_STYLES.draft,
+        className
       )}
     >
       {status.replace(/_/g, " ")}
