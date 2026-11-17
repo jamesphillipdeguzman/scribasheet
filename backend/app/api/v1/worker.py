@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -218,7 +219,20 @@ def worker_status(
     _: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return get_worker_availability(db)
+    try:
+        return get_worker_availability(db)
+    except SQLAlchemyError as exc:
+        logger.exception("Database error while querying worker status: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error while checking worker availability.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Unexpected error while querying worker status: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unexpected error while checking worker availability.",
+        ) from exc
 
 
 @router.post("/offline")

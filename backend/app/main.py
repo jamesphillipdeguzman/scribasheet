@@ -48,9 +48,20 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+_allowed_cors_origins = list(
+    dict.fromkeys(
+        [
+            *settings.BACKEND_CORS_ORIGINS,
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "https://scribasheet.vercel.app",
+        ]
+    )
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_origins=_allowed_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],

@@ -65,19 +65,28 @@ $env:PYTHONUNBUFFERED = "1"
 $startStamp = Get-Date -Format o
 Add-Content -Path $LogFile -Value "[$startStamp] [INFO] Starting ScribaSheet background worker via $PythonExe" -Encoding utf8
 
+$prevErrPref = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+
 Push-Location $BackendDir
 try {
     & $PythonExe -m app.worker_agent 2>&1 | ForEach-Object {
         $line = if ($_ -is [System.Management.Automation.ErrorRecord]) {
-            $_.ToString()
+            $_.Exception.Message
         } else {
             [string]$_
         }
-        Add-Content -Path $LogFile -Value $line -Encoding utf8
+        if ($line) {
+            Add-Content -Path $LogFile -Value $line -Encoding utf8
+        }
     }
     $exitCode = $LASTEXITCODE
 } finally {
     Pop-Location
+    $ErrorActionPreference = $prevErrPref
 }
 
 $endStamp = Get-Date -Format o

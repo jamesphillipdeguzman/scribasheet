@@ -205,3 +205,68 @@ def test_worker_status_endpoint_reports_online_offline_and_counts(client, db_ses
     assert body_off["status"] == "offline"
     assert body_off["last_seen_seconds"] >= 119.0
     assert db_session.query(TranscriptionJob).filter(TranscriptionJob.status == "queued").count() == body_off["queue_depth"]
+
+
+def test_worker_status_empty_naive_tz_cors_and_db_error(client, db_session, monkeypatch):
+    reg = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": f"cors_status_{uuid.uuid4().hex[:8]}@example.com",
+            "password": "StrongPassword123!",
+            "display_name": "CORS Tester",
+        },
+    )
+    assert reg.status_code == 201
+    headers = {
+        "Authorization": f"Bearer {reg.json()['access_token']}",
+        "Origin": "https://scribasheet.vercel.app",
+    }
+
+    # 1. OPTIONS preflight with production Origin
+    opt_res = client.options(
+        "/api/v1/worker/status",
+        headers={
+            "Origin": "https://scribasheet.vercel.app",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "Authorization",
+        },
+    )
+    assert opt_res.status_code == 200
+    assert opt_res.headers.get("access-control-allow-origin") == "https://scribasheet.vercel.app"
+
+    # 2. Empty database with no heartbeat
+    db_session.query(WorkerNode).delete()
+    db_session.commit()
+    empty_res = client.get("/api/v1/worker/status", headers=headers)
+    assert empty_res.status_code == 200
+    assert empty_res.headers.get("access-control-allow-origin") == "https://scribasheet.vercel.app"
+    empty_body = empty_res.json()
+    assert empty_body["worker_online"] is False
+    assert empty_body["last_seen_seconds"] is None
+
+    # 3. Timezone-naive datetime stored in SQLite
+    naive_now = datetime.now(UTC).replace(tzinfo=None)
+    db_session.add(
+        WorkerNode(
+            worker_id="win-naive-tz",
+            status="online",
+            last_seen_at=naive_now - timedelta(seconds=8),
+            metadata_json={},
+            updated_at=naive_now,
+        )
+    )
+    db_session.commit()
+    naive_res = client.get("/api/v1/worker/status", headers=headers)
+    assert naive_res.status_code == 200
+    assert naive_res.json()["worker_online"] is True
+
+    # 4. Database error returns HTTP 500 with CORS headers (not silently converted to offline)
+    from sqlalchemy.exc import OperationalError
+
+    def _raise_db_err(_db):
+        raise OperationalError("SELECT 1", {}, Exception("no such table: worker_nodes"))
+
+    monkeypatch.setattr("app.api.v1.worker.get_worker_availability", _raise_db_err)
+    err_res = client.get("/api/v1/worker/status", headers=headers)
+    assert err_res.status_code == 500
+    assert err_res.headers.get("access-control-allow-origin") == "https://scribasheet.vercel.app"

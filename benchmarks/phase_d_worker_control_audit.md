@@ -1,38 +1,53 @@
-# ScribaSheet — Phase D: Local Worker Controller & UI Control Audit
+# ScribaSheet — Phase D: Local Worker Controller & Railway Worker Status Audit
 
-## 1. Architecture & Security Design
+## 1. Root Cause Diagnosis
 
-### Local Worker Controller (`backend/app/worker_controller.py`)
-- **Loopback-Only Binding**: Strictly binds to `127.0.0.1` (default port `47832`, configurable via `WORKER_CONTROLLER_PORT`); rejects non-loopback hosts such as `0.0.0.0` with `ValueError`.
-- **No ML Imports / No Arbitrary Commands**: Uses Python stdlib `http.server.ThreadingHTTPServer` and `subprocess.Popen` to manage only the fixed command `backend\.venv\Scripts\python.exe -m app.worker_agent` from `backend\` with `PYTHONUNBUFFERED=1`.
-- **Pairing Authentication**: Generates a random 32-byte URL-safe token (`secrets.token_urlsafe(32)`) stored locally at `logs/worker_controller.token`. No secrets are embedded in the frontend bundle. `GET /health` reports controller reachability, while `GET /status` and `POST /worker/start|stop|restart` require a valid `X-Controller-Token` header (`hmac.compare_digest`).
-- **Strict Origin & CSRF Protection**:
-  - Validates `Origin` against an allowlist (`http://localhost:5173`, `http://127.0.0.1:5173`, `http://localhost:4173`, `http://127.0.0.1:4173`, `https://scribasheet.vercel.app`, `https://scribasheet-*.vercel.app`, plus `CONTROLLER_ALLOWED_ORIGINS`).
-  - Handles `OPTIONS` preflight with `Access-Control-Allow-Private-Network: true` for Chrome HTTPS-to-`127.0.0.1` requests.
-  - Requires `X-Requested-With: ScribaSheet` and `application/json` on `POST` endpoints.
-- **Single-Instance & Log Handling**: Probes `WorkerSingleInstanceLock` before spawning so it never starts a duplicate worker when a Scheduled Task or manual terminal worker is active, and rotates `logs/worker.log` at 5 MB (`worker.log.1`), redacting sensitive token patterns from `log_tail`.
+### Issue 1 — Local Worker Controller Connection Refused (`127.0.0.1:47832`)
+- **Symptom**: Windows Scheduled Task `ScribaSheetWorkerController` exited immediately with `LastTaskResult: 1`, and `logs/controller.log` stopped right after `[INFO] Starting ScribaSheet local worker controller on 127.0.0.1`.
+- **Root Cause**: `scripts/run_worker_controller.ps1` (and `scripts/run_worker_background.ps1`) set `$ErrorActionPreference = "Stop"` and piped `& $PythonExe -m app.worker_controller 2>&1`. Python's `logging.basicConfig()` writes `INFO` logs to `stderr`, which PowerShell wraps as `ErrorRecord` objects; under `$ErrorActionPreference = "Stop"`, the very first `INFO` log line triggered a terminating `NativeCommandError`, exiting the script with code `1` before the HTTP server could stay running.
+- **Fix**: Wrapped the Python invocation in `$ErrorActionPreference = "Continue"` (and `$PSNativeCommandUseErrorActionPreference = $false` when present) in both `scripts/run_worker_controller.ps1` and `scripts/run_worker_background.ps1`, logging `ErrorRecord.Exception.Message` cleanly and restoring `$ErrorActionPreference` afterward. Updated `scripts/install_worker_controller.ps1` to validate `import app.worker_controller`, start the task, and poll `http://127.0.0.1:47832/health` until `HTTP 200 OK` is confirmed.
 
-### Windows Controller Installation (`scripts/`)
-- `scripts/run_worker_controller.ps1`: Runs `backend\.venv\Scripts\python.exe -m app.worker_controller` and rotates/writes `logs/controller.log`.
-- `scripts/install_worker_controller.ps1`: Registers `ScribaSheetWorkerController` at current user logon (`Interactive`, `Limited` run level) and starts it immediately. The transcription worker itself is **not** auto-started unless explicitly configured.
-- `scripts/uninstall_worker_controller.ps1`: Stops and unregisters only `ScribaSheetWorkerController`, preserving logs, project data, and `backend\.venv`.
+### Issue 2 — Railway `GET /api/v1/worker/status` HTTP 500 + CORS Error
+- **Symptom**: Authenticated `GET https://scribasheet-production.up.railway.app/api/v1/worker/status` returned `HTTP 500` without CORS headers in browser console, while unauthenticated `OPTIONS` returned `200` and unauthenticated `GET` returned `401` with `access-control-allow-origin: https://scribasheet.vercel.app`.
+- **Root Cause**:
+  1. `backend/Dockerfile` ran `CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]` without running `alembic upgrade head`. On Railway, if `e3a4c19f8b12_add_worker_nodes_table.py` has not been applied to the persistent SQLite database, querying `WorkerNode` raises `OperationalError: no such table: worker_nodes`.
+  2. Because `worker_status` did not catch `SQLAlchemyError` and raise `HTTPException(500, ...)`, Starlette's outer `ServerErrorMiddleware` handled the unhandled exception *outside* `CORSMiddleware`, stripping `Access-Control-Allow-Origin` from the 500 response.
+- **Fix**:
+  1. `backend/app/api/v1/worker.py`: Wrapped `get_worker_availability(db)` in `worker_status()` to log `SQLAlchemyError` / unexpected exceptions via `logger.exception(...)` and raise `HTTPException(500, ...)` so FastAPI's `ExceptionMiddleware` (inside `CORSMiddleware`) preserves CORS headers on 500 responses instead of masking DB errors or stripping CORS.
+  2. `backend/app/core/config.py` & `backend/app/main.py`: Ensured `https://scribasheet.vercel.app`, `http://localhost:5173`, and `http://127.0.0.1:5173` are always included in `CORSMiddleware` `allow_origins` without wildcards.
+  3. `backend/Dockerfile`: Updated `CMD` to run `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}` on startup.
 
-### Frontend Controls
-- `frontend/src/services/workerController.ts`: Typed client for `http://127.0.0.1:47832` storing the user's pairing token in `localStorage` (`scribasheet_controller_token`).
-- `frontend/src/components/WorkerControlPanel.tsx`: Rendered on `DashboardPage` and `ProjectStudioPage`:
-  - **Desktop**: Shows **Start Worker** when stopped, **Stop Worker** + **Restart Worker** when running, local PID, Railway heartbeat status (`Online`/`Offline`, active/queued counts), current job label, and last error/notice.
-  - **Pairing**: Prompts for `logs\worker_controller.token` on `401`.
-  - **Unavailable**: Displays `"Local Controller Not Connected"` with Windows setup instructions instead of faking worker startup.
-  - **Mobile**: Explains that a mobile browser cannot control a Windows PC worker through its own `127.0.0.1` address, while allowing job submission and Railway status monitoring.
+---
 
-## 2. Verification Results
+## 2. Files Changed
 
-- **Backend pytest (`.\backend\.venv\Scripts\python.exe -m pytest backend\tests -q`)**: `80 passed` (includes 3 new tests in `backend/tests/test_worker_controller.py` covering non-loopback rejection, Origin/Private-Network/CSRF/token enforcement, and start/status/restart/stop/409 single-instance lifecycle).
-- **Backend lint (`.\backend\.venv\Scripts\ruff.exe check backend\app backend\tests scripts`)**: `All checks passed!`
-- **Frontend build & tests (`cd frontend; npm.cmd run build; npm.cmd test -- --run`)**: `tsc -b && vite build` succeeded; `14 passed` in `frontend/src/test/App.test.tsx` (includes `WorkerControlPanel` unavailable, start/stop, and mobile tests).
-- **PowerShell validation**: `run_worker_controller.ps1`, `install_worker_controller.ps1`, and `uninstall_worker_controller.ps1` passed `Parser::ParseFile` and isolated Scheduled Task install/uninstall (`ScribaSheetTestControllerVerify`).
+- `scripts/run_worker_controller.ps1` — Fixed `$ErrorActionPreference` around Python `stderr` logging.
+- `scripts/run_worker_background.ps1` — Fixed `$ErrorActionPreference` around Python `stderr` logging.
+- `scripts/install_worker_controller.ps1` — Added `import app.worker_controller` check and mandatory `http://127.0.0.1:47832/health` HTTP 200 verification.
+- `backend/app/api/v1/worker.py` — Logged DB/unexpected errors in `worker_status` and raised `HTTPException(500)` so CORS headers are preserved.
+- `backend/app/core/config.py` — Added `https://scribasheet.vercel.app` to `BACKEND_CORS_ORIGINS` default.
+- `backend/app/main.py` — Merged `settings.BACKEND_CORS_ORIGINS` with `http://localhost:5173`, `http://127.0.0.1:5173`, and `https://scribasheet.vercel.app` in `CORSMiddleware`.
+- `backend/Dockerfile` — Added `alembic upgrade head` before `uvicorn` startup.
+- `backend/tests/test_worker_automation.py` — Added `test_worker_status_empty_naive_tz_cors_and_db_error` covering empty DB, naive timestamps, production `Origin` `OPTIONS`/`GET`, and DB error 500 + CORS headers.
+- Plus earlier Phase D controller implementation files: `backend/app/worker_controller.py`, `backend/tests/test_worker_controller.py`, `scripts/uninstall_worker_controller.ps1`, `frontend/src/services/workerController.ts`, `frontend/src/components/WorkerControlPanel.tsx`, `frontend/src/features/dashboard/DashboardPage.tsx`, `frontend/src/features/projects/ProjectStudioPage.tsx`, `frontend/src/test/App.test.tsx`.
 
-## 3. Scope & Limitations
+---
 
-- Local controller HTTP, Origin/Private-Network preflight, CSRF, pairing, and process lifecycle were verified locally via `ThreadingHTTPServer` + `httpx` and Vitest (`jsdom`).
-- Live Chrome verification against the deployed Vercel HTTPS frontend was not executed in this run because nothing was committed, pushed, or deployed.
+## 3. Verification Results
+
+### Local Controller & Scheduled Task
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_worker_controller.ps1`:
+  - Registered and started `ScribaSheetWorkerController` (`State: Running`).
+  - Verified `http://127.0.0.1:47832/health` -> `HTTP 200 OK`.
+  - Verified `GET http://127.0.0.1:47832/status` with `Origin: https://scribasheet.vercel.app` and `X-Controller-Token` -> `worker_running: false`.
+  - Verified `POST /worker/start` (`worker_running=True, pid=14120`), `POST /worker/restart` (`worker_running=True, pid=26156`), and `POST /worker/stop` (`worker_running=False`).
+
+### Backend, Migrations & Frontend
+- **Alembic migration chain** (`alembic upgrade head` on clean SQLite): `9a2f8e3e2cac -> d29c258b766e -> e3a4c19f8b12 (head)`.
+- **Backend pytest** (`.\backend\.venv\Scripts\python.exe -m pytest backend\tests -q`): `81 passed`.
+- **Ruff lint** (`.\backend\.venv\Scripts\ruff.exe check backend\app backend\tests scripts`): `All checks passed!`.
+- **Frontend build & tests** (`cd frontend; npm.cmd run build; npm.cmd test -- --run`): `tsc -b && vite build` succeeded; `14 passed`.
+
+### Production (Railway / Vercel)
+- **Verified read-only on live Railway**: `OPTIONS /api/v1/worker/status` (`Origin: https://scribasheet.vercel.app`) returned `200 OK` with `access-control-allow-origin: https://scribasheet.vercel.app`; unauthenticated `GET` returned `401` with CORS headers.
+- **Production Deployment Required**: Changes are local only (not committed, pushed, or deployed). Once reviewed and deployed to Railway, `alembic upgrade head` (now in `backend/Dockerfile`) will apply `e3a4c19f8b12` to Railway's SQLite volume and resolve the authenticated `500` on `GET /api/v1/worker/status`.
