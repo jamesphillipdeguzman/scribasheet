@@ -4,6 +4,8 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "@/App";
 import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
+import { WorkerControlPanel } from "@/components/WorkerControlPanel";
+import * as controllerSvc from "@/services/workerController";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { ProjectStudioPage } from "@/features/projects/ProjectStudioPage";
 import { MediaUploader } from "@/features/uploads/MediaUploader";
@@ -454,5 +456,102 @@ describe("ScribaSheet Frontend", () => {
       },
       { timeout: 3000 }
     );
+  });
+
+  it("renders WorkerControlPanel unavailable, start/stop/restart, and mobile states", async () => {
+    vi.spyOn(api, "getWorkerStatus").mockResolvedValue({
+      worker_online: false,
+      status: "offline",
+      last_seen_seconds: null,
+      worker_id: null,
+      active_job_count: 0,
+      queue_depth: 0,
+      freshness_threshold_seconds: 45,
+    });
+    vi.spyOn(controllerSvc, "isMobileDevice").mockReturnValue(false);
+    vi.spyOn(controllerSvc, "getControllerToken").mockReturnValue("pair-tok");
+
+    // 1. Controller unreachable -> Local Controller Not Connected
+    const healthSpy = vi
+      .spyOn(controllerSvc.workerController, "checkHealth")
+      .mockRejectedValueOnce(new Error("Connection refused"));
+
+    const qc1 = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { unmount } = render(
+      <QueryClientProvider client={qc1}>
+        <WorkerControlPanel />
+      </QueryClientProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/Local Controller Not Connected/i)).toBeInTheDocument();
+    });
+    unmount();
+
+    // 2. Controller connected & stopped -> Start Worker -> Running -> Stop Worker
+    healthSpy.mockResolvedValue({ controller_online: true, requires_pairing: true });
+    const statusCtrlSpy = vi
+      .spyOn(controllerSvc.workerController, "getStatus")
+      .mockResolvedValueOnce({
+        controller_online: true,
+        worker_running: false,
+        managed_by_controller: false,
+        external_worker_detected: false,
+        pid: null,
+        started_at: null,
+        last_exit_code: null,
+        last_error: null,
+        log_path: "logs/worker.log",
+        log_tail: [],
+      })
+      .mockResolvedValueOnce({
+        controller_online: true,
+        worker_running: true,
+        managed_by_controller: true,
+        external_worker_detected: false,
+        pid: 4321,
+        started_at: new Date().toISOString(),
+        last_exit_code: null,
+        last_error: null,
+        log_path: "logs/worker.log",
+        log_tail: [],
+      });
+    const startSpy = vi.spyOn(controllerSvc.workerController, "startWorker").mockResolvedValueOnce({
+      controller_online: true,
+      worker_running: true,
+      managed_by_controller: true,
+      external_worker_detected: false,
+      pid: 4321,
+      started_at: new Date().toISOString(),
+      last_exit_code: null,
+      last_error: null,
+      log_path: "logs/worker.log",
+      log_tail: [],
+      ok: true,
+      message: "Worker started.",
+    });
+
+    const qc2 = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { unmount: unmount2 } = render(
+      <QueryClientProvider client={qc2}>
+        <WorkerControlPanel />
+      </QueryClientProvider>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /Start Worker/i })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Start Worker/i }));
+    await waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Stop Worker/i })).toBeInTheDocument());
+    expect(statusCtrlSpy).toHaveBeenCalled();
+    unmount2();
+
+    // 3. Mobile explanation
+    vi.spyOn(controllerSvc, "isMobileDevice").mockReturnValue(true);
+    const qc3 = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc3}>
+        <WorkerControlPanel />
+      </QueryClientProvider>
+    );
+    expect(screen.getByText(/cannot start or stop a worker on another device/i)).toBeInTheDocument();
   });
 });

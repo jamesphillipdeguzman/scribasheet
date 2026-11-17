@@ -16,6 +16,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
+import { WorkerControlPanel } from "@/components/WorkerControlPanel";
 import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -423,6 +424,12 @@ export function ProjectStudioPage() {
                   isStarting={isStartingJob}
                 />
               </div>
+
+              <WorkerControlPanel
+                currentJobLabel={
+                  activeJob ? `${activeJob.current_stage} (${activeJob.progress}%)` : null
+                }
+              />
             </aside>
           )}
 

@@ -12,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
+import { WorkerControlPanel } from "@/components/WorkerControlPanel";
 import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -103,6 +104,8 @@ export function DashboardPage() {
             New Transcription
           </Button>
         </div>
+
+        <WorkerControlPanel />
 
         {/* Usage Summary */}
         {usage && (
