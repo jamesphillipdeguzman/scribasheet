@@ -133,6 +133,7 @@ def create_export(
 
     try:
         score = ScoreData(**score_row.score_json)
+        score.title = project.title
         mime_type, ext = EXPORT_MIME_TYPES[payload.format]
 
         if payload.format == "midi":

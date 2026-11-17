@@ -10,6 +10,7 @@ import {
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
   Piano,
   Redo2,
   Save,
@@ -57,6 +58,16 @@ export function ProjectStudioPage() {
   // Job tracking
   const [activeJob, setActiveJob] = useState<TranscriptionJob | null>(null);
   const [isStartingJob, setIsStartingJob] = useState(false);
+
+  // Inline project rename state
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+  const [optimisticTitle, setOptimisticTitle] = useState<string | null>(null);
+  const [renameStatus, setRenameStatus] = useState<"idle" | "saved" | "error">("idle");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const isCommittingTitleRef = useRef(false);
+  const isCancelledTitleRef = useRef(false);
 
   const autosaveTimerRef = useRef<number | null>(null);
 
@@ -261,6 +272,65 @@ export function ProjectStudioPage() {
     }));
   };
 
+  useEffect(() => {
+    if (isEditingTitle && titleInputRef.current) {
+      titleInputRef.current.focus();
+      titleInputRef.current.select();
+    }
+  }, [isEditingTitle]);
+
+  const startEditingTitle = () => {
+    if (!project) return;
+    isCommittingTitleRef.current = false;
+    isCancelledTitleRef.current = false;
+    setRenameError(null);
+    setRenameStatus("idle");
+    setDraftTitle(optimisticTitle ?? project.title);
+    setIsEditingTitle(true);
+  };
+
+  const cancelTitleRename = () => {
+    isCancelledTitleRef.current = true;
+    setIsEditingTitle(false);
+    setDraftTitle(project?.title ?? "");
+  };
+
+  const commitTitleRename = async () => {
+    if (!project || isCommittingTitleRef.current || isCancelledTitleRef.current) {
+      return;
+    }
+    isCommittingTitleRef.current = true;
+    const trimmed = draftTitle.trim().slice(0, 120);
+    if (!trimmed || trimmed === project.title) {
+      setIsEditingTitle(false);
+      setDraftTitle(project.title);
+      isCommittingTitleRef.current = false;
+      return;
+    }
+
+    setIsEditingTitle(false);
+    setOptimisticTitle(trimmed);
+    setRenameError(null);
+
+    try {
+      const updated = await api.updateProject(project.id, { title: trimmed });
+      queryClient.setQueryData(["project", projectId], updated);
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      setScoreData((prev) => (prev ? { ...prev, title: updated.title } : prev));
+      setOptimisticTitle(null);
+      setRenameStatus("saved");
+      window.setTimeout(() => {
+        setRenameStatus((curr) => (curr === "saved" ? "idle" : curr));
+      }, 2500);
+    } catch (err) {
+      setOptimisticTitle(null);
+      setRenameStatus("error");
+      setRenameError(err instanceof ApiError ? err.message : "Failed to rename project.");
+    } finally {
+      isCommittingTitleRef.current = false;
+    }
+  };
+
   const handleStartTranscription = async (settings: TranscriptionSettings) => {
     if (!project) return;
     setIsStartingJob(true);
@@ -376,10 +446,61 @@ export function ProjectStudioPage() {
           {/* Row 2 on mobile: Project title, badges, and score metadata */}
           <div className="min-w-0 flex-1 sm:order-2">
             <div className="flex flex-wrap items-center gap-2 min-w-0">
-              <h1 className="text-sm sm:text-base font-semibold truncate min-w-0 max-w-full">{project.title}</h1>
+              {isEditingTitle ? (
+                <input
+                  ref={titleInputRef}
+                  type="text"
+                  aria-label="Project title"
+                  maxLength={120}
+                  value={draftTitle}
+                  onChange={(e) => setDraftTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void commitTitleRename();
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      cancelTitleRename();
+                    }
+                  }}
+                  onBlur={() => {
+                    void commitTitleRename();
+                  }}
+                  className="min-w-0 w-full sm:w-auto sm:min-w-[220px] max-w-full bg-[#181824] border border-indigo-500/60 rounded-md px-2 py-0.5 text-sm sm:text-base font-semibold text-[#F5F3FF] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              ) : (
+                <div className="flex items-center gap-1.5 min-w-0 max-w-full">
+                  <h1
+                    onClick={startEditingTitle}
+                    title="Rename project"
+                    className="text-sm sm:text-base font-semibold truncate min-w-0 max-w-full cursor-pointer hover:text-indigo-200 transition-colors"
+                  >
+                    {optimisticTitle ?? project.title}
+                  </h1>
+                  <button
+                    type="button"
+                    onClick={startEditingTitle}
+                    aria-label="Rename project"
+                    title="Rename project"
+                    className="rounded p-1 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] focus:outline-none focus:ring-2 focus:ring-indigo-500 shrink-0"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                  {renameStatus === "saved" && (
+                    <span className="inline-flex items-center gap-1 text-xs text-emerald-400 whitespace-nowrap shrink-0">
+                      <Check className="h-3 w-3" /> Renamed
+                    </span>
+                  )}
+                </div>
+              )}
               <StatusBadge status={project.status} />
               <WorkerStatusBadge />
             </div>
+            {renameError && (
+              <div role="alert" className="mt-1 text-xs text-red-400">
+                {renameError}
+              </div>
+            )}
             {scoreData && (
               <div className="text-xs text-[#A1A1AA] flex flex-wrap items-center gap-x-2 gap-y-1 mt-1">
                 <span className="whitespace-nowrap">

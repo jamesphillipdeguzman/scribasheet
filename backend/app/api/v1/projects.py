@@ -94,7 +94,14 @@ def update_project(
     db: Session = Depends(get_db),
 ):
     if payload.title is not None:
-        project.title = payload.title.strip()
+        new_title = payload.title.strip()
+        if new_title != project.title:
+            project.title = new_title
+            if project.score is not None:
+                updated_score = dict(project.score.score_json or {})
+                updated_score["title"] = new_title
+                project.score.score_json = updated_score
+                project.score.version = int(project.score.version or 1) + 1
     if payload.description is not None:
         project.description = payload.description.strip()
     if payload.instrument is not None:

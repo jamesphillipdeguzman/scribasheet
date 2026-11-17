@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ProjectCreateRequest(BaseModel):
@@ -11,10 +11,22 @@ class ProjectCreateRequest(BaseModel):
 
 
 class ProjectUpdateRequest(BaseModel):
-    title: str | None = Field(default=None, min_length=1, max_length=200)
+    title: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
     instrument: str | None = Field(default=None, max_length=64)
     transcription_mode: str | None = Field(default=None, max_length=64)
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Project title cannot be empty.")
+        if len(trimmed) > 120:
+            raise ValueError("Project title must be 120 characters or fewer.")
+        return trimmed
 
 
 class MediaAssetResponse(BaseModel):
