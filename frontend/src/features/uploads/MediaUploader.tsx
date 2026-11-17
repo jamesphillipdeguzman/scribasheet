@@ -1,5 +1,5 @@
 import React, { useRef, useState } from "react";
-import { AlertCircle, CheckCircle2, FileAudio, Link2, Mic, Square, Upload, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, FileAudio, Link2, Loader2, Mic, Square, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { formatBytes, formatDuration } from "@/lib/utils";
 import { api, ApiError } from "@/services/api";
@@ -12,9 +12,19 @@ interface MediaUploaderProps {
   projectId: string;
   existingAssets: MediaAsset[];
   onUploadComplete: (asset: MediaAsset) => void;
+  onMediaRemoved?: (assetId: string) => void;
+  hasScore?: boolean;
+  isProcessing?: boolean;
 }
 
-export function MediaUploader({ projectId, existingAssets, onUploadComplete }: MediaUploaderProps) {
+export function MediaUploader({
+  projectId,
+  existingAssets,
+  onUploadComplete,
+  onMediaRemoved,
+  hasScore = false,
+  isProcessing = false,
+}: MediaUploaderProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -28,8 +38,41 @@ export function MediaUploader({ projectId, existingAssets, onUploadComplete }: M
   const [recordingSec, setRecordingSec] = useState(0);
   const [externalUrl, setExternalUrl] = useState("");
   const [urlNotice, setUrlNotice] = useState<string | null>(null);
+  const [deletingAssetId, setDeletingAssetId] = useState<string | null>(null);
+  const [confirmingAssetId, setConfirmingAssetId] = useState<string | null>(null);
 
   const timerRef = useRef<number | null>(null);
+
+  const performDeleteAsset = async (assetId: string) => {
+    setError(null);
+    setSelectedFile(null);
+    setDeletingAssetId(assetId);
+    setConfirmingAssetId(null);
+    try {
+      await api.deleteMediaAsset(projectId, assetId);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      onMediaRemoved?.(assetId);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message);
+      } else {
+        setError("Failed to remove audio file. Please try again.");
+      }
+    } finally {
+      setDeletingAssetId(null);
+    }
+  };
+
+  const handleRemoveClick = (assetId: string) => {
+    if (isProcessing || uploadProgress !== null || deletingAssetId !== null) return;
+    if (hasScore) {
+      setConfirmingAssetId(assetId);
+      return;
+    }
+    void performDeleteAsset(assetId);
+  };
 
   const validateAndUpload = async (file: File) => {
     setError(null);
@@ -138,6 +181,7 @@ export function MediaUploader({ projectId, existingAssets, onUploadComplete }: M
           onChange={(e) => {
             const f = e.target.files?.[0];
             if (f) validateAndUpload(f);
+            e.target.value = "";
           }}
         />
         <Upload className="mx-auto h-8 w-8 text-[#A78BFA]" />
@@ -208,23 +252,69 @@ export function MediaUploader({ projectId, existingAssets, onUploadComplete }: M
       {originalAssets.length > 0 && (
         <div className="space-y-2">
           <div className="text-xs font-medium text-[#A1A1AA]">Uploaded Media</div>
-          {originalAssets.map((a) => (
-            <div
-              key={a.id}
-              className="flex items-center justify-between rounded-lg border border-[#27273A] bg-[#11111B] px-3 py-2 text-xs"
-            >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <FileAudio className="h-4 w-4 text-[#A78BFA] shrink-0" />
-                <div className="truncate">
-                  <div className="font-medium text-[#F5F3FF] truncate">{a.original_filename}</div>
-                  <div className="text-[#A1A1AA]">
-                    {formatBytes(a.size_bytes)} • {formatDuration(a.duration_seconds)} • {a.sample_rate ? `${a.sample_rate} Hz` : a.mime_type}
+          {originalAssets.map((a) => {
+            const isDeleting = deletingAssetId === a.id;
+            const removeDisabled = isProcessing || uploadProgress !== null || deletingAssetId !== null;
+            return (
+              <div key={a.id} className="space-y-2">
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-[#27273A] bg-[#11111B] px-3 py-2 text-xs">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <FileAudio className="h-4 w-4 text-[#A78BFA] shrink-0" />
+                    <div className="truncate">
+                      <div className="font-medium text-[#F5F3FF] truncate">{a.original_filename}</div>
+                      <div className="text-[#A1A1AA]">
+                        {formatBytes(a.size_bytes)} • {formatDuration(a.duration_seconds)} • {a.sample_rate ? `${a.sample_rate} Hz` : a.mime_type}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                    <button
+                      type="button"
+                      aria-label="Remove uploaded media"
+                      title="Remove file"
+                      disabled={removeDisabled}
+                      onClick={() => handleRemoveClick(a.id)}
+                      className="min-h-[40px] min-w-[40px] inline-flex items-center justify-center rounded-lg text-[#A1A1AA] transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isDeleting ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <X className="h-4 w-4" />
+                      )}
+                    </button>
                   </div>
                 </div>
+                {confirmingAssetId === a.id && (
+                  <div
+                    role="alertdialog"
+                    aria-label="Confirm audio removal"
+                    className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 space-y-2"
+                  >
+                    <p>Remove this audio file? Your existing sheet music and transcription results will remain available.</p>
+                    <div className="flex items-center justify-end gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setConfirmingAssetId(null)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="danger"
+                        onClick={() => void performDeleteAsset(a.id)}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </div>
-              <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

@@ -393,7 +393,13 @@ export function ProjectStudioPage() {
                 <MediaUploader
                   projectId={project.id}
                   existingAssets={project.media_assets}
+                  hasScore={Boolean(scoreData)}
+                  isProcessing={
+                    isStartingJob ||
+                    Boolean(activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status))
+                  }
                   onUploadComplete={() => queryClient.invalidateQueries({ queryKey: ["project", projectId] })}
+                  onMediaRemoved={() => queryClient.invalidateQueries({ queryKey: ["project", projectId] })}
                 />
               </div>
 

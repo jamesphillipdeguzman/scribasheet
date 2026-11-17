@@ -38,6 +38,13 @@ export function WaveformPlayer({
   useEffect(() => {
     if (!mediaAssetId) {
       setSignedAudioUrl(null);
+      if (wsRef.current) {
+        if (wsRef.current.isPlaying()) wsRef.current.pause();
+        wsRef.current.destroy();
+        wsRef.current = null;
+      }
+      setIsPlaying(false);
+      onPlayheadChange(0);
       return;
     }
     let cancelled = false;

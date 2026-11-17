@@ -3,8 +3,9 @@ from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import PLAN_LIMITS, get_current_user, get_owned_project
+from app.api.v1.worker import ACTIVE_WORKER_STATUSES
 from app.db.session import get_db
-from app.models import Project, ProjectScore, User
+from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob, User
 from app.schemas.project import (
     ProjectCreateRequest,
     ProjectListResponse,
@@ -136,6 +137,74 @@ def duplicate_project(
     db.commit()
     db.refresh(copy)
     return copy
+
+
+@router.delete("/{project_id}/media/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_project_media_asset(
+    asset_id: str,
+    project: Project = Depends(get_owned_project),
+    db: Session = Depends(get_db),
+):
+    """Delete an uploaded original media asset from a project while preserving any existing score."""
+    asset = (
+        db.query(MediaAsset)
+        .filter(MediaAsset.id == asset_id, MediaAsset.project_id == project.id)
+        .first()
+    )
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media asset not found.")
+    if asset.asset_type != "original":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only original uploaded media assets can be removed.",
+        )
+
+    active_statuses = ("queued", *ACTIVE_WORKER_STATUSES)
+    active_job = (
+        db.query(TranscriptionJob.id)
+        .filter(
+            TranscriptionJob.project_id == project.id,
+            TranscriptionJob.status.in_(active_statuses),
+        )
+        .first()
+    )
+    if active_job:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot remove audio while a transcription job is queued or actively processing.",
+        )
+
+    try:
+        storage_service.delete(asset.storage_path)
+    except FileNotFoundError:
+        pass
+
+    (
+        db.query(TranscriptionJob)
+        .filter(TranscriptionJob.source_asset_id == asset.id)
+        .update({TranscriptionJob.source_asset_id: None}, synchronize_session=False)
+    )
+    db.delete(asset)
+    db.flush()
+
+    remaining_original = (
+        db.query(MediaAsset)
+        .filter(MediaAsset.project_id == project.id, MediaAsset.asset_type == "original")
+        .order_by(MediaAsset.created_at.desc())
+        .first()
+    )
+    if remaining_original:
+        project.duration_seconds = remaining_original.duration_seconds
+    elif project.score is None:
+        project.duration_seconds = None
+        project.status = "draft"
+    else:
+        project.duration_seconds = None
+        if project.status != "ready":
+            project.status = "ready"
+
+    db.commit()
+    return None
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)

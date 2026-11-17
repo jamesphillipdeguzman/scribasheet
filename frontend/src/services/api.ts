@@ -228,4 +228,6 @@ export const api = {
   // Billing & Worker
   getPlans: () => request<{ billing_active: boolean; plans: Array<{ id: string; name: string; description: string; features: string[] }> }>("/billing/plans"),
   getWorkerStatus: () => request<WorkerStatus>("/worker/status"),
+  deleteMediaAsset: (projectId: string, assetId: string) =>
+    request<void>(`/projects/${projectId}/media/${assetId}`, { method: "DELETE" }),
 };

@@ -6,6 +6,8 @@ import { App } from "@/App";
 import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { ProjectStudioPage } from "@/features/projects/ProjectStudioPage";
+import { MediaUploader } from "@/features/uploads/MediaUploader";
+import { WaveformPlayer } from "@/features/editor/WaveformPlayer";
 import { api, ApiError } from "@/services/api";
 import { midiToNoteName, formatDuration, formatBytes } from "@/lib/utils";
 import { computePianoEnvelopeParams } from "@/features/editor/midiSynth";
@@ -188,5 +190,181 @@ describe("ScribaSheet Frontend", () => {
     expect(screen.getByText(/desktop transcription worker is currently offline/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Cancel/i }));
     expect(onCancel).toHaveBeenCalledWith("job-1");
+  });
+
+  const sampleAsset = {
+    id: "asset-1",
+    project_id: "p1",
+    asset_type: "original",
+    original_filename: "piano-demo.wav",
+    mime_type: "audio/wav",
+    size_bytes: 204800,
+    duration_seconds: 13.2,
+    sample_rate: 44100,
+    channels: 1,
+    created_at: new Date().toISOString(),
+  };
+
+  it("renders accessible Remove button beside uploaded media and disables it while processing", () => {
+    const { rerender } = render(
+      <MediaUploader
+        projectId="p1"
+        existingAssets={[sampleAsset]}
+        onUploadComplete={vi.fn()}
+        isProcessing={false}
+      />
+    );
+    const removeBtn = screen.getByRole("button", { name: /Remove uploaded media/i });
+    expect(removeBtn).toBeInTheDocument();
+    expect(removeBtn).toHaveAttribute("title", "Remove file");
+    expect(removeBtn).not.toBeDisabled();
+
+    rerender(
+      <MediaUploader
+        projectId="p1"
+        existingAssets={[sampleAsset]}
+        onUploadComplete={vi.fn()}
+        isProcessing={true}
+      />
+    );
+    expect(screen.getByRole("button", { name: /Remove uploaded media/i })).toBeDisabled();
+  });
+
+  it("prompts for confirmation before removing media when a score exists", async () => {
+    const deleteSpy = vi.spyOn(api, "deleteMediaAsset").mockResolvedValueOnce(undefined);
+    const onRemoved = vi.fn();
+
+    render(
+      <MediaUploader
+        projectId="p1"
+        existingAssets={[sampleAsset]}
+        onUploadComplete={vi.fn()}
+        onMediaRemoved={onRemoved}
+        hasScore={true}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Remove uploaded media/i }));
+    expect(
+      screen.getByText(/Remove this audio file\? Your existing sheet music and transcription results will remain available\./i)
+    ).toBeInTheDocument();
+    expect(deleteSpy).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Cancel$/i }));
+    expect(
+      screen.queryByText(/Remove this audio file\? Your existing sheet music and transcription results will remain available\./i)
+    ).not.toBeInTheDocument();
+    expect(deleteSpy).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Remove uploaded media/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Remove$/i }));
+
+    await waitFor(() => {
+      expect(deleteSpy).toHaveBeenCalledWith("p1", "asset-1");
+      expect(onRemoved).toHaveBeenCalledWith("asset-1");
+    });
+  });
+
+  it("clears uploaded media card on removal and allows uploading a replacement file", async () => {
+    vi.spyOn(api, "deleteMediaAsset").mockResolvedValueOnce(undefined);
+    const replacementAsset = { ...sampleAsset, id: "asset-2", original_filename: "replacement.wav" };
+    const uploadSpy = vi.spyOn(api, "uploadMedia").mockResolvedValueOnce(replacementAsset);
+    const onRemoved = vi.fn();
+    const onUploadComplete = vi.fn();
+
+    const { rerender } = render(
+      <MediaUploader
+        projectId="p1"
+        existingAssets={[sampleAsset]}
+        onUploadComplete={onUploadComplete}
+        onMediaRemoved={onRemoved}
+        hasScore={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Remove uploaded media/i }));
+    await waitFor(() => expect(onRemoved).toHaveBeenCalledWith("asset-1"));
+
+    rerender(
+      <MediaUploader
+        projectId="p1"
+        existingAssets={[]}
+        onUploadComplete={onUploadComplete}
+        onMediaRemoved={onRemoved}
+        hasScore={false}
+      />
+    );
+    expect(screen.queryByText("piano-demo.wav")).not.toBeInTheDocument();
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(fileInput).toBeTruthy();
+    const newFile = new File(["wavdata"], "replacement.wav", { type: "audio/wav" });
+    fireEvent.change(fileInput, { target: { files: [newFile] } });
+
+    await waitFor(() => {
+      expect(uploadSpy).toHaveBeenCalledWith("p1", newFile, expect.any(Function), expect.any(AbortSignal));
+      expect(onUploadComplete).toHaveBeenCalledWith(replacementAsset);
+    });
+  });
+
+  it("retains uploaded media and shows error message when removal fails with 409", async () => {
+    vi.spyOn(api, "deleteMediaAsset").mockRejectedValueOnce(
+      new ApiError(409, "Cannot remove audio while a transcription job is queued or actively processing.")
+    );
+    const onRemoved = vi.fn();
+
+    render(
+      <MediaUploader
+        projectId="p1"
+        existingAssets={[sampleAsset]}
+        onUploadComplete={vi.fn()}
+        onMediaRemoved={onRemoved}
+        hasScore={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Remove uploaded media/i }));
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        /Cannot remove audio while a transcription job is queued or actively processing\./i
+      );
+    });
+    expect(screen.getByText("piano-demo.wav")).toBeInTheDocument();
+    expect(onRemoved).not.toHaveBeenCalled();
+  });
+
+  it("resets WaveformPlayer audio source and playhead when mediaAssetId becomes null", async () => {
+    vi.spyOn(api, "getSignedMediaUrl").mockResolvedValue({ url: "/api/v1/uploads/asset-1/stream?sig=x&exp=999", expires_in: 300 });
+    const onPlayheadChange = vi.fn();
+
+    const { rerender } = render(
+      <WaveformPlayer
+        mediaAssetId="asset-1"
+        notes={[]}
+        tempoBpm={120}
+        durationSeconds={10}
+        playheadSec={2.5}
+        onPlayheadChange={onPlayheadChange}
+      />
+    );
+
+    await waitFor(() => {
+      expect(api.getSignedMediaUrl).toHaveBeenCalledWith("asset-1");
+    });
+
+    rerender(
+      <WaveformPlayer
+        mediaAssetId={null}
+        notes={[]}
+        tempoBpm={120}
+        durationSeconds={10}
+        playheadSec={2.5}
+        onPlayheadChange={onPlayheadChange}
+      />
+    );
+
+    await waitFor(() => {
+      expect(onPlayheadChange).toHaveBeenCalledWith(0);
+    });
   });
 });
