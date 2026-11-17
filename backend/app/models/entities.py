@@ -188,3 +188,14 @@ class UsageRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="usage_records")
+
+
+class WorkerNode(Base):
+    __tablename__ = "worker_nodes"
+
+    worker_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), default="online", nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+    active_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)

@@ -42,5 +42,6 @@ class TranscriptionJobResponse(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_at: datetime
+    worker_online: bool | None = None
 
     model_config = {"from_attributes": True}

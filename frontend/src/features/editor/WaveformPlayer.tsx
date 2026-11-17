@@ -138,7 +138,7 @@ export function WaveformPlayer({
   };
 
   return (
-    <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-4 space-y-3">
+    <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-3 sm:p-4 space-y-3 w-full min-w-0 overflow-hidden">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Button size="sm" onClick={togglePlay} aria-label={isPlaying ? "Pause playback" : "Play"}>
@@ -231,7 +231,7 @@ export function WaveformPlayer({
       </div>
 
       {signedAudioUrl ? (
-        <div ref={waveContainerRef} className="rounded-lg bg-[#09090F] p-2 border border-[#27273A]" />
+        <div ref={waveContainerRef} className="w-full min-w-0 overflow-hidden rounded-lg bg-[#09090F] p-2 border border-[#27273A]" />
       ) : (
         <div className="rounded-lg bg-[#09090F] p-3 text-xs text-[#71717A] border border-[#27273A]">
           Waveform preview appears after uploading an audio or video recording.

@@ -689,6 +689,15 @@ class RemoteWorkerAgent:
                     self._stop_event.wait(backoff)
                     backoff = min(30.0, backoff * 1.5)
         finally:
+            try:
+                self._client.post(
+                    f"{self.api_base_url}/worker/offline",
+                    json={"worker_id": self.worker_id},
+                    headers=self._headers(),
+                    timeout=5.0,
+                )
+            except Exception:
+                pass
             if self._owns_client:
                 self._client.close()
             logger.info("Worker agent stopped cleanly (worker_id=%s).", self.worker_id)

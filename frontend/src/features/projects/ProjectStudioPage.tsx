@@ -16,6 +16,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
+import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ChordAndTabPanel } from "@/features/editor/ChordAndTabPanel";
@@ -62,6 +63,13 @@ export function ProjectStudioPage() {
     queryKey: ["project", projectId],
     queryFn: () => api.getProject(projectId),
     enabled: Boolean(projectId),
+  });
+
+  const { data: workerStatus } = useQuery({
+    queryKey: ["worker-status"],
+    queryFn: () => api.getWorkerStatus(),
+    refetchInterval: 12000,
+    staleTime: 0,
   });
 
   const loadScore = useCallback(async () => {
@@ -143,6 +151,11 @@ export function ProjectStudioPage() {
       }
     }
 
+    const pollMs =
+      activeJob.status === "queued" && workerStatus?.worker_online === false
+        ? 5000
+        : 1500;
+
     const pollInterval = window.setInterval(async () => {
       try {
         const latest = await api.getJob(activeJob.id);
@@ -158,13 +171,13 @@ export function ProjectStudioPage() {
       } catch {
         // ignore transient poll errors
       }
-    }, 1200);
+    }, pollMs);
 
     return () => {
       clearInterval(pollInterval);
       if (ws) ws.close();
     };
-  }, [activeJob?.id, activeJob?.status, projectId, queryClient, loadScore]);
+  }, [activeJob?.id, activeJob?.status, workerStatus?.worker_online, projectId, queryClient, loadScore]);
 
   // Warn on unsaved changes before unload
   useEffect(() => {
@@ -300,13 +313,13 @@ export function ProjectStudioPage() {
 
   return (
     <AppShell>
-      <div className="mx-auto max-w-[1600px] px-4 py-4 space-y-4">
+      <div className="mx-auto max-w-[1600px] px-3 sm:px-4 py-4 space-y-4 min-w-0">
         {/* Top Studio Toolbar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#27273A] bg-[#11111B] px-4 py-3">
-          <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#27273A] bg-[#11111B] px-3 sm:px-4 py-3 min-w-0">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
             <Link
               to="/dashboard"
-              className="rounded-lg p-1.5 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF]"
+              className="rounded-lg p-2 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] shrink-0"
               aria-label="Back to Dashboard"
             >
               <ArrowLeft className="h-4 w-4" />
@@ -314,15 +327,16 @@ export function ProjectStudioPage() {
             <button
               type="button"
               onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="rounded-lg p-1.5 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF]"
+              className="rounded-lg p-2 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] shrink-0"
               aria-label="Toggle ingestion panel"
             >
               {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
             </button>
-            <div>
-              <div className="flex items-center gap-2.5">
-                <h1 className="text-base font-semibold">{project.title}</h1>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2 min-w-0">
+                <h1 className="text-sm sm:text-base font-semibold truncate max-w-full">{project.title}</h1>
                 <StatusBadge status={project.status} />
+                <WorkerStatusBadge />
               </div>
               {scoreData && (
                 <div className="text-xs text-[#A1A1AA] flex flex-wrap items-center gap-2 mt-0.5">
@@ -371,10 +385,10 @@ export function ProjectStudioPage() {
         </div>
 
         {/* Main Studio Grid */}
-        <div className={`grid gap-4 ${sidebarOpen ? "lg:grid-cols-12" : "grid-cols-1"}`}>
+        <div className={`grid gap-4 min-w-0 ${sidebarOpen ? "lg:grid-cols-12" : "grid-cols-1"}`}>
           {sidebarOpen && (
-            <aside className="lg:col-span-4 xl:col-span-3 space-y-4">
-              <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-4 space-y-4">
+            <aside className="lg:col-span-4 xl:col-span-3 space-y-4 min-w-0">
+              <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-4 space-y-4 min-w-0">
                 <h2 className="text-sm font-semibold">1. Audio / Video Input</h2>
                 <MediaUploader
                   projectId={project.id}
@@ -383,11 +397,12 @@ export function ProjectStudioPage() {
                 />
               </div>
 
-              <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-4 space-y-4">
+              <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-4 space-y-4 min-w-0">
                 <h2 className="text-sm font-semibold">2. Transcription Settings</h2>
                 <TranscriptionConfigPanel
                   hasMedia={Boolean(originalAsset)}
                   activeJob={activeJob}
+                  workerOnline={workerStatus?.worker_online ?? null}
                   defaultInstrument={project.instrument}
                   defaultMode={project.transcription_mode}
                   onStart={handleStartTranscription}
@@ -406,7 +421,7 @@ export function ProjectStudioPage() {
           )}
 
           {/* Main Editor Canvas */}
-          <section className={`${sidebarOpen ? "lg:col-span-8 xl:col-span-9" : ""} space-y-4`}>
+          <section className={`${sidebarOpen ? "lg:col-span-8 xl:col-span-9" : ""} space-y-4 min-w-0`}>
             {/* Playback Bar */}
             <WaveformPlayer
               mediaAssetId={originalAsset?.id || null}
@@ -418,8 +433,8 @@ export function ProjectStudioPage() {
             />
 
             {/* Workspace Tabs */}
-            <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-4 space-y-4">
-              <div className="flex flex-wrap items-center gap-1 border-b border-[#27273A] pb-3" role="tablist">
+            <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-3 sm:p-4 space-y-4 min-w-0">
+              <div className="flex flex-nowrap items-center gap-1 overflow-x-auto border-b border-[#27273A] pb-3" role="tablist">
                 {[
                   { id: "notation" as const, label: "Sheet Music", icon: FileMusic },
                   { id: "pianoroll" as const, label: "Piano Roll Editor", icon: Piano },
@@ -434,7 +449,7 @@ export function ProjectStudioPage() {
                       role="tab"
                       aria-selected={active}
                       onClick={() => setActiveTab(t.id)}
-                      className={`inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                      className={`inline-flex shrink-0 min-h-[40px] items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
                         active
                           ? "bg-[#8B5CF6] text-[#F5F3FF]"
                           : "text-[#A1A1AA] hover:text-[#F5F3FF] hover:bg-[#181825]"
@@ -449,14 +464,27 @@ export function ProjectStudioPage() {
 
               {activeTab === "notation" &&
                 (activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status) ? (
-                  <div className="flex h-64 flex-col items-center justify-center rounded-xl border border-[#27273A] bg-[#09090F] p-6 text-center space-y-2">
-                    <Loader2 className="h-6 w-6 animate-spin text-[#A78BFA]" />
-                    <div className="text-sm font-medium text-[#F5F3FF]">
-                      Transcription in progress: {activeJob.current_stage} ({activeJob.progress}%)
-                    </div>
-                    <p className="text-xs text-[#A1A1AA]">
-                      Sheet music will appear here automatically once a valid score is generated.
-                    </p>
+                  <div className="flex min-h-[16rem] flex-col items-center justify-center rounded-xl border border-[#27273A] bg-[#09090F] p-6 text-center space-y-3">
+                    {activeJob.status === "queued" && (workerStatus?.worker_online === false || activeJob.worker_online === false) ? (
+                      <>
+                        <div className="text-sm font-semibold text-amber-200">
+                          Waiting for Desktop Worker
+                        </div>
+                        <p className="max-w-md text-xs text-[#A1A1AA]">
+                          Your song is safely queued. ScribaSheet&apos;s desktop transcription worker is currently offline. Keep your Windows PC awake and the ScribaSheet worker running to begin transcription.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <Loader2 className="h-6 w-6 animate-spin text-[#A78BFA]" />
+                        <div className="text-sm font-medium text-[#F5F3FF]">
+                          Transcription in progress: {activeJob.current_stage} ({activeJob.progress}%)
+                        </div>
+                        <p className="text-xs text-[#A1A1AA]">
+                          Sheet music will appear here automatically once a valid score is generated.
+                        </p>
+                      </>
+                    )}
                   </div>
                 ) : scoreLoadState === "missing_file" ? (
                   <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-6 text-center space-y-2">

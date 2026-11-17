@@ -138,7 +138,7 @@ export function PianoRollEditor({
   }, []);
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 w-full min-w-0 max-w-full overflow-hidden">
       {/* Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
@@ -200,7 +200,7 @@ export function PianoRollEditor({
 
       {/* Piano Roll Canvas */}
       <div
-        className="relative flex max-h-[340px] overflow-auto rounded-xl border border-[#27273A] bg-[#09090F] select-none"
+        className="relative flex w-full max-w-full max-h-[340px] overflow-auto rounded-xl border border-[#27273A] bg-[#09090F] select-none touch-pan-x touch-pan-y"
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}

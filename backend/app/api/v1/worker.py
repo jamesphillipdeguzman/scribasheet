@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import (
@@ -18,6 +19,8 @@ from app.models import (
     TranscriptionJob,
     TranscriptionResult,
     UsageRecord,
+    User,
+    WorkerNode,
 )
 from app.schemas.score import ScoreData
 from app.storage.service import storage_service
@@ -141,6 +144,94 @@ def _get_active_claimed_job(db: Session, job_id: str, worker_id: str, now: datet
     return job
 
 
+def _record_worker_activity(
+    db: Session,
+    *,
+    worker_id: str,
+    status_val: str = "online",
+    active_job_id: str | None = None,
+) -> None:
+    now = _utcnow()
+    node = db.query(WorkerNode).filter(WorkerNode.worker_id == worker_id).first()
+    if node is None:
+        node = WorkerNode(
+            worker_id=worker_id,
+            status=status_val,
+            last_seen_at=now,
+            active_job_id=active_job_id,
+            metadata_json={},
+            updated_at=now,
+        )
+        db.add(node)
+    else:
+        node.status = status_val
+        node.last_seen_at = now
+        node.active_job_id = active_job_id
+        node.updated_at = now
+
+
+def get_worker_availability(db: Session) -> dict[str, Any]:
+    settings = get_settings()
+    now = _utcnow()
+    threshold = max(10, int(settings.WORKER_ONLINE_THRESHOLD_SECONDS))
+    nodes = db.query(WorkerNode).order_by(WorkerNode.last_seen_at.desc()).all()
+
+    online_nodes: list[WorkerNode] = []
+    latest_node: WorkerNode | None = nodes[0] if nodes else None
+    latest_age: float | None = None
+    for n in nodes:
+        seen = _ensure_utc(n.last_seen_at)
+        age = max(0.0, (now - seen).total_seconds()) if seen else float(threshold + 1)
+        if latest_age is None:
+            latest_age = age
+        if n.status == "online" and age <= threshold:
+            online_nodes.append(n)
+
+    worker_online = len(online_nodes) > 0
+    active_job_count = (
+        db.query(TranscriptionJob)
+        .filter(
+            TranscriptionJob.status.in_(ACTIVE_WORKER_STATUSES),
+            TranscriptionJob.lease_expires_at.is_not(None),
+            TranscriptionJob.lease_expires_at >= now,
+        )
+        .count()
+    )
+    queue_depth = (
+        db.query(TranscriptionJob)
+        .filter(TranscriptionJob.status == "queued")
+        .count()
+    )
+    return {
+        "worker_online": worker_online,
+        "status": "online" if worker_online else "offline",
+        "last_seen_seconds": round(latest_age, 1) if latest_age is not None else None,
+        "worker_id": online_nodes[0].worker_id if online_nodes else (latest_node.worker_id if latest_node else None),
+        "active_job_count": active_job_count,
+        "queue_depth": queue_depth,
+        "freshness_threshold_seconds": threshold,
+    }
+
+
+@router.get("/status")
+def worker_status(
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return get_worker_availability(db)
+
+
+@router.post("/offline")
+def mark_worker_offline(
+    payload: WorkerClaimRequest,
+    _: str = Depends(require_worker_token),
+    db: Session = Depends(get_db),
+):
+    _record_worker_activity(db, worker_id=payload.worker_id, status_val="offline", active_job_id=None)
+    db.commit()
+    return {"worker_id": payload.worker_id, "status": "offline"}
+
+
 @router.post("/jobs/claim")
 def claim_next_job(
     payload: WorkerClaimRequest,
@@ -238,8 +329,11 @@ def claim_next_job(
             break
 
     if not claimed_job_id:
+        _record_worker_activity(db, worker_id=payload.worker_id, status_val="online", active_job_id=None)
+        db.commit()
         return {"job": None}
 
+    _record_worker_activity(db, worker_id=payload.worker_id, status_val="online", active_job_id=claimed_job_id)
     job = db.query(TranscriptionJob).filter(TranscriptionJob.id == claimed_job_id).first()
     project = db.query(Project).filter(Project.id == job.project_id).first()
     if project:
@@ -298,6 +392,7 @@ def heartbeat_job(
     settings = get_settings()
     job.last_heartbeat_at = now
     job.lease_expires_at = now + timedelta(seconds=settings.WORKER_LEASE_SECONDS)
+    _record_worker_activity(db, worker_id=payload.worker_id, status_val="online", active_job_id=job.id)
     db.commit()
     return {
         "job_id": job.id,
@@ -328,6 +423,7 @@ def report_job_progress(
     if payload.log_line:
         ts = now.strftime("%H:%M:%S")
         job.logs_text = f"{job.logs_text}[{ts}] {payload.log_line}\n"
+    _record_worker_activity(db, worker_id=payload.worker_id, status_val="online", active_job_id=job.id)
     db.commit()
 
     job_ws_manager.publish_from_thread(
@@ -507,6 +603,7 @@ def complete_job(
     job.current_stage = "Completed (Simulated Test)" if is_simulated else "Completed"
     job.completed_at = now
     job.lease_expires_at = None
+    _record_worker_activity(db, worker_id=payload.worker_id, status_val="online", active_job_id=None)
     db.commit()
 
     job_ws_manager.publish_from_thread(
@@ -561,6 +658,7 @@ def fail_job(
     if project:
         project.status = "failed"
 
+    _record_worker_activity(db, worker_id=payload.worker_id, status_val="online", active_job_id=None)
     db.commit()
 
     job_ws_manager.publish_from_thread(

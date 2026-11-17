@@ -7,6 +7,7 @@ from app.models.entities import (
     TranscriptionResult,
     UsageRecord,
     User,
+    WorkerNode,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "ProjectScore",
     "Export",
     "UsageRecord",
+    "WorkerNode",
 ]
