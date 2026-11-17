@@ -14,12 +14,18 @@ import type {
 } from "@/types/api";
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api/v1";
+export const API_ORIGIN_URL = API_BASE_URL.replace(/\/api\/v1\/?$/, "") || "";
 export const WS_BASE_URL =
   import.meta.env.VITE_WS_BASE_URL ||
   `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/api/v1`;
 
 const ACCESS_TOKEN_KEY = "scribasheet_access_token";
 const REFRESH_TOKEN_KEY = "scribasheet_refresh_token";
+const TRANSIENT_STATUSES = new Set([502, 503, 504]);
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const MAX_TRANSIENT_RETRIES = 3;
+const BASE_RETRY_DELAY_MS = 600;
+const MAX_TOTAL_RETRY_WAIT_MS = 5_000;
 
 export function getStoredTokens() {
   if (typeof window === "undefined" || typeof window.localStorage?.getItem !== "function") {
@@ -43,13 +49,69 @@ export function clearStoredTokens() {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  isTransient: boolean;
+  constructor(status: number, message: string, isTransient = false) {
     super(message);
     this.status = status;
+    this.isTransient = isTransient;
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}, retryAuth = true): Promise<T> {
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientNetworkError(err: unknown, callerAborted: boolean): boolean {
+  if (callerAborted) return false;
+  if (err instanceof TypeError) return true;
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  return err instanceof Error && err.name === "AbortError";
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const externalSignal = init.signal;
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
+  }
+}
+
+let inFlightWakeUp: Promise<boolean> | null = null;
+
+async function wakeUpBackend(): Promise<boolean> {
+  if (inFlightWakeUp) return inFlightWakeUp;
+  const healthUrl = `${API_ORIGIN_URL}/health`;
+  inFlightWakeUp = fetchWithTimeout(healthUrl, { method: "GET" }, 8_000)
+    .then((res) => res.ok)
+    .catch(() => false)
+    .finally(() => {
+      inFlightWakeUp = null;
+    });
+  return inFlightWakeUp;
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  retryAuth = true,
+  retryDelayBaseMs: number = BASE_RETRY_DELAY_MS
+): Promise<T> {
   const { accessToken, refreshToken } = getStoredTokens();
   const headers = new Headers(init.headers);
   if (accessToken && !headers.has("Authorization")) {
@@ -59,10 +121,51 @@ async function request<T>(path: string, init: RequestInit = {}, retryAuth = true
     headers.set("Content-Type", "application/json");
   }
 
-  const res = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+  let res: Response | null = null;
+  let lastNetworkError: unknown = null;
+  let totalWaitMs = 0;
+
+  for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
+    try {
+      res = await fetchWithTimeout(`${API_BASE_URL}${path}`, { ...init, headers });
+      lastNetworkError = null;
+      if (!TRANSIENT_STATUSES.has(res.status) || attempt === MAX_TRANSIENT_RETRIES) {
+        break;
+      }
+    } catch (err) {
+      lastNetworkError = err;
+      const callerAborted = Boolean(init.signal?.aborted);
+      if (!isTransientNetworkError(err, callerAborted) || attempt === MAX_TRANSIENT_RETRIES) {
+        if (callerAborted) throw err;
+        throw new ApiError(
+          503,
+          "Backend is waking up or temporarily unreachable. Please try again in a moment.",
+          true
+        );
+      }
+    }
+
+    const delayMs = Math.min(
+      retryDelayBaseMs * Math.pow(2, attempt),
+      Math.max(0, MAX_TOTAL_RETRY_WAIT_MS - totalWaitMs)
+    );
+    if (delayMs <= 0) break;
+    totalWaitMs += delayMs;
+    await sleep(delayMs);
+  }
+
+  if (!res) {
+    throw new ApiError(
+      503,
+      lastNetworkError instanceof Error
+        ? "Backend is waking up or temporarily unreachable. Please try again in a moment."
+        : "Unable to reach ScribaSheet API.",
+      true
+    );
+  }
 
   if (res.status === 401 && retryAuth && refreshToken) {
-    const refRes = await fetch(`${API_BASE_URL}/auth/refresh`, {
+    const refRes = await fetchWithTimeout(`${API_BASE_URL}/auth/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refresh_token: refreshToken }),
@@ -70,7 +173,7 @@ async function request<T>(path: string, init: RequestInit = {}, retryAuth = true
     if (refRes.ok) {
       const tokens: TokenResponse = await refRes.json();
       setStoredTokens(tokens.access_token, tokens.refresh_token);
-      return request<T>(path, init, false);
+      return request<T>(path, init, false, retryDelayBaseMs);
     }
     clearStoredTokens();
   }
@@ -83,7 +186,7 @@ async function request<T>(path: string, init: RequestInit = {}, retryAuth = true
     } catch {
       // ignore non-json error body
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, message, TRANSIENT_STATUSES.has(res.status));
   }
 
   if (res.status === 204) {
@@ -93,6 +196,7 @@ async function request<T>(path: string, init: RequestInit = {}, retryAuth = true
 }
 
 export const api = {
+  wakeUpBackend,
   // Auth & Users
   register: (data: { email: string; password: string; display_name: string }) =>
     request<TokenResponse>("/auth/register", { method: "POST", body: JSON.stringify(data) }),

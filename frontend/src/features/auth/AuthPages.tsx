@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -39,6 +39,11 @@ export function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
   const [serverError, setServerError] = useState<string | null>(null);
+  const [wakingUp, setWakingUp] = useState(false);
+
+  useEffect(() => {
+    void api.wakeUpBackend();
+  }, []);
   const {
     register,
     handleSubmit,
@@ -47,11 +52,15 @@ export function LoginPage() {
 
   const onSubmit = async (values: z.infer<typeof loginSchema>) => {
     setServerError(null);
+    const wakeTimer = window.setTimeout(() => setWakingUp(true), 1500);
     try {
       await login(values.email, values.password);
       navigate("/dashboard");
     } catch (err) {
       setServerError(err instanceof ApiError ? err.message : "Failed to sign in.");
+    } finally {
+      clearTimeout(wakeTimer);
+      setWakingUp(false);
     }
   };
 
@@ -71,7 +80,7 @@ export function LoginPage() {
           </Link>
         </div>
         <Button type="submit" className="w-full" disabled={isSubmitting}>
-          {isSubmitting ? "Signing in..." : "Sign In"}
+          {isSubmitting ? (wakingUp ? "Waking up server..." : "Signing in...") : "Sign In"}
         </Button>
       </form>
       <p className="mt-5 text-center text-xs text-[#A1A1AA]">

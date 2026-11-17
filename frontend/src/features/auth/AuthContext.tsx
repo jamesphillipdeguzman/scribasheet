@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { api, clearStoredTokens, getStoredTokens, setStoredTokens } from "@/services/api";
+import { api, ApiError, clearStoredTokens, getStoredTokens, setStoredTokens } from "@/services/api";
 import type { UsageSummary, User } from "@/types/api";
 
 interface AuthContextValue {
@@ -31,10 +31,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const [me, u] = await Promise.all([api.getMe(), api.getUsage()]);
       setUser(me);
       setUsage(u);
-    } catch {
-      clearStoredTokens();
-      setUser(null);
-      setUsage(null);
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        clearStoredTokens();
+        setUser(null);
+        setUsage(null);
+      }
     } finally {
       setIsLoading(false);
     }

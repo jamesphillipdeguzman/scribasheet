@@ -554,4 +554,53 @@ describe("ScribaSheet Frontend", () => {
     );
     expect(screen.getByText(/cannot start or stop a worker on another device/i)).toBeInTheDocument();
   });
+
+  it("retries transient 502/503 and network errors up to 3 times without retrying 401", async () => {
+    vi.restoreAllMocks();
+    let planCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/billing/plans")) {
+        planCalls += 1;
+        if (planCalls === 1) return new Response("Bad Gateway", { status: 502 });
+        if (planCalls === 2) return new Response("Unavailable", { status: 503 });
+        if (planCalls === 3) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        if (planCalls === 4) throw new TypeError("Failed to fetch");
+        return new Response(JSON.stringify({ ok: "recovered" }), { status: 200 });
+      }
+      if (url.endsWith("/auth/login")) {
+        return new Response(JSON.stringify({ detail: "Invalid email or password." }), { status: 401 });
+      }
+      if (url.endsWith("/health")) {
+        return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      // 1. 502 -> 503 -> 200 succeeds
+      const res1 = await api.getPlans();
+      expect(res1).toEqual({ ok: true });
+      expect(planCalls).toBe(3);
+
+      // 2. TypeError: Failed to fetch -> 200 succeeds
+      const res2 = await api.getPlans();
+      expect(res2).toEqual({ ok: "recovered" });
+      expect(planCalls).toBe(5);
+
+      // 3. 401 does NOT retry (no refresh token stored)
+      const beforeLogin = fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/auth/login")).length;
+      await expect(api.login({ email: "a@b.com", password: "bad" })).rejects.toThrow("Invalid email or password.");
+      const afterLogin = fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/auth/login")).length;
+      expect(afterLogin - beforeLogin).toBe(1);
+
+      // 4. wakeUpBackend hits /health
+      const awake = await api.wakeUpBackend();
+      expect(awake).toBe(true);
+      expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/health$/), expect.objectContaining({ method: "GET" }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
