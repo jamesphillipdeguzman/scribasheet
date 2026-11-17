@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import random
 import signal
 import socket
 import sys
@@ -58,6 +59,7 @@ from app.transcription.provider_factory import (
     transcribe_with_provider,
 )
 from app.transcription.versioning import build_transcription_provenance
+from app.worker_lock import WorkerSingleInstanceLock
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -481,6 +483,57 @@ class RemoteWorkerAgent:
     def _headers(self) -> dict[str, str]:
         return {"X-Worker-Token": self.worker_token}
 
+    @staticmethod
+    def _compute_backoff(current_backoff: float, *, max_backoff: float = 45.0) -> tuple[float, float]:
+        """Return (jittered_wait_seconds, next_base_backoff) bounded by max_backoff."""
+        jitter = random.uniform(0.8, 1.2)
+        wait_sec = min(max_backoff, max(0.2, current_backoff * jitter))
+        next_backoff = min(max_backoff, max(0.2, current_backoff * 1.5))
+        return wait_sec, next_backoff
+
+    def _post_with_retry(
+        self,
+        url: str,
+        *,
+        json_payload: dict[str, Any],
+        max_attempts: int = 3,
+        retry_statuses: tuple[int, ...] = (429, 502, 503, 504),
+    ) -> httpx.Response:
+        """POST with bounded retry for transient Railway cold-start or network errors."""
+        backoff = 1.0
+        for attempt in range(1, max(1, max_attempts) + 1):
+            try:
+                resp = self._client.post(url, json=json_payload, headers=self._headers())
+                if resp.status_code in retry_statuses and attempt < max_attempts:
+                    wait_sec, backoff = self._compute_backoff(backoff, max_backoff=10.0)
+                    logger.warning(
+                        "Transient HTTP %s from %s (attempt %d/%d); retrying in %.1fs",
+                        resp.status_code,
+                        url,
+                        attempt,
+                        max_attempts,
+                        wait_sec,
+                    )
+                    if self._stop_event.wait(wait_sec):
+                        raise WorkerInterruptedError("Worker stopping during retry wait.")
+                    continue
+                return resp
+            except httpx.RequestError as exc:
+                if attempt >= max_attempts:
+                    raise
+                wait_sec, backoff = self._compute_backoff(backoff, max_backoff=10.0)
+                logger.warning(
+                    "Transient network error (%s) calling %s (attempt %d/%d); retrying in %.1fs",
+                    type(exc).__name__,
+                    url,
+                    attempt,
+                    max_attempts,
+                    wait_sec,
+                )
+                if self._stop_event.wait(wait_sec):
+                    raise WorkerInterruptedError("Worker stopping during retry wait.")
+        raise RuntimeError("Unreachable retry state")
+
     def request_stop(self) -> None:
         self._stop_event.set()
         if self._active_cancel_event is not None:
@@ -594,9 +647,9 @@ class RemoteWorkerAgent:
             if lease_lost.is_set():
                 raise LeaseLostError(f"Lease lost before completion of job {job_id}.")
 
-            c_resp = self._client.post(
+            c_resp = self._post_with_retry(
                 f"{self.api_base_url}/worker/jobs/{job_id}/complete",
-                json={
+                json_payload={
                     "worker_id": self.worker_id,
                     "is_simulated": result.is_simulated,
                     "midi_key": result.midi_key,
@@ -607,7 +660,6 @@ class RemoteWorkerAgent:
                     "duration_seconds": result.duration_seconds,
                     "metadata_json": result.metadata_json,
                 },
-                headers=self._headers(),
             )
             if c_resp.status_code in (403, 409):
                 lease_lost.set()
@@ -672,22 +724,22 @@ class RemoteWorkerAgent:
                 except httpx.HTTPStatusError as exc:
                     had_connection_error = True
                     code = exc.response.status_code
+                    wait_sec, backoff = self._compute_backoff(backoff)
                     if code in (401, 403):
                         logger.error("Worker authentication rejected (HTTP %s). Verify WORKER_API_TOKEN.", code)
                     else:
-                        logger.warning("Coordinator HTTP %s error; retrying in %.1fs", code, backoff)
-                    self._stop_event.wait(backoff)
-                    backoff = min(30.0, backoff * 1.5)
+                        logger.warning("Coordinator HTTP %s error; retrying in %.1fs", code, wait_sec)
+                    self._stop_event.wait(wait_sec)
                 except httpx.RequestError as exc:
                     had_connection_error = True
-                    logger.warning("Coordinator network error (%s); retrying in %.1fs", type(exc).__name__, backoff)
-                    self._stop_event.wait(backoff)
-                    backoff = min(30.0, backoff * 1.5)
+                    wait_sec, backoff = self._compute_backoff(backoff)
+                    logger.warning("Coordinator network error (%s); retrying in %.1fs", type(exc).__name__, wait_sec)
+                    self._stop_event.wait(wait_sec)
                 except Exception as exc:
                     had_connection_error = True
+                    wait_sec, backoff = self._compute_backoff(backoff)
                     logger.exception("Unexpected worker loop error: %s", exc)
-                    self._stop_event.wait(backoff)
-                    backoff = min(30.0, backoff * 1.5)
+                    self._stop_event.wait(wait_sec)
         finally:
             try:
                 self._client.post(
@@ -710,22 +762,31 @@ def main() -> int:
         logger.error("SCRIBASHEET_API_URL (or RAILWAY_API_URL) and WORKER_API_TOKEN must be set.")
         return 1
 
-    agent = RemoteWorkerAgent(
-        api_base_url=api_url,
-        worker_token=token,
-        worker_id=os.environ.get("WORKER_ID"),
-        poll_interval_sec=float(os.environ.get("WORKER_POLL_INTERVAL_SEC", "4.0")),
-        heartbeat_interval_sec=float(os.environ.get("WORKER_HEARTBEAT_INTERVAL_SEC", "20.0")),
-    )
+    lock_name = os.environ.get("WORKER_LOCK_NAME", "Local\\ScribaSheetTranscriptionWorker")
+    lock = WorkerSingleInstanceLock(lock_name=lock_name)
+    if not lock.acquire():
+        logger.info("Another ScribaSheet worker instance already owns lock '%s'; exiting.", lock_name)
+        return 0
 
-    def _handle_signal(signum, frame):
-        logger.info("Received shutdown signal (%s), stopping cooperatively...", signum)
-        agent.request_stop()
+    try:
+        agent = RemoteWorkerAgent(
+            api_base_url=api_url,
+            worker_token=token,
+            worker_id=os.environ.get("WORKER_ID"),
+            poll_interval_sec=float(os.environ.get("WORKER_POLL_INTERVAL_SEC", "4.0")),
+            heartbeat_interval_sec=float(os.environ.get("WORKER_HEARTBEAT_INTERVAL_SEC", "20.0")),
+        )
 
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-    agent.run_forever()
-    return 0
+        def _handle_signal(signum, frame):
+            logger.info("Received shutdown signal (%s), stopping cooperatively...", signum)
+            agent.request_stop()
+
+        signal.signal(signal.SIGINT, _handle_signal)
+        signal.signal(signal.SIGTERM, _handle_signal)
+        agent.run_forever()
+        return 0
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

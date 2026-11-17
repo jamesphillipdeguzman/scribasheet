@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { Cpu } from "lucide-react";
-import { api } from "@/services/api";
+import { api, ApiError } from "@/services/api";
 import { cn } from "@/lib/utils";
+import type { WorkerStatus } from "@/types/api";
 
 function formatLastSeen(sec: number | null): string {
   if (sec === null) return "never seen";
@@ -10,17 +11,49 @@ function formatLastSeen(sec: number | null): string {
   return `${Math.round(sec / 3600)}h ago`;
 }
 
+function isValidWorkerStatus(data: unknown): data is WorkerStatus {
+  if (!data || typeof data !== "object") return false;
+  const candidate = data as Partial<WorkerStatus>;
+  return (
+    typeof candidate.worker_online === "boolean" &&
+    (candidate.status === "online" || candidate.status === "offline") &&
+    typeof candidate.queue_depth === "number"
+  );
+}
+
+function getUnavailableReason(error: unknown, data: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 401 || error.status === 403) {
+      return `Authentication required to check worker status (HTTP ${error.status}).`;
+    }
+    if (error.status === 404) {
+      return "Worker status endpoint not found on API (HTTP 404).";
+    }
+    if (error.status >= 500) {
+      return `API server error while checking worker status (HTTP ${error.status}).`;
+    }
+    return `Worker status request failed (HTTP ${error.status}).`;
+  }
+  if (data !== undefined && !isValidWorkerStatus(data)) {
+    return "Unexpected response format from worker status endpoint.";
+  }
+  return "Cannot reach API to check worker status.";
+}
+
 export function WorkerStatusBadge({ className }: { className?: string }) {
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ["worker-status"],
     queryFn: () => api.getWorkerStatus(),
     refetchInterval: 12000,
+    refetchOnWindowFocus: false,
+    retry: 1,
     staleTime: 0,
   });
 
   if (isLoading) {
     return (
       <span
+        data-status="loading"
         className={cn(
           "inline-flex items-center gap-2 rounded-full border border-[#27273A] bg-[#11111B] px-3 py-1 text-xs text-[#A1A1AA]",
           className
@@ -32,9 +65,13 @@ export function WorkerStatusBadge({ className }: { className?: string }) {
     );
   }
 
-  if (isError || !data) {
+  if (isError || !isValidWorkerStatus(data)) {
+    const reason = getUnavailableReason(error, data);
     return (
       <span
+        data-status="unavailable"
+        title={reason}
+        aria-label={`Worker status unavailable: ${reason}`}
         className={cn(
           "inline-flex items-center gap-2 rounded-full border border-[#27273A] bg-[#11111B] px-3 py-1 text-xs text-[#A1A1AA]",
           className
@@ -49,6 +86,7 @@ export function WorkerStatusBadge({ className }: { className?: string }) {
   const online = data.worker_online;
   return (
     <span
+      data-status={online ? "online" : "offline"}
       className={cn(
         "inline-flex max-w-full flex-wrap items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium",
         online

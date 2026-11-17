@@ -367,4 +367,92 @@ describe("ScribaSheet Frontend", () => {
       expect(onPlayheadChange).toHaveBeenCalledWith(0);
     });
   });
+
+  it("renders WorkerStatusBadge loading, online, offline, unavailable (401/404/500), and refresh states", async () => {
+    const statusSpy = vi.spyOn(api, "getWorkerStatus");
+
+    // 1. Loading state
+    let resolvePending!: (val: any) => void;
+    statusSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolvePending = resolve;
+        })
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <WorkerStatusBadge />
+      </QueryClientProvider>
+    );
+    expect(screen.getByText(/Checking worker\.\.\./i)).toBeInTheDocument();
+
+    // 2. Online state
+    resolvePending({
+      worker_online: true,
+      status: "online",
+      last_seen_seconds: 5,
+      worker_id: "win-pc",
+      active_job_count: 1,
+      queue_depth: 0,
+      freshness_threshold_seconds: 45,
+    });
+    await waitFor(() => {
+      const badge = screen.getByTestId("worker-status-badge");
+      expect(badge).toHaveAttribute("data-status", "online");
+      expect(badge).toHaveTextContent(/Desktop Worker Online/i);
+    });
+
+    // 3. Refresh to Offline state
+    statusSpy.mockResolvedValueOnce({
+      worker_online: false,
+      status: "offline",
+      last_seen_seconds: 180,
+      worker_id: "win-pc",
+      active_job_count: 0,
+      queue_depth: 2,
+      freshness_threshold_seconds: 45,
+    });
+    await qc.invalidateQueries({ queryKey: ["worker-status"] });
+    await waitFor(() => {
+      const badge = screen.getByTestId("worker-status-badge");
+      expect(badge).toHaveAttribute("data-status", "offline");
+      expect(badge).toHaveTextContent(/Desktop Worker Offline/i);
+      expect(badge).toHaveTextContent(/2 queued/i);
+    });
+
+    // 4. HTTP 401 -> Worker status unavailable (NOT offline)
+    statusSpy.mockRejectedValue(new ApiError(401, "Authentication required."));
+    await qc.invalidateQueries({ queryKey: ["worker-status"] });
+    await waitFor(
+      () => {
+        const el = screen.getByText(/Worker status unavailable/i);
+        expect(el).toHaveAttribute("data-status", "unavailable");
+        expect(el).toHaveAttribute("title", expect.stringMatching(/HTTP 401/i));
+      },
+      { timeout: 3000 }
+    );
+
+    // 5. HTTP 404 -> Worker status unavailable
+    statusSpy.mockRejectedValue(new ApiError(404, "Not found"));
+    await qc.invalidateQueries({ queryKey: ["worker-status"] });
+    await waitFor(
+      () => {
+        const el = screen.getByText(/Worker status unavailable/i);
+        expect(el).toHaveAttribute("title", expect.stringMatching(/HTTP 404/i));
+      },
+      { timeout: 3000 }
+    );
+
+    // 6. HTTP 500 -> Worker status unavailable
+    statusSpy.mockRejectedValue(new ApiError(500, "Server error"));
+    await qc.invalidateQueries({ queryKey: ["worker-status"] });
+    await waitFor(
+      () => {
+        const el = screen.getByText(/Worker status unavailable/i);
+        expect(el).toHaveAttribute("title", expect.stringMatching(/HTTP 500/i));
+      },
+      { timeout: 3000 }
+    );
+  });
 });
