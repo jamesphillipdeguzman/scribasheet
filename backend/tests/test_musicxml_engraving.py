@@ -152,6 +152,7 @@ def test_music21_chord_symbols_and_beaming_preserve_midi_parity() -> None:
         {
             p.midi
             for n in parsed.recurse().notes
+            if not isinstance(n, music21.harmony.ChordSymbol)
             for p in (n.pitches if hasattr(n, "pitches") else [n.pitch])
         }
     )

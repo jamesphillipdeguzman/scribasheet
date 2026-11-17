@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import librosa
@@ -249,13 +250,33 @@ def assign_guitar_tab(pitch_midi: int) -> tuple[int | None, int | None]:
     return None, None
 
 
+@dataclass
+class ChordDetectionConfig:
+    """Configurable thresholds for confidence-aware harmonic analysis."""
+
+    min_note_duration_sec: float = 0.08
+    min_pc_weight_ratio: float = 0.22
+    min_distinct_pcs: int = 3
+    min_confidence: float = 0.58
+    strong_short_change_confidence: float = 0.72
+    min_bass_weight_ratio: float = 0.22
+    allow_slash_chords: bool = True
+
+
 def _safe_chord_symbol(chord_obj: music21.chord.Chord) -> music21.harmony.ChordSymbol | None:
     try:
         cs = music21.harmony.chordSymbolFromChord(chord_obj)
     except Exception:
         return None
     figure = (cs.figure or "").strip()
-    if not figure or figure == "Chord Symbol Cannot Be Identified" or cs.chordKind in ("power", ""):
+    if (
+        not figure
+        or figure == "Chord Symbol Cannot Be Identified"
+        or cs.chordKind in ("power", "", "none")
+        or "add" in figure
+        or "no" in figure
+        or "alter" in figure
+    ):
         return None
     return cs
 
@@ -278,150 +299,208 @@ def _parse_key_signature_for_analysis(key_signature: str) -> music21.key.Key:
         return music21.key.Key("C", "major")
 
 
+def _spell_pitch_for_key(p: music21.pitch.Pitch, key_obj: music21.key.Key) -> music21.pitch.Pitch:
+    if key_obj.sharps < 0 and p.accidental is not None and p.accidental.alter > 0:
+        return p.getEnharmonic()
+    if key_obj.sharps > 0 and p.accidental is not None and p.accidental.alter < 0:
+        return p.getEnharmonic()
+    return p
+
+
+def _format_readable_symbol(cs: music21.harmony.ChordSymbol) -> tuple[str, str, str]:
+    figure = cs.figure.strip().replace("-", "b")
+    # Standardize diminished triad symbol if music21 emits 'o'
+    figure = figure.replace("o7", "dim7").replace("o", "dim")
+    root_name = cs.root().name.replace("-", "b")
+    quality = cs.chordKind or "major"
+    return figure, root_name, quality
+
+
+def _analyze_window_chord(
+    pc_weights: dict[int, float],
+    lowest_midi: int | None,
+    key_obj: music21.key.Key,
+    cfg: ChordDetectionConfig,
+) -> tuple[str, str, str, float] | None:
+    if not pc_weights:
+        return None
+    total_w = sum(pc_weights.values())
+    if total_w <= 1e-6:
+        return None
+    max_w = max(pc_weights.values())
+    ranked_pcs = sorted(
+        ((pc, w) for pc, w in pc_weights.items() if w >= cfg.min_pc_weight_ratio * max_w),
+        key=lambda item: -item[1],
+    )
+    filtered_pcs = [pc for pc, _ in ranked_pcs[:4]]
+    if len(filtered_pcs) < cfg.min_distinct_pcs:
+        return None
+
+    bass_pc = (lowest_midi % 12) if lowest_midi is not None else None
+    include_bass = (
+        cfg.allow_slash_chords
+        and bass_pc is not None
+        and bass_pc in filtered_pcs
+        and pc_weights.get(bass_pc, 0.0) >= cfg.min_bass_weight_ratio * total_w
+    )
+
+    slice_pitches: list[music21.pitch.Pitch] = []
+    if include_bass and lowest_midi is not None:
+        slice_pitches.append(_spell_pitch_for_key(music21.pitch.Pitch(lowest_midi), key_obj))
+    for pc in filtered_pcs:
+        if include_bass and pc == bass_pc:
+            continue
+        slice_pitches.append(_spell_pitch_for_key(music21.pitch.Pitch(60 + pc), key_obj))
+
+    # Chordify via temporary music21 Stream to normalize simultaneous verticality
+    tmp_stream = music21.stream.Part()
+    tmp_stream.insert(0.0, music21.chord.Chord(slice_pitches, quarterLength=1.0))
+    chordified = tmp_stream.chordify()
+    ch_el = next(iter(chordified.recurse().getElementsByClass(music21.chord.Chord)), None)
+    if ch_el is None:
+        return None
+
+    cs = _safe_chord_symbol(ch_el)
+    used_chord = ch_el
+    if cs is None and len(slice_pitches) > 3:
+        # Simplify to top-3 weighted pitch classes to avoid passing-note clutter
+        core_pcs = [pc for pc, _ in ranked_pcs[:3]]
+        core_pitches = []
+        if include_bass and bass_pc in core_pcs and lowest_midi is not None:
+            core_pitches.append(_spell_pitch_for_key(music21.pitch.Pitch(lowest_midi), key_obj))
+        for pc in core_pcs:
+            if include_bass and pc == bass_pc:
+                continue
+            core_pitches.append(_spell_pitch_for_key(music21.pitch.Pitch(60 + pc), key_obj))
+        core_chord = music21.chord.Chord(core_pitches)
+        cs = _safe_chord_symbol(core_chord)
+        used_chord = core_chord
+
+    if cs is None:
+        return None
+
+    symbol, root_name, quality = _format_readable_symbol(cs)
+    chord_pcs = {p.pitchClass for p in used_chord.pitches}
+    matched_w = sum(pc_weights.get(pc, 0.0) for pc in chord_pcs)
+    coverage = matched_w / max(1e-6, total_w)
+
+    diatonic_bonus = 0.0
+    try:
+        rn = music21.roman.romanNumeralFromChord(used_chord, key_obj)
+        if not rn.containsAccidentals():
+            diatonic_bonus = 0.08
+    except Exception:
+        pass
+
+    conf = min(1.0, max(0.0, coverage * 0.88 + diatonic_bonus))
+    if conf < cfg.min_confidence:
+        return None
+    return symbol, root_name, quality, conf
+
+
 def detect_chords(
     notes: list[ScoreNote],
     tempo_bpm: float,
     time_signature: str,
     key_signature: str = "C major",
+    timing_map=None,
+    config: ChordDetectionConfig | None = None,
 ) -> list[ScoreChord]:
-    """Identify key-aware chord symbols using music21 Stream.chordify(), harmony, and RomanNumeral."""
+    """Identify confidence-aware, key-consistent chord symbols using music21."""
     if not notes:
         return []
+    cfg = config or ChordDetectionConfig()
     try:
         num = max(1, int(time_signature.split("/")[0]))
     except Exception:
         num = 4
-    sec_per_beat = 60.0 / max(20.0, tempo_bpm)
-    window_beats = 2.0 if num >= 4 else float(num)
-    window_sec = sec_per_beat * window_beats
 
-    max_offset = max(n.offset_sec for n in notes)
-    num_windows = max(1, int(np.ceil(max_offset / window_sec)))
+    sec_per_beat = 60.0 / max(20.0, tempo_bpm)
     key_obj = _parse_key_signature_for_analysis(key_signature)
 
-    # Build a combined piano stream quantized to harmonic windows and chordify() it
-    harmonic_part = music21.stream.Part()
-    window_weights: dict[int, tuple[dict[int, float], int]] = {}
+    def _to_ql(sec: float) -> float:
+        if timing_map is not None:
+            return max(0.0, float(timing_map.seconds_to_ql(sec)))
+        return max(0.0, sec / sec_per_beat)
 
-    for w_idx in range(num_windows):
-        w_start = w_idx * window_sec
-        w_end = (w_idx + 1) * window_sec
+    def _to_sec(ql: float) -> float:
+        if timing_map is not None:
+            return max(0.0, float(timing_map.ql_to_seconds(ql)))
+        return max(0.0, ql * sec_per_beat)
 
-        overlapping: list[tuple[ScoreNote, float]] = []
-        for n in notes:
-            overlap = min(n.offset_sec, w_end) - max(n.onset_sec, w_start)
-            if overlap > 0.02:
-                overlapping.append((n, overlap))
-        if not overlapping:
-            continue
+    note_qls = [
+        (
+            n,
+            _to_ql(n.onset_sec),
+            max(_to_ql(n.onset_sec) + 0.125, _to_ql(n.offset_sec)),
+            (n.offset_sec - n.onset_sec) >= cfg.min_note_duration_sec,
+        )
+        for n in notes
+    ]
+    max_ql = max(off_ql for _, _, off_ql, _ in note_qls)
+    total_beats = max(1, int(np.ceil(max_ql)))
 
-        substantive = [(n, ov) for n, ov in overlapping if (n.offset_sec - n.onset_sec) >= 0.08]
-        active = substantive if substantive else overlapping
-
+    def _collect_weights(w_start_ql: float, w_end_ql: float) -> tuple[dict[int, float], int | None]:
+        active = [
+            (n, min(off_ql, w_end_ql) - max(on_ql, w_start_ql), is_sub)
+            for n, on_ql, off_ql, is_sub in note_qls
+            if min(off_ql, w_end_ql) - max(on_ql, w_start_ql) > 0.05
+        ]
+        if not active:
+            return {}, None
+        substantive = [(n, ov) for n, ov, is_sub in active if is_sub]
+        chosen = substantive if substantive else [(n, ov) for n, ov, _ in active]
         pc_weights: dict[int, float] = {}
-        lowest_midi = 128
-        for n, ov in active:
+        lowest_midi: int | None = None
+        for n, ov in chosen:
             conf_factor = float(n.confidence) if n.confidence is not None else 0.75
             w = ov * (max(1, n.velocity) / 127.0) * max(0.25, conf_factor)
             pc = n.pitch_midi % 12
             pc_weights[pc] = pc_weights.get(pc, 0.0) + w
-            if n.pitch_midi < lowest_midi:
+            if lowest_midi is None or n.pitch_midi < lowest_midi:
                 lowest_midi = n.pitch_midi
+        return pc_weights, lowest_midi
 
-        if not pc_weights:
-            continue
-        max_w = max(pc_weights.values())
-        # Filter passing tones / weak transients (< 25% of strongest pitch-class weight, keep top 4)
-        ranked_pcs = sorted(
-            ((pc, w) for pc, w in pc_weights.items() if w >= 0.25 * max_w),
-            key=lambda item: -item[1],
-        )
-        filtered_pcs = [pc for pc, _ in ranked_pcs[:4]]
-        if len(filtered_pcs) < 2:
-            continue
+    # Analyze beat-by-beat, falling back to 2-beat harmonic window for arpeggiated passages
+    raw_snapshots: list[tuple[int, str, str, str, float]] = []
+    for b_idx in range(total_beats):
+        pc_w, low_midi = _collect_weights(float(b_idx), float(b_idx + 1))
+        match = _analyze_window_chord(pc_w, low_midi, key_obj, cfg)
+        if match is None and b_idx % 2 == 0:
+            pc_w2, low_midi2 = _collect_weights(float(b_idx), float(min(total_beats, b_idx + 2)))
+            match = _analyze_window_chord(pc_w2, low_midi2, key_obj, cfg)
+        if match is not None:
+            raw_snapshots.append((b_idx, *match))
 
-        # Represent window pitches in music21 stream for Stream.chordify()
-        window_weights[w_idx] = (pc_weights, lowest_midi)
-        slice_pitches: list[int] = []
-        bass_pc = lowest_midi % 12
-        if bass_pc in filtered_pcs:
-            slice_pitches.append(lowest_midi)
-        for pc in sorted(filtered_pcs):
-            if pc == bass_pc and slice_pitches:
+    if not raw_snapshots:
+        return []
+
+    # Filter isolated 1-beat passing blips sandwiched between identical chords (A -> B -> A)
+    filtered: list[tuple[int, str, str, str, float]] = []
+    for idx, snap in enumerate(raw_snapshots):
+        b_idx, sym, root_n, qual, conf = snap
+        prev_sym = raw_snapshots[idx - 1][1] if idx > 0 else None
+        next_sym = raw_snapshots[idx + 1][1] if idx + 1 < len(raw_snapshots) else None
+        if prev_sym and next_sym and prev_sym == next_sym and sym != prev_sym:
+            if conf < cfg.strong_short_change_confidence:
                 continue
-            slice_pitches.append(60 + pc)
-        m21_chord = music21.chord.Chord(slice_pitches, quarterLength=window_beats)
-        harmonic_part.insert(w_idx * window_beats, m21_chord)
+        filtered.append(snap)
 
-    chordified = harmonic_part.chordify()
+    # Deduplicate consecutive identical chord symbols (including across barlines)
     chords: list[ScoreChord] = []
     last_symbol: str | None = None
-
-    for el in chordified.recurse().getElementsByClass(music21.chord.Chord):
-        w_idx = int(round(float(el.offset) / window_beats))
-        if w_idx not in window_weights:
-            continue
-        pc_weights, _ = window_weights[w_idx]
-        total_w = sum(pc_weights.values())
-
-        # Spell pitches according to the detected key signature
-        spelled: list[music21.pitch.Pitch] = []
-        for p in el.pitches:
-            sp = key_obj.pitchFromDegree((p.pitchClass - key_obj.tonic.pitchClass) % 12 + 1) if False else p
-            if key_obj.sharps < 0 and sp.accidental is not None and sp.accidental.alter > 0:
-                sp = sp.getEnharmonic()
-            elif key_obj.sharps > 0 and sp.accidental is not None and sp.accidental.alter < 0:
-                sp = sp.getEnharmonic()
-            spelled.append(sp)
-
-        clean_chord = music21.chord.Chord(spelled)
-        cs = _safe_chord_symbol(clean_chord)
-        figure = (cs.figure or "").strip() if cs is not None else ""
-        if (cs is None or "add" in figure) and len(spelled) > 3:
-            # Retry with the top-3 weighted pitch classes to avoid passing-tone clutter
-            top3_pcs = [pc for pc, _ in sorted(pc_weights.items(), key=lambda x: -x[1])[:3]]
-            core_pitches = [p for p in spelled if p.pitchClass in top3_pcs][:3]
-            if len(core_pitches) >= 3:
-                core_chord = music21.chord.Chord(core_pitches)
-                core_cs = _safe_chord_symbol(core_chord)
-                if core_cs is not None:
-                    clean_chord = core_chord
-                    cs = core_cs
-                    figure = core_cs.figure.strip()
-        if cs is None or not figure:
-            continue
-
-        # Normalize music21 '-' flat notation to standard 'b' for UI/MusicXML
-        symbol = figure.replace("-", "b")
-        root_name = cs.root().name.replace("-", "b")
-        quality = cs.chordKind or "major"
-
-        chord_pcs = {p.pitchClass for p in clean_chord.pitches}
-        matched_w = sum(pc_weights.get(pc, 0.0) for pc in chord_pcs)
-        coverage = matched_w / max(1e-6, total_w)
-
-        diatonic_bonus = 0.0
-        try:
-            rn = music21.roman.romanNumeralFromChord(clean_chord, key_obj)
-            if not rn.containsAccidentals():
-                diatonic_bonus = 0.08
-        except Exception:
-            pass
-
-        conf = min(1.0, max(0.0, coverage * 0.85 + diatonic_bonus))
-        if conf < 0.52 or symbol == last_symbol:
+    for b_idx, symbol, root_name, quality, conf in filtered:
+        if symbol == last_symbol:
             continue
         last_symbol = symbol
-
-        w_start_beats = w_idx * window_beats
-        measure = int(w_start_beats // num) + 1
-        beat = round((w_start_beats % num) + 1.0, 2)
+        measure = (b_idx // num) + 1
+        beat = float((b_idx % num) + 1)
         chords.append(
             ScoreChord(
                 id=uuid.uuid4().hex[:10],
                 measure=max(1, measure),
                 beat=max(1.0, beat),
-                onset_sec=round(w_idx * window_sec, 3),
+                onset_sec=round(_to_sec(float(b_idx)), 3),
                 symbol=symbol,
                 root=root_name,
                 quality=quality,

@@ -247,7 +247,7 @@ def test_transkun_refiner_compatibility_and_midi_musicxml_parity() -> None:
                 continue
             if isinstance(el, music21.note.Note):
                 xml_pitches.append(el.pitch.midi)
-            elif isinstance(el, music21.chord.Chord):
+            elif isinstance(el, music21.chord.Chord) and not isinstance(el, music21.harmony.ChordSymbol):
                 xml_pitches.extend(p.midi for p in el.pitches)
     xml_pitches.sort()
     assert midi_pitches == xml_pitches

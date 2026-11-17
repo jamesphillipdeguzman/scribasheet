@@ -96,7 +96,13 @@ def build_score_data(
         )
 
     score_notes.sort(key=lambda x: (x.onset_sec, x.pitch_midi))
-    chords = detect_chords(score_notes, effective_bpm, time_signature, key_signature=key_signature)
+    chords = detect_chords(
+        score_notes,
+        effective_bpm,
+        time_signature,
+        key_signature=key_signature,
+        timing_map=timing_map,
+    )
 
     track = ScoreTrack(
         index=0,
@@ -341,6 +347,37 @@ def _build_m21_element(
     return elem
 
 
+def _attach_chord_symbols(part: music21.stream.Part, chords: list) -> None:
+    """Attach semantic music21 ChordSymbol annotations above the staff at measure/beat offsets."""
+    if not chords:
+        return
+    measures = {m.number: m for m in part.getElementsByClass(music21.stream.Measure)}
+    seen_positions: set[tuple[int, float]] = set()
+    for ch in chords:
+        m = measures.get(ch.measure)
+        if m is None:
+            continue
+        beat_offset = round(max(0.0, float(ch.beat) - 1.0), 2)
+        pos_key = (ch.measure, beat_offset)
+        if pos_key in seen_positions:
+            continue
+        seen_positions.add(pos_key)
+        try:
+            symbol_m21 = ch.symbol
+            if len(symbol_m21) > 1 and symbol_m21[1] == "b":
+                symbol_m21 = symbol_m21[0] + "-" + symbol_m21[2:]
+            if "/" in symbol_m21:
+                head, bass = symbol_m21.split("/", 1)
+                if len(bass) > 1 and bass[1] == "b":
+                    bass = bass[0] + "-" + bass[2:]
+                symbol_m21 = f"{head}/{bass}"
+            cs = music21.harmony.ChordSymbol(symbol_m21)
+            cs.placement = "above"
+            m.insert(beat_offset, cs)
+        except Exception:
+            continue
+
+
 def _apply_key_signature_and_accidentals(part: music21.stream.Part, key_str: str) -> None:
     """Suppress redundant diatonic naturals while preserving genuine in-measure cancellations."""
     key_obj = _parse_key_to_music21(key_str)
@@ -491,6 +528,7 @@ def score_data_to_musicxml(score: ScoreData) -> str:
                 min_measures=min_measures,
                 grid_ql=grid_ql,
             )
+            _attach_chord_symbols(p_treble, score.chords)
             m21_score.insert(0, p_treble)
 
             p_bass = music21.stream.Part()
@@ -523,6 +561,7 @@ def score_data_to_musicxml(score: ScoreData) -> str:
                 min_measures=min_measures,
                 grid_ql=grid_ql,
             )
+            _attach_chord_symbols(p, score.chords)
             m21_score.insert(0, p)
 
     exporter = music21.musicxml.m21ToXml.GeneralObjectExporter(m21_score)

@@ -221,7 +221,7 @@ def test_jitter_syncopation_measure_crossing_and_midi_musicxml_parity() -> None:
                 continue
             if isinstance(el, music21.note.Note):
                 xml_p.append(el.pitch.midi)
-            elif isinstance(el, music21.chord.Chord):
+            elif isinstance(el, music21.chord.Chord) and not isinstance(el, music21.harmony.ChordSymbol):
                 xml_p.extend(p.midi for p in el.pitches)
     assert midi_p == sorted(xml_p)
     ET.fromstring(xml_str)
