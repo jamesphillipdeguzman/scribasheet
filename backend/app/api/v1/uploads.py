@@ -17,6 +17,7 @@ from app.core.config import get_settings
 from app.core.security import verify_signed_download_token
 from app.db.session import get_db
 from app.models import MediaAsset, Project, User
+from app.notation.omr import OMRError, validate_pdf_bytes
 from app.schemas.project import MediaAssetResponse
 from app.storage.service import sanitize_filename, storage_service
 
@@ -87,10 +88,18 @@ def presign_upload(
         )
 
     safe_name = sanitize_filename(payload.filename)
-    try:
-        validate_upload_extension_and_mime(safe_name, payload.content_type)
-    except MediaValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    is_pdf = safe_name.lower().endswith(".pdf")
+    if is_pdf:
+        if payload.content_type and "pdf" not in payload.content_type.lower():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported MIME type '{payload.content_type}' for PDF upload.",
+            )
+    else:
+        try:
+            validate_upload_extension_and_mime(safe_name, payload.content_type)
+        except MediaValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
 
     if storage_service.backend != "s3":
         raise HTTPException(
@@ -181,10 +190,18 @@ async def upload_media(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this project.")
 
     safe_name = sanitize_filename(file.filename or "recording.wav")
-    try:
-        validate_upload_extension_and_mime(safe_name, file.content_type)
-    except MediaValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    is_pdf = safe_name.lower().endswith(".pdf")
+    if is_pdf:
+        if file.content_type and "pdf" not in file.content_type.lower():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported MIME type '{file.content_type}' for PDF upload.",
+            )
+    else:
+        try:
+            validate_upload_extension_and_mime(safe_name, file.content_type)
+        except MediaValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
 
     # Stream to temp file with strict size limit enforcement
     total_bytes = 0
@@ -209,22 +226,32 @@ async def upload_media(
 
     try:
         _enforce_storage_quota(db, current_user, total_bytes)
-        meta = probe_media(tmp_path)
-        if meta.duration_seconds > settings.MAX_AUDIO_DURATION_SECONDS:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Audio duration ({meta.duration_seconds:.1f}s) exceeds maximum allowed ({settings.MAX_AUDIO_DURATION_SECONDS}s).",
-            )
+        if is_pdf:
+            validate_pdf_bytes(tmp_path.read_bytes())
+            duration_sec = None
+            sample_rate = None
+            channels = None
+        else:
+            meta = probe_media(tmp_path)
+            if meta.duration_seconds > settings.MAX_AUDIO_DURATION_SECONDS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Audio duration ({meta.duration_seconds:.1f}s) exceeds maximum allowed ({settings.MAX_AUDIO_DURATION_SECONDS}s).",
+                )
+            duration_sec = meta.duration_seconds
+            sample_rate = meta.sample_rate
+            channels = meta.channels
 
         storage_key = storage_service.build_key(current_user.id, project.id, "originals", safe_name)
         with tmp_path.open("rb") as f:
             storage_service.save_stream(
                 storage_key,
                 f,
-                content_type=file.content_type or "application/octet-stream",
+                content_type=file.content_type or ("application/pdf" if is_pdf else "application/octet-stream"),
             )
-    except MediaValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except (MediaValidationError, OMRError) as exc:
+        detail_msg = exc.message if hasattr(exc, "message") else str(exc)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail_msg)
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -234,13 +261,14 @@ async def upload_media(
         asset_type="original",
         storage_path=storage_key,
         original_filename=safe_name,
-        mime_type=file.content_type or "application/octet-stream",
+        mime_type=file.content_type or ("application/pdf" if is_pdf else "application/octet-stream"),
         size_bytes=total_bytes,
-        duration_seconds=meta.duration_seconds,
-        sample_rate=meta.sample_rate,
-        channels=meta.channels,
+        duration_seconds=duration_sec,
+        sample_rate=sample_rate,
+        channels=channels,
     )
-    project.duration_seconds = meta.duration_seconds
+    if duration_sec is not None:
+        project.duration_seconds = duration_sec
     db.add(asset)
     db.commit()
     db.refresh(asset)

@@ -50,3 +50,8 @@ playwright/.cache/
 Thumbs.db
 .vscode/
 .idea/
+
+.venv*/
+*.venv*/
+benchmarks_artifacts/
+

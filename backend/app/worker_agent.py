@@ -44,6 +44,7 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
+from app.notation.omr import OMRError, process_satb_pdf
 from app.notation.timing_map import build_timing_map
 from app.schemas.transcription import TranscriptionSettings
 from app.storage.service import sanitize_filename
@@ -281,7 +282,77 @@ class RealTranscriptionHandler:
                             f.write(chunk)
 
             if not local_source.exists() or local_source.stat().st_size == 0:
-                raise TranscriptionInferenceError("EMPTY_AUDIO_FILE", "Downloaded audio file is empty.")
+                raise TranscriptionInferenceError("EMPTY_AUDIO_FILE", "Downloaded source file is empty.")
+
+            # Reverse Transcription: SATB Sheet Music PDF -> OMR -> MusicXML + MIDI
+            if settings.mode == "satb_pdf" or safe_name.lower().endswith(".pdf"):
+                self._check_cancelled(job_id, cancel_event)
+                report_progress("transcribing", 25, "Validating PDF Score", "Inspecting sheet music PDF pages.")
+                try:
+                    omr_res = process_satb_pdf(
+                        local_source,
+                        title=clean_score_title(job.get("project_title") or safe_name),
+                        work_dir=tmp_path / "omr",
+                    )
+                except OMRError as exc:
+                    raise TranscriptionInferenceError(exc.code, exc.message) from exc
+
+                self._check_cancelled(job_id, cancel_event)
+                report_progress("generating_notation", 75, "Building SATB Score", "Extracting SATB voices and MIDI.")
+                score_data = omr_res.score_data
+                musicxml_str = omr_res.musicxml
+                midi_bytes = score_data_to_midi_bytes(score_data)
+                pdf_b64: str | None = None
+                try:
+                    musescore_pdf = _render_pdf_from_musicxml_via_musescore(musicxml_str)
+                    if musescore_pdf is not None:
+                        pdf_b64 = base64.b64encode(musescore_pdf).decode("ascii")
+                except Exception as pdf_exc:
+                    logger.warning("MuseScore PDF export skipped for SATB job %s: %s", job_id, pdf_exc)
+
+                artifact_urls = job.get("artifact_upload_urls") or {}
+                midi_key: str | None = None
+                xml_key: str | None = None
+                midi_b64: str | None = None
+                xml_inline: str | None = None
+                if "midi" in artifact_urls and "musicxml" in artifact_urls:
+                    m_target = artifact_urls["midi"]
+                    x_target = artifact_urls["musicxml"]
+                    self._client.put(m_target["url"], content=midi_bytes, headers={"Content-Type": "audio/midi"}).raise_for_status()
+                    self._client.put(
+                        x_target["url"],
+                        content=musicxml_str.encode("utf-8"),
+                        headers={"Content-Type": "application/vnd.recordare.musicxml+xml"},
+                    ).raise_for_status()
+                    midi_key = m_target["key"]
+                    xml_key = x_target["key"]
+                else:
+                    midi_b64 = base64.b64encode(midi_bytes).decode("ascii")
+                    xml_inline = musicxml_str
+
+                return JobCompletionResult(
+                    is_simulated=False,
+                    midi_key=midi_key,
+                    musicxml_key=xml_key,
+                    midi_base64=midi_b64,
+                    musicxml_content=xml_inline,
+                    pdf_base64=pdf_b64,
+                    score_json=score_data.model_dump(),
+                    duration_seconds=score_data.duration_seconds,
+                    metadata_json={
+                        "handler": "real_omr_homr",
+                        "engine": "homr",
+                        "requested_engine": "homr",
+                        "actual_engine": "homr",
+                        "page_count": omr_res.page_count,
+                        "needs_review": omr_res.needs_review,
+                        "warnings": omr_res.warnings,
+                        "note_count": len(score_data.notes),
+                        "tempo_bpm": score_data.tempo_bpm,
+                        "key_signature": score_data.key_signature,
+                        "time_signature": score_data.time_signature,
+                    },
+                )
 
             # 2. Validate audio (15%)
             self._check_cancelled(job_id, cancel_event)

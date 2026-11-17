@@ -324,6 +324,47 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  updateSatbAssignments: (
+    projectId: string,
+    data: { assignments: Record<number, string>; instruments?: Record<number, number> },
+  ) =>
+    request<ProjectScoreResponse>(`/projects/${projectId}/score/satb-assignments`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  exportSatbAudio: async (
+    projectId: string,
+    payload: {
+      part: "soprano" | "alto" | "tenor" | "bass" | "combined";
+      format: "mp3" | "wav";
+      volumes?: Record<string, number>;
+      instruments?: Record<string, number>;
+      tempo_bpm?: number;
+      start_measure?: number;
+      end_measure?: number;
+    },
+    filename: string,
+  ) => {
+    const { accessToken } = getStoredTokens();
+    const res = await fetch(`${API_BASE_URL}/projects/${projectId}/exports/satb`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new ApiError(res.status, "Failed to export SATB audio.");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
 
   // Exports
   listExports: (projectId: string) => request<ExportRecord[]>(`/projects/${projectId}/exports`),

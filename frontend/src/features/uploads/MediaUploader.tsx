@@ -15,6 +15,7 @@ interface MediaUploaderProps {
   onMediaRemoved?: (assetId: string) => void;
   hasScore?: boolean;
   isProcessing?: boolean;
+  acceptPdf?: boolean;
 }
 
 export function MediaUploader({
@@ -24,6 +25,7 @@ export function MediaUploader({
   onMediaRemoved,
   hasScore = false,
   isProcessing = false,
+  acceptPdf = false,
 }: MediaUploaderProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -77,8 +79,13 @@ export function MediaUploader({
   const validateAndUpload = async (file: File) => {
     setError(null);
     const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
-    if (!ACCEPTED_EXTENSIONS.includes(ext)) {
-      setError(`Unsupported file type (${ext}). Supported: MP3, WAV, FLAC, M4A, AAC, MP4, MOV, WEBM.`);
+    const allowed = acceptPdf ? [".pdf"] : ACCEPTED_EXTENSIONS;
+    if (!allowed.includes(ext)) {
+      setError(
+        acceptPdf
+          ? `Unsupported file type (${ext}). Please upload a valid .pdf sheet music file.`
+          : `Unsupported file type (${ext}). Supported: MP3, WAV, FLAC, M4A, AAC, MP4, MOV, WEBM.`,
+      );
       return;
     }
     if (file.size > MAX_SIZE_BYTES) {
@@ -176,7 +183,7 @@ export function MediaUploader({
         <input
           ref={fileInputRef}
           type="file"
-          accept={ACCEPTED_EXTENSIONS.join(",")}
+          accept={acceptPdf ? ".pdf,application/pdf" : ACCEPTED_EXTENSIONS.join(",")}
           className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
@@ -186,10 +193,10 @@ export function MediaUploader({
         />
         <Upload className="mx-auto h-8 w-8 text-[#A78BFA]" />
         <h3 className="mt-3 text-sm font-semibold text-[#F5F3FF]">
-          Drag &amp; drop audio or video, or browse
+          {acceptPdf ? "Drag & drop SATB sheet music PDF, or browse" : "Drag & drop audio or video, or browse"}
         </h3>
         <p className="mt-1 text-xs text-[#A1A1AA]">
-          MP3, WAV, FLAC, M4A, AAC, MP4, MOV, WEBM • Up to 100 MB
+          {acceptPdf ? "PDF Sheet Music • Up to 100 MB" : "MP3, WAV, FLAC, M4A, AAC, MP4, MOV, WEBM • Up to 100 MB"}
         </p>
         <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
           <Button size="sm" variant="secondary" onClick={() => fileInputRef.current?.click()}>

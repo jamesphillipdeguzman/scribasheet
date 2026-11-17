@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_owned_project
@@ -23,6 +25,7 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
+from app.notation.satb_audio import render_satb_audio_tracks
 from app.schemas.export import ExportCreateRequest, ExportResponse
 from app.schemas.score import ScoreData
 from app.storage.service import sanitize_filename, storage_service
@@ -233,4 +236,56 @@ def download_export(
         content=data,
         media_type=mime_type,
         headers={"Content-Disposition": f'attachment; filename="{base_name}.{ext}"'},
+    )
+
+
+class SATBExportRequest(BaseModel):
+    part: Literal["soprano", "alto", "tenor", "bass", "combined"] = "combined"
+    format: Literal["mp3", "wav"] = "mp3"
+    volumes: dict[str, float] | None = None
+    instruments: dict[str, int] | None = None
+    tempo_bpm: float | None = None
+    start_measure: int | None = None
+    end_measure: int | None = None
+
+
+@router.post("/projects/{project_id}/exports/satb")
+def export_satb_audio(
+    payload: SATBExportRequest,
+    project: Project = Depends(get_owned_project),
+    db: Session = Depends(get_db),
+):
+    """Render and download individual or combined SATB MP3/WAV practice tracks."""
+    score_row = db.query(ProjectScore).filter(ProjectScore.project_id == project.id).first()
+    if not score_row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot export SATB audio before a score exists.",
+        )
+
+    score = ScoreData(**score_row.score_json)
+    score.title = project.title
+    rendered = render_satb_audio_tracks(
+        score,
+        part_volumes=payload.volumes,
+        part_instruments=payload.instruments,
+        tempo_bpm=payload.tempo_bpm,
+        start_measure=payload.start_measure,
+        end_measure=payload.end_measure,
+        output_format=payload.format,
+    )
+    if payload.part not in rendered:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Requested SATB part '{payload.part}' is not present in this score.",
+        )
+
+    safe_title = sanitize_filename(project.title).rsplit(".", 1)[0].replace(" ", "_") or "Song_Title"
+    part_label = "SATB_Combined" if payload.part == "combined" else payload.part.capitalize()
+    filename = f"{safe_title}_{part_label}.{payload.format}"
+    mime_type = "audio/mpeg" if payload.format == "mp3" else "audio/wav"
+    return Response(
+        content=rendered[payload.part],
+        media_type=mime_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

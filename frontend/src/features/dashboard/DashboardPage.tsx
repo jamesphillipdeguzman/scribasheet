@@ -99,10 +99,31 @@ export function DashboardPage() {
             </p>
             <WorkerStatusBadge />
           </div>
-          <Button onClick={() => setShowCreateModal(true)} className="w-full sm:w-auto min-h-[44px] shrink-0">
-            <Plus className="h-4 w-4" />
-            New Transcription
-          </Button>
+          <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto shrink-0">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setNewMode("satb_pdf");
+                setNewInstrument("piano");
+                setShowCreateModal(true);
+              }}
+              title="Upload a PDF score and turn it into playable SATB practice tracks."
+              className="w-full sm:w-auto min-h-[44px]"
+            >
+              <Music2 className="h-4 w-4" />
+              Sheet Music to Audio
+            </Button>
+            <Button
+              onClick={() => {
+                setNewMode("single_instrument");
+                setShowCreateModal(true);
+              }}
+              className="w-full sm:w-auto min-h-[44px]"
+            >
+              <Plus className="h-4 w-4" />
+              New Transcription
+            </Button>
+          </div>
         </div>
 
         <WorkerControlPanel />

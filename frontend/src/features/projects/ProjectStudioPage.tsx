@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/Button";
 import { ChordAndTabPanel } from "@/features/editor/ChordAndTabPanel";
 import { ExportCenter } from "@/features/editor/ExportCenter";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
+import { SATBMixerPanel } from "@/features/editor/SATBMixerPanel";
 import { SheetMusicViewer } from "@/features/editor/SheetMusicViewer";
 import { WaveformPlayer } from "@/features/editor/WaveformPlayer";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
@@ -530,6 +531,7 @@ export function ProjectStudioPage() {
                   projectId={project.id}
                   existingAssets={project.media_assets}
                   hasScore={Boolean(scoreData)}
+                  acceptPdf={project.transcription_mode === "satb_pdf"}
                   isProcessing={
                     isStartingJob ||
                     Boolean(activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status))
@@ -637,6 +639,22 @@ export function ProjectStudioPage() {
                   );
                 })}
               </div>
+
+              {scoreData &&
+                (project.transcription_mode === "satb_pdf" ||
+                  scoreData.analysis?.mode === "satb_pdf" ||
+                  scoreData.tracks.length > 1) && (
+                  <SATBMixerPanel
+                    projectId={project.id}
+                    projectTitle={project.title}
+                    scoreData={scoreData}
+                    onScoreUpdated={(updatedScore, updatedVersion, updatedXml) => {
+                      setScoreData(updatedScore);
+                      setScoreVersion(updatedVersion);
+                      if (updatedXml !== null) setMusicxml(updatedXml);
+                    }}
+                  />
+                )}
 
               {activeTab === "notation" &&
                 (activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status) ? (

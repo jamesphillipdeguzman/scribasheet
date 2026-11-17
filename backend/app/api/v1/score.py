@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_owned_project
@@ -209,6 +210,72 @@ def regenerate_project_arrangement(
     score_row.version = int(score_row.version or 1) + 1
     score_row.score_json = new_score.model_dump()
     score_row.musicxml_path = xml_key
+    score_row.midi_path = midi_key
+    db.commit()
+    db.refresh(score_row)
+
+    return ProjectScoreResponse(
+        id=score_row.id,
+        project_id=score_row.project_id,
+        version=score_row.version,
+        score_json=score_row.score_json,
+        musicxml=musicxml_str,
+        updated_at=score_row.updated_at,
+    )
+
+
+class SATBAssignmentsUpdateRequest(BaseModel):
+    assignments: dict[int, str]
+    instruments: dict[int, int] | None = None
+
+
+@router.put("/projects/{project_id}/score/satb-assignments", response_model=ProjectScoreResponse)
+def update_satb_assignments(
+    payload: SATBAssignmentsUpdateRequest,
+    project: Project = Depends(get_owned_project),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update SATB voice assignments and part instruments without rerunning OMR."""
+    score_row = db.query(ProjectScore).filter(ProjectScore.project_id == project.id).first()
+    if not score_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project score not found.")
+
+    score = ScoreData(**score_row.score_json)
+    valid_voices = {"Soprano", "Alto", "Tenor", "Bass"}
+    for t in score.tracks:
+        assigned = payload.assignments.get(t.index)
+        if assigned in valid_voices:
+            t.name = assigned
+            t.clef = "bass" if assigned == "Bass" else "treble"
+        if payload.instruments and t.index in payload.instruments:
+            prog = max(0, min(127, int(payload.instruments[t.index])))
+            t.program = prog
+            t.instrument = "choir_aahs" if prog == 52 else "piano"
+
+    analysis = dict(score.analysis or {})
+    satb_meta = dict(analysis.get("satb") or {})
+    satb_meta["needs_review"] = False
+    if isinstance(satb_meta.get("assignments"), list):
+        for entry in satb_meta["assignments"]:
+            p_idx = entry.get("part_index")
+            if p_idx in payload.assignments and payload.assignments[p_idx] in valid_voices:
+                entry["assigned_voice"] = payload.assignments[p_idx]
+                entry["uncertain"] = False
+                entry["confidence"] = 1.0
+    analysis["satb"] = satb_meta
+    score.analysis = analysis
+
+    midi_bytes = score_data_to_midi_bytes(score)
+    midi_key = storage_service.build_key(current_user.id, project.id, "midi", "score.mid")
+    storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
+
+    musicxml_str = None
+    if score_row.musicxml_path and storage_service.exists(score_row.musicxml_path):
+        musicxml_str = storage_service.read_bytes(score_row.musicxml_path).decode("utf-8")
+
+    score_row.version = int(score_row.version or 1) + 1
+    score_row.score_json = score.model_dump()
     score_row.midi_path = midi_key
     db.commit()
     db.refresh(score_row)
