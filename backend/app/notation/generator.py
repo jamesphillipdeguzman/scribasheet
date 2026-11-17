@@ -494,6 +494,57 @@ def _populate_part_from_notes(
     _apply_key_signature_and_accidentals(part, key_str)
 
 
+def _attach_ottava_spanners(
+    part: music21.stream.Part,
+    *,
+    min_high_midi: int = 84,
+    min_low_midi: int = 72,
+    min_notes: int = 3,
+    min_total_ql: float = 1.0,
+) -> int:
+    """Attach non-overlapping 8va Ottava spanners to sustained high-register treble passages.
+
+    Uses ``transposing=False`` so MusicXML emits semantic ``<octave-shift>``
+    elements without altering sounding MIDI pitches.
+    """
+    elements = [
+        el
+        for el in part.recurse().notes
+        if not isinstance(el, music21.harmony.ChordSymbol)
+    ]
+    if len(elements) < min_notes:
+        return 0
+
+    runs: list[list[music21.note.NotRest]] = []
+    current_run: list[music21.note.NotRest] = []
+
+    for el in elements:
+        pitches = [int(p.midi) for p in el.pitches] if isinstance(el, music21.chord.Chord) else [int(el.pitch.midi)]
+        if not pitches:
+            continue
+        if max(pitches) >= min_high_midi and min(pitches) >= min_low_midi:
+            current_run.append(el)
+        else:
+            if len(current_run) >= min_notes and sum(float(n.quarterLength) for n in current_run) >= min_total_ql:
+                runs.append(current_run)
+            current_run = []
+
+    if len(current_run) >= min_notes and sum(float(n.quarterLength) for n in current_run) >= min_total_ql:
+        runs.append(current_run)
+
+    spanned_ids: set[int] = set()
+    attached = 0
+    for run in runs:
+        if any(id(el) in spanned_ids for el in run):
+            continue
+        ott = music21.spanner.Ottava(run, type="8va", transposing=False)
+        part.insert(0, ott)
+        for el in run:
+            spanned_ids.add(id(el))
+        attached += 1
+    return attached
+
+
 def score_data_to_musicxml(score: ScoreData) -> str:
     m21_score = music21.stream.Score()
     m21_score.metadata = music21.metadata.Metadata()
@@ -528,6 +579,7 @@ def score_data_to_musicxml(score: ScoreData) -> str:
                 min_measures=min_measures,
                 grid_ql=grid_ql,
             )
+            _attach_ottava_spanners(p_treble)
             _attach_chord_symbols(p_treble, score.chords)
             m21_score.insert(0, p_treble)
 
@@ -561,6 +613,8 @@ def score_data_to_musicxml(score: ScoreData) -> str:
                 min_measures=min_measures,
                 grid_ql=grid_ql,
             )
+            if track.clef == "treble":
+                _attach_ottava_spanners(p)
             _attach_chord_symbols(p, score.chords)
             m21_score.insert(0, p)
 

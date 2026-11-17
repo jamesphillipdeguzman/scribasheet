@@ -31,9 +31,14 @@ class NoteRefinerConfig:
     reattack_genuine_conf_boost: float = 1.15
     reattack_genuine_vel_boost: int = 12
     enable_octave_ghost_suppression: bool = True
+    enable_fifth_harmonic_suppression: bool = True
     octave_onset_window_sec: float = 0.035
-    octave_confidence_ratio: float = 0.72
-    octave_strong_fundamental_min_conf: float = 0.48
+    octave_confidence_ratio: float = 0.58
+    fifth_confidence_ratio: float = 0.52
+    octave_strong_fundamental_min_conf: float = 0.55
+    harmonic_max_candidate_confidence: float = 0.52
+    harmonic_velocity_ratio: float = 0.85
+    harmonic_max_duration_ratio: float = 0.85
     octave_melodic_window_sec: float = 0.35
     max_note_duration_sec: float = 6.0
     enable_velocity_rescaling: bool = True
@@ -226,10 +231,15 @@ def refine_detected_notes(
 
     stage_b.sort(key=lambda x: (x.onset_sec, x.pitch_midi))
 
-    # Stage C: Harmonic / octave ghost suppression
+    # Stage C: Conservative harmonic overtone suppression (octaves 12/24 and fifths 19)
     dropped_indices: set[int] = set()
     octave_ghosts_suppressed = 0
-    if cfg.enable_octave_ghost_suppression and len(stage_b) > 1:
+    fifth_harmonics_suppressed = 0
+    allowed_intervals = {12, 24} if cfg.enable_octave_ghost_suppression else set()
+    if cfg.enable_fifth_harmonic_suppression:
+        allowed_intervals.add(19)
+
+    if allowed_intervals and len(stage_b) > 1:
         for i in range(len(stage_b)):
             if i in dropped_indices:
                 continue
@@ -241,7 +251,7 @@ def refine_detected_notes(
                 if b.onset_sec - a.onset_sec > cfg.octave_onset_window_sec:
                     break
                 semitone_diff = abs(b.pitch_midi - a.pitch_midi)
-                if semitone_diff not in (12, 24):
+                if semitone_diff not in allowed_intervals:
                     continue
                 overlap = min(a.offset_sec, b.offset_sec) - max(a.onset_sec, b.onset_sec)
                 if overlap <= 0.02:
@@ -250,47 +260,61 @@ def refine_detected_notes(
                 low_idx, high_idx = (i, j) if a.pitch_midi < b.pitch_midi else (j, i)
                 low = stage_b[low_idx]
                 high = stage_b[high_idx]
-                low_conf = _note_conf(low)
-                high_conf = _note_conf(high)
+                # Require explicit confidence scores on both notes for harmonic suppression;
+                # models without per-note confidence (e.g. Transkun) handle harmonics natively.
+                if low.confidence is None or high.confidence is None:
+                    continue
+                low_conf = float(low.confidence)
+                high_conf = float(high.confidence)
                 low_dur = max(0.01, low.offset_sec - low.onset_sec)
                 high_dur = max(0.01, high.offset_sec - high.onset_sec)
 
-                # Upper harmonic ghost check: fundamental is noticeably stronger than upper octave
+                # Multi-indicator conservative harmonic check:
+                # 1) Close onset (already within octave_onset_window_sec)
+                # 2) Substantially lower confidence & velocity
+                # 3) Duration/envelope contained within fundamental's decay
+                # 4) No independent melodic neighbor support
                 has_melodic_support = _has_melodic_neighbor(
                     high, low, stage_b, window_sec=cfg.octave_melodic_window_sec
                 )
-                ratio_limit = (
-                    cfg.octave_confidence_ratio * 0.83
-                    if has_melodic_support
-                    else cfg.octave_confidence_ratio
+                base_ratio = cfg.fifth_confidence_ratio if semitone_diff == 19 else cfg.octave_confidence_ratio
+                ratio_limit = base_ratio * 0.85 if has_melodic_support else base_ratio
+                envelope_contained = (
+                    high.offset_sec <= low.offset_sec + 0.06
+                    and high_dur <= low_dur * cfg.harmonic_max_duration_ratio
                 )
-                strong_ratio_drop = (
+                substantially_weaker = (
                     low_conf >= cfg.octave_strong_fundamental_min_conf
                     and high_conf <= low_conf * ratio_limit
+                    and high_conf <= cfg.harmonic_max_candidate_confidence
+                    and high.velocity <= int(low.velocity * cfg.harmonic_velocity_ratio)
                 )
-                weak_short_overtone = (
-                    not has_melodic_support
-                    and high_conf < 0.42
-                    and high_dur <= low_dur * 0.65
-                    and high.velocity <= low.velocity
-                )
-                if strong_ratio_drop or weak_short_overtone:
+
+                if substantially_weaker and envelope_contained and not has_melodic_support:
                     dropped_indices.add(high_idx)
-                    octave_ghosts_suppressed += 1
+                    if semitone_diff == 19:
+                        fifth_harmonics_suppressed += 1
+                        action = "drop_fifth_harmonic"
+                    else:
+                        octave_ghosts_suppressed += 1
+                        action = "drop_upper_harmonic"
                     decisions.append(
                         {
-                            "stage": "octave_ghost_suppression",
-                            "action": "drop_upper_harmonic",
+                            "stage": "harmonic_overtone_suppression",
+                            "action": action,
+                            "reason": f"semitone_diff={semitone_diff}, low_conf={low_conf:.3f}, high_conf={high_conf:.3f}, vel_ratio={high.velocity}/{low.velocity}, dur_ratio={high_dur:.3f}/{low_dur:.3f}",
                             "dropped_pitch_midi": high.pitch_midi,
                             "fundamental_pitch_midi": low.pitch_midi,
+                            "semitone_diff": semitone_diff,
                             "onset_sec": round(high.onset_sec, 4),
                             "high_conf": round(high_conf, 4),
                             "low_conf": round(low_conf, 4),
                         }
                     )
                     logger.debug(
-                        "Suppressed octave ghost MIDI %s (conf=%.3f) above fundamental %s (conf=%.3f) at %.3fs",
+                        "Suppressed harmonic artifact MIDI %s (+%d st, conf=%.3f) above fundamental %s (conf=%.3f) at %.3fs",
                         high.pitch_midi,
+                        semitone_diff,
                         high_conf,
                         low.pitch_midi,
                         low_conf,
@@ -298,16 +322,24 @@ def refine_detected_notes(
                     )
                     continue
 
-                # Sub-harmonic ghost check: very weak lower octave with short duration
-                if low_conf < 0.38 and high_conf > low_conf * 1.5 and low_dur < high_dur * 0.6:
+                # Sub-harmonic ghost check (octaves only): very weak lower octave with short duration
+                if (
+                    semitone_diff in (12, 24)
+                    and low_conf < 0.36
+                    and high_conf > low_conf * 1.65
+                    and low_dur < high_dur * 0.55
+                    and low.velocity <= int(high.velocity * cfg.harmonic_velocity_ratio)
+                ):
                     dropped_indices.add(low_idx)
                     octave_ghosts_suppressed += 1
                     decisions.append(
                         {
-                            "stage": "octave_ghost_suppression",
+                            "stage": "harmonic_overtone_suppression",
                             "action": "drop_subharmonic",
+                            "reason": f"semitone_diff=-{semitone_diff}, low_conf={low_conf:.3f}, high_conf={high_conf:.3f}",
                             "dropped_pitch_midi": low.pitch_midi,
                             "anchor_pitch_midi": high.pitch_midi,
+                            "semitone_diff": -semitone_diff,
                             "onset_sec": round(low.onset_sec, 4),
                             "low_conf": round(low_conf, 4),
                             "high_conf": round(high_conf, 4),
@@ -341,6 +373,7 @@ def refine_detected_notes(
         "reattack_retained": reattack_retained,
         "reattack_trimmed": reattack_trimmed,
         "octave_ghosts_suppressed": octave_ghosts_suppressed,
+        "fifth_harmonics_suppressed": fifth_harmonics_suppressed,
         "refined_count": len(refined),
     }
     return NoteRefinementResult(

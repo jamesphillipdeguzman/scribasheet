@@ -12,12 +12,52 @@ from app.transcription.basic_pitch_provider import (
     BasicPitchProvider,
     TranscriptionInferenceError,
 )
-from app.transcription.transkun_provider import TranskunProvider
+from app.transcription.transkun_provider import TranskunProvider, resolve_transkun_paths
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_ENGINES = ("basic_pitch", "transkun")
 DEFAULT_ENGINE = "basic_pitch"
+
+
+def is_transkun_available() -> bool:
+    """Return True when Transkun runtime dependencies and checkpoint files are available."""
+    try:
+        import moduleconf  # noqa: F401
+        import torch  # noqa: F401
+        import torchaudio  # noqa: F401
+
+        resolve_transkun_paths()
+        return True
+    except Exception:
+        return False
+
+
+def resolve_engine_for_instrument(
+    instrument: str = "piano",
+    *,
+    engine_override: str | None = None,
+) -> tuple[str, bool]:
+    """Resolve (requested_engine, allow_fallback) for a transcription job.
+
+    - Explicit ``engine_override`` or ``TRANSCRIPTION_ENGINE`` env var is always respected.
+    - When unset and the instrument is piano, prefer Transkun if available and allow
+      fallback to Basic Pitch.
+    - Other instruments preserve the existing default engine configuration.
+    """
+    if engine_override is not None and engine_override.strip():
+        return resolve_requested_engine(engine_override), is_fallback_allowed()
+
+    env_engine = os.environ.get("TRANSCRIPTION_ENGINE", "").strip()
+    if env_engine:
+        return resolve_requested_engine(env_engine), is_fallback_allowed()
+
+    if "piano" in (instrument or "").lower() and is_transkun_available():
+        env_fb = os.environ.get("TRANSCRIPTION_ALLOW_FALLBACK")
+        allow_fb = True if env_fb is None else is_fallback_allowed()
+        return "transkun", allow_fb
+
+    return DEFAULT_ENGINE, is_fallback_allowed()
 
 
 @dataclass

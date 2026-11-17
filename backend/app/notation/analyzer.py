@@ -255,11 +255,13 @@ class ChordDetectionConfig:
     """Configurable thresholds for confidence-aware harmonic analysis."""
 
     min_note_duration_sec: float = 0.08
-    min_pc_weight_ratio: float = 0.22
+    min_pc_weight_ratio: float = 0.24
     min_distinct_pcs: int = 3
     min_confidence: float = 0.58
-    strong_short_change_confidence: float = 0.72
-    min_bass_weight_ratio: float = 0.22
+    strong_short_change_confidence: float = 0.90
+    min_bass_weight_ratio: float = 0.24
+    min_extension_weight_ratio: float = 0.30
+    min_label_spacing_beats: float = 1.0
     allow_slash_chords: bool = True
 
 
@@ -316,9 +318,44 @@ def _format_readable_symbol(cs: music21.harmony.ChordSymbol) -> tuple[str, str, 
     return figure, root_name, quality
 
 
+def _build_chord_from_pcs(
+    pcs: list[int],
+    lowest_midi: int | None,
+    include_bass: bool,
+    key_obj: music21.key.Key,
+) -> music21.chord.Chord | None:
+    bass_pc = (lowest_midi % 12) if lowest_midi is not None else None
+    slice_pitches: list[music21.pitch.Pitch] = []
+    if include_bass and bass_pc is not None and bass_pc in pcs and lowest_midi is not None:
+        slice_pitches.append(_spell_pitch_for_key(music21.pitch.Pitch(lowest_midi), key_obj))
+    for pc in pcs:
+        if include_bass and pc == bass_pc:
+            continue
+        slice_pitches.append(_spell_pitch_for_key(music21.pitch.Pitch(60 + pc), key_obj))
+    if not slice_pitches:
+        return None
+    tmp_stream = music21.stream.Part()
+    tmp_stream.insert(0.0, music21.chord.Chord(slice_pitches, quarterLength=1.0))
+    chordified = tmp_stream.chordify()
+    return next(iter(chordified.recurse().getElementsByClass(music21.chord.Chord)), None)
+
+
+def _is_complex_extension(cs: music21.harmony.ChordSymbol) -> bool:
+    fig = cs.figure or ""
+    kind = cs.chordKind or ""
+    return any(tok in fig for tok in ("9", "11", "13")) or kind in (
+        "major-ninth",
+        "minor-ninth",
+        "dominant-ninth",
+        "eleventh",
+        "thirteenth",
+    )
+
+
 def _analyze_window_chord(
     pc_weights: dict[int, float],
     lowest_midi: int | None,
+    bass_is_sustained: bool,
     key_obj: music21.key.Key,
     cfg: ChordDetectionConfig,
 ) -> tuple[str, str, str, float] | None:
@@ -339,45 +376,51 @@ def _analyze_window_chord(
     bass_pc = (lowest_midi % 12) if lowest_midi is not None else None
     include_bass = (
         cfg.allow_slash_chords
+        and lowest_midi is not None
+        and (lowest_midi < 60 or bass_is_sustained)
         and bass_pc is not None
         and bass_pc in filtered_pcs
         and pc_weights.get(bass_pc, 0.0) >= cfg.min_bass_weight_ratio * total_w
     )
 
-    slice_pitches: list[music21.pitch.Pitch] = []
-    if include_bass and lowest_midi is not None:
-        slice_pitches.append(_spell_pitch_for_key(music21.pitch.Pitch(lowest_midi), key_obj))
-    for pc in filtered_pcs:
-        if include_bass and pc == bass_pc:
-            continue
-        slice_pitches.append(_spell_pitch_for_key(music21.pitch.Pitch(60 + pc), key_obj))
+    core_pcs = [pc for pc, _ in ranked_pcs[:3]]
+    core_chord = _build_chord_from_pcs(core_pcs, lowest_midi, include_bass, key_obj)
+    core_cs = _safe_chord_symbol(core_chord) if core_chord is not None else None
 
-    # Chordify via temporary music21 Stream to normalize simultaneous verticality
-    tmp_stream = music21.stream.Part()
-    tmp_stream.insert(0.0, music21.chord.Chord(slice_pitches, quarterLength=1.0))
-    chordified = tmp_stream.chordify()
-    ch_el = next(iter(chordified.recurse().getElementsByClass(music21.chord.Chord)), None)
-    if ch_el is None:
+    # Only attempt 4-note chord (7ths) when the 4th pitch class has meaningful weight
+    use_four = (
+        len(ranked_pcs) >= 4
+        and ranked_pcs[3][1] >= cfg.min_extension_weight_ratio * max_w
+    )
+    ext_chord = _build_chord_from_pcs(filtered_pcs, lowest_midi, include_bass, key_obj) if use_four else None
+    ext_cs = _safe_chord_symbol(ext_chord) if ext_chord is not None else None
+
+    # Prefer simpler 3-note label if 4-note label is an awkward 9th/11th/13th extension
+    if ext_cs is not None and not _is_complex_extension(ext_cs):
+        cs, used_chord = ext_cs, ext_chord
+    elif core_cs is not None:
+        cs, used_chord = core_cs, core_chord
+    elif ext_cs is not None and not _is_complex_extension(ext_cs):
+        cs, used_chord = ext_cs, ext_chord
+    else:
         return None
 
-    cs = _safe_chord_symbol(ch_el)
-    used_chord = ch_el
-    if cs is None and len(slice_pitches) > 3:
-        # Simplify to top-3 weighted pitch classes to avoid passing-note clutter
-        core_pcs = [pc for pc, _ in ranked_pcs[:3]]
-        core_pitches = []
-        if include_bass and bass_pc in core_pcs and lowest_midi is not None:
-            core_pitches.append(_spell_pitch_for_key(music21.pitch.Pitch(lowest_midi), key_obj))
-        for pc in core_pcs:
-            if include_bass and pc == bass_pc:
-                continue
-            core_pitches.append(_spell_pitch_for_key(music21.pitch.Pitch(60 + pc), key_obj))
-        core_chord = music21.chord.Chord(core_pitches)
-        cs = _safe_chord_symbol(core_chord)
-        used_chord = core_chord
-
-    if cs is None:
-        return None
+    # Avoid spurious slash chords when the bass note is not even a triad/7th tone (e.g. E/F#, E/A)
+    if "/" in (cs.figure or "") and bass_pc is not None:
+        chord_pcs_no_bass = {p.pitchClass for p in cs.pitches if p.pitchClass != cs.bass().pitchClass}
+        if cs.bass().pitchClass == cs.root().pitchClass or len(chord_pcs_no_bass) < 2:
+            pass
+        else:
+            # Verify bass interval from root is a standard inversion (3rd=3/4, 5th=7, 7th=10/11)
+            root_pc = cs.root().pitchClass
+            bass_interval = (cs.bass().pitchClass - root_pc) % 12
+            if bass_interval not in (3, 4, 7, 10, 11):
+                root_pos_chord = _build_chord_from_pcs(
+                    [p.pitchClass for p in used_chord.pitches], None, False, key_obj
+                )
+                root_pos_cs = _safe_chord_symbol(root_pos_chord) if root_pos_chord is not None else None
+                if root_pos_cs is not None:
+                    cs, used_chord = root_pos_cs, root_pos_chord
 
     symbol, root_name, quality = _format_readable_symbol(cs)
     chord_pcs = {p.pitchClass for p in used_chord.pitches}
@@ -440,35 +483,39 @@ def detect_chords(
     max_ql = max(off_ql for _, _, off_ql, _ in note_qls)
     total_beats = max(1, int(np.ceil(max_ql)))
 
-    def _collect_weights(w_start_ql: float, w_end_ql: float) -> tuple[dict[int, float], int | None]:
+    def _collect_weights(w_start_ql: float, w_end_ql: float) -> tuple[dict[int, float], int | None, bool]:
         active = [
             (n, min(off_ql, w_end_ql) - max(on_ql, w_start_ql), is_sub)
             for n, on_ql, off_ql, is_sub in note_qls
             if min(off_ql, w_end_ql) - max(on_ql, w_start_ql) > 0.05
         ]
         if not active:
-            return {}, None
+            return {}, None, False
         substantive = [(n, ov) for n, ov, is_sub in active if is_sub]
         chosen = substantive if substantive else [(n, ov) for n, ov, _ in active]
         pc_weights: dict[int, float] = {}
         lowest_midi: int | None = None
+        lowest_ov: float = 0.0
         for n, ov in chosen:
             conf_factor = float(n.confidence) if n.confidence is not None else 0.75
-            w = ov * (max(1, n.velocity) / 127.0) * max(0.25, conf_factor)
+            bass_factor = 1.35 if n.pitch_midi < 60 else 1.0
+            sustain_factor = 1.15 if ov >= 0.75 else 1.0
+            w = ov * (max(1, n.velocity) / 127.0) * max(0.25, conf_factor) * bass_factor * sustain_factor
             pc = n.pitch_midi % 12
             pc_weights[pc] = pc_weights.get(pc, 0.0) + w
             if lowest_midi is None or n.pitch_midi < lowest_midi:
                 lowest_midi = n.pitch_midi
-        return pc_weights, lowest_midi
+                lowest_ov = ov
+        return pc_weights, lowest_midi, lowest_ov >= 0.45
 
     # Analyze beat-by-beat, falling back to 2-beat harmonic window for arpeggiated passages
     raw_snapshots: list[tuple[int, str, str, str, float]] = []
     for b_idx in range(total_beats):
-        pc_w, low_midi = _collect_weights(float(b_idx), float(b_idx + 1))
-        match = _analyze_window_chord(pc_w, low_midi, key_obj, cfg)
+        pc_w, low_midi, low_sustained = _collect_weights(float(b_idx), float(b_idx + 1))
+        match = _analyze_window_chord(pc_w, low_midi, low_sustained, key_obj, cfg)
         if match is None and b_idx % 2 == 0:
-            pc_w2, low_midi2 = _collect_weights(float(b_idx), float(min(total_beats, b_idx + 2)))
-            match = _analyze_window_chord(pc_w2, low_midi2, key_obj, cfg)
+            pc_w2, low_midi2, low_sustained2 = _collect_weights(float(b_idx), float(min(total_beats, b_idx + 2)))
+            match = _analyze_window_chord(pc_w2, low_midi2, low_sustained2, key_obj, cfg)
         if match is not None:
             raw_snapshots.append((b_idx, *match))
 
@@ -476,23 +523,35 @@ def detect_chords(
         return []
 
     # Filter isolated 1-beat passing blips sandwiched between identical chords (A -> B -> A)
+    # or brief same-root sus embellishments (e.g. E -> Esus2 -> E)
     filtered: list[tuple[int, str, str, str, float]] = []
     for idx, snap in enumerate(raw_snapshots):
         b_idx, sym, root_n, qual, conf = snap
-        prev_sym = raw_snapshots[idx - 1][1] if idx > 0 else None
-        next_sym = raw_snapshots[idx + 1][1] if idx + 1 < len(raw_snapshots) else None
-        if prev_sym and next_sym and prev_sym == next_sym and sym != prev_sym:
-            if conf < cfg.strong_short_change_confidence:
+        prev_snap = raw_snapshots[idx - 1] if idx > 0 else None
+        next_snap = raw_snapshots[idx + 1] if idx + 1 < len(raw_snapshots) else None
+        if prev_snap and next_snap and prev_snap[1] == next_snap[1] and sym != prev_snap[1]:
+            if conf < cfg.strong_short_change_confidence or (
+                root_n == prev_snap[2] and qual in ("suspended-second", "suspended-fourth")
+            ):
+                continue
+        if prev_snap and root_n == prev_snap[2] and qual in ("suspended-second", "suspended-fourth"):
+            if prev_snap[3] in ("major", "minor") or (
+                next_snap and next_snap[2] == root_n and "suspended" not in next_snap[3]
+            ):
                 continue
         filtered.append(snap)
 
-    # Deduplicate consecutive identical chord symbols (including across barlines)
+    # Deduplicate consecutive identical chord symbols and enforce minimum label spacing
     chords: list[ScoreChord] = []
     last_symbol: str | None = None
+    last_b_idx: int | None = None
     for b_idx, symbol, root_name, quality, conf in filtered:
         if symbol == last_symbol:
             continue
+        if last_b_idx is not None and (b_idx - last_b_idx) < cfg.min_label_spacing_beats:
+            continue
         last_symbol = symbol
+        last_b_idx = b_idx
         measure = (b_idx // num) + 1
         beat = float((b_idx % num) + 1)
         chords.append(

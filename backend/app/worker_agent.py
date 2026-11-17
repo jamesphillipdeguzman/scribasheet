@@ -56,6 +56,7 @@ from app.transcription.provider_factory import (
     get_target_sample_rate_for_engine,
     get_transcription_provider,
     is_fallback_allowed,
+    resolve_engine_for_instrument,
     resolve_requested_engine,
     transcribe_with_provider,
 )
@@ -254,10 +255,10 @@ class RealTranscriptionHandler:
         settings = TranscriptionSettings(**(job.get("settings") or {}))
         safe_name = sanitize_filename(job.get("source_filename") or "input_audio.wav")
         job_engine_raw = job.get("engine")
-        requested_engine = (
-            resolve_requested_engine(job_engine_raw)
-            if job_engine_raw in ("basic_pitch", "transkun")
-            else self.requested_engine
+        job_engine_override = job_engine_raw if job_engine_raw in ("basic_pitch", "transkun") else None
+        requested_engine, allow_fallback = resolve_engine_for_instrument(
+            settings.instrument,
+            engine_override=job_engine_override,
         )
         target_sr = get_target_sample_rate_for_engine(requested_engine)
 
@@ -325,7 +326,7 @@ class RealTranscriptionHandler:
             exec_res = transcribe_with_provider(
                 processed_wav,
                 engine=requested_engine,
-                allow_fallback=self.allow_fallback,
+                allow_fallback=allow_fallback,
                 provider=self._provider if requested_engine == self.requested_engine else None,
                 onset_threshold=settings.onset_threshold,
                 frame_threshold=settings.frame_threshold,
