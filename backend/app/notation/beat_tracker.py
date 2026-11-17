@@ -177,6 +177,9 @@ def resolve_tempo_from_beats(
             # Typical musical notes span ~0.35x to ~1.5x of a quarter beat
             if 0.35 * sec_per_beat_cand <= med_dur <= 1.6 * sec_per_beat_cand:
                 score += 0.12
+            elif rel == "half_time" and med_dur < 0.25 * sec_per_beat_cand:
+                # Very short notes fit the faster pulse, not half-time
+                score -= 0.10
 
         # Tempogram energy support when onset_env is provided
         if onset_env is not None and len(onset_env) > 16:

@@ -58,6 +58,7 @@ export function ProjectStudioPage() {
   // Job tracking
   const [activeJob, setActiveJob] = useState<TranscriptionJob | null>(null);
   const [isStartingJob, setIsStartingJob] = useState(false);
+  const [isRegeneratingArrangement, setIsRegeneratingArrangement] = useState(false);
 
   // Inline project rename state
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -542,10 +543,19 @@ export function ProjectStudioPage() {
                 <h2 className="text-sm font-semibold">2. Transcription Settings</h2>
                 <TranscriptionConfigPanel
                   hasMedia={Boolean(originalAsset)}
+                  hasScore={Boolean(scoreData)}
                   activeJob={activeJob}
                   workerOnline={workerStatus?.worker_online ?? null}
                   defaultInstrument={project.instrument}
                   defaultMode={project.transcription_mode}
+                  initialArrangementDetail={
+                    (scoreData?.analysis?.arrangement_detail as "simple" | "balanced" | "detailed" | undefined) ||
+                    activeJob?.settings_json?.arrangement_detail
+                  }
+                  initialQuantization={
+                    (scoreData?.analysis?.quantization as TranscriptionSettings["quantization"] | undefined) ||
+                    activeJob?.settings_json?.quantization
+                  }
                   onStart={handleStartTranscription}
                   onCancel={async (jobId) => {
                     const updated = await api.cancelJob(jobId);
@@ -555,6 +565,25 @@ export function ProjectStudioPage() {
                     const retried = await api.retryJob(jobId);
                     setActiveJob(retried);
                   }}
+                  onRegenerateArrangement={async (arrangementDetail, quantization) => {
+                    if (!projectId) return;
+                    setIsRegeneratingArrangement(true);
+                    try {
+                      const updated = await api.regenerateArrangement(projectId, {
+                        arrangement_detail: arrangementDetail,
+                        quantization,
+                      });
+                      setScoreData(updated.score_json);
+                      setMusicxml(updated.musicxml);
+                      setScoreVersion(updated.version);
+                      setUndoStack([]);
+                      setRedoStack([]);
+                      setSaveStatus("saved");
+                    } finally {
+                      setIsRegeneratingArrangement(false);
+                    }
+                  }}
+                  isRegeneratingArrangement={isRegeneratingArrangement}
                   isStarting={isStartingJob}
                 />
               </div>

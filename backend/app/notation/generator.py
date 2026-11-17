@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import uuid
 from collections.abc import Iterable
+from fractions import Fraction
 from pathlib import Path
 
 import music21
@@ -211,8 +212,21 @@ _STANDARD_DURS_EIGHTH = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
 _STANDARD_DURS_SIXTEENTH = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0)
 
 
-def _select_rhythmic_grid_ql(notes: list[ScoreNote], tempo_bpm: float) -> float:
-    """Choose 0.5 ql (8th) for calm pieces unless genuine 16th-note subdivisions exist."""
+_STANDARD_DURS_TRIPLET = (1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0, 4.0 / 3.0, 1.5, 2.0, 3.0, 4.0)
+
+
+def _select_rhythmic_grid_ql(
+    notes: list[ScoreNote],
+    tempo_bpm: float,
+    quantization: str | None = None,
+) -> float:
+    """Choose rhythmic grid (quarterLength), honoring explicit triplet/eighth/quarter settings."""
+    if quantization == "eighth_triplet" or quantization == "triplet":
+        return 1.0 / 3.0
+    if quantization == "quarter":
+        return 1.0
+    if quantization == "eighth":
+        return 0.5
     if not notes:
         return 0.5
     beats_per_sec = max(20.0, tempo_bpm) / 60.0
@@ -230,7 +244,12 @@ def _select_rhythmic_grid_ql(notes: list[ScoreNote], tempo_bpm: float) -> float:
 
 def _normalize_duration_ql(raw_dur_ql: float, grid_ql: float) -> float:
     """Snap duration to standard musical values (no double dots or tiny fragments)."""
-    allowed = _STANDARD_DURS_SIXTEENTH if grid_ql <= 0.25 else _STANDARD_DURS_EIGHTH
+    if abs(grid_ql - (1.0 / 3.0)) < 0.02:
+        allowed: tuple[float, ...] = _STANDARD_DURS_TRIPLET
+    elif grid_ql <= 0.25:
+        allowed = _STANDARD_DURS_SIXTEENTH
+    else:
+        allowed = _STANDARD_DURS_EIGHTH
     clamped = max(allowed[0], min(allowed[-1], raw_dur_ql))
     return min(allowed, key=lambda val: (abs(val - clamped), val))
 
@@ -327,6 +346,14 @@ def _pack_notes_into_voices(
     return voices or [[]]
 
 
+def _to_music21_ql(dur_ql: float) -> float | Fraction:
+    """Preserve exact Fraction(n, 3) for triplet durations so music21 exports valid MusicXML."""
+    nearest_third = round(dur_ql * 3.0)
+    if nearest_third > 0 and abs(dur_ql - (nearest_third / 3.0)) < 0.015 and nearest_third % 3 != 0:
+        return Fraction(nearest_third, 3)
+    return round(dur_ql, 4)
+
+
 def _build_m21_element(
     pitches: list[int],
     dur_ql: float,
@@ -338,7 +365,7 @@ def _build_m21_element(
         elem: music21.note.NotRest = music21.note.Note(pitches[0])
     else:
         elem = music21.chord.Chord(pitches)
-    elem.quarterLength = dur_ql
+    elem.quarterLength = _to_music21_ql(dur_ql)
     elem.volume.velocity = max(1, min(127, velocity))
     if tie_type:
         elem.tie = music21.tie.Tie(tie_type)
@@ -458,7 +485,7 @@ def _populate_part_from_notes(
                 seg_s = max(m_start, ev_s)
                 seg_e = min(m_end, ev_e)
                 if seg_s > cursor + 1e-6:
-                    rest = music21.note.Rest(quarterLength=round(seg_s - cursor, 4))
+                    rest = music21.note.Rest(quarterLength=_to_music21_ql(seg_s - cursor))
                     if is_secondary_voice:
                         rest.style.hideObjectOnPrint = True
                     target_stream.append(rest)
@@ -477,7 +504,7 @@ def _populate_part_from_notes(
                     target_stream.append(_build_m21_element(pitches, seg_dur, vel, tie_type, stem_dir))
                     cursor = seg_e
             if cursor < m_end - 1e-6:
-                rest = music21.note.Rest(quarterLength=round(m_end - cursor, 4))
+                rest = music21.note.Rest(quarterLength=_to_music21_ql(m_end - cursor))
                 if is_secondary_voice:
                     rest.style.hideObjectOnPrint = True
                 target_stream.append(rest)
@@ -557,7 +584,8 @@ def score_data_to_musicxml(score: ScoreData, *, include_chords: bool = True) -> 
     ts_obj = music21.meter.TimeSignature(time_sig)
     measure_ql = float(ts_obj.barDuration.quarterLength)
     beats_per_sec = max(20.0, score.tempo_bpm) / 60.0
-    grid_ql = _select_rhythmic_grid_ql(score.notes, score.tempo_bpm)
+    req_quant = (score.analysis or {}).get("quantization") if isinstance(score.analysis, dict) else None
+    grid_ql = _select_rhythmic_grid_ql(score.notes, score.tempo_bpm, quantization=req_quant)
     max_note_ql = max((n.offset_sec * beats_per_sec for n in score.notes), default=measure_ql)
     min_measures = max(1, int(np.ceil(max_note_ql / measure_ql)))
     tracks = score.tracks or [ScoreTrack()]

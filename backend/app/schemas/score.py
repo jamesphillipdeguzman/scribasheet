@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -65,3 +65,8 @@ class ProjectScoreResponse(BaseModel):
 class ProjectScoreUpdateRequest(BaseModel):
     expected_version: int | None = None
     score_json: ScoreData
+
+
+class ArrangementRegenerateRequest(BaseModel):
+    arrangement_detail: Literal["simple", "balanced", "detailed"] = "balanced"
+    quantization: str | None = None

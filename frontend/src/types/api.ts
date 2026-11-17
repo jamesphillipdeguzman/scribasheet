@@ -66,13 +66,14 @@ export interface ProjectListResponse {
 export interface TranscriptionSettings {
   mode: string;
   instrument: string;
+  arrangement_detail?: "simple" | "balanced" | "detailed";
   tempo_mode: "auto" | "manual";
   manual_tempo_bpm?: number | null;
   time_signature: string;
   key_signature: string;
   concert_pitch_hz: number;
   transpose_semitones: number;
-  quantization: "none" | "eighth" | "sixteenth" | "thirtysecond";
+  quantization: "none" | "quarter" | "eighth" | "eighth_triplet" | "sixteenth" | "thirtysecond";
   onset_threshold: number;
   frame_threshold: number;
   min_note_length_ms: number;

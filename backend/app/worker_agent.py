@@ -35,6 +35,7 @@ from app.notation.analyzer import (
     estimate_key_signature,
     get_instrument_program_and_clef,
 )
+from app.notation.arrangement import simplify_arrangement
 from app.notation.beat_tracker import track_beats_and_downbeats
 from app.notation.generator import (
     _render_pdf_from_musicxml_via_musescore,
@@ -384,6 +385,23 @@ class RealTranscriptionHandler:
                 tempo_diag = timing_map.provenance
             key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
 
+            arrangement = simplify_arrangement(
+                refined_notes,
+                tempo_bpm=tempo_bpm,
+                arrangement_detail=settings.arrangement_detail,
+            )
+            arranged_notes = arrangement.notes or refined_notes
+            raw_detected_snapshot = [
+                {
+                    "pitch_midi": int(n.pitch_midi),
+                    "onset_sec": round(float(n.onset_sec), 4),
+                    "offset_sec": round(float(n.offset_sec), 4),
+                    "velocity": int(n.velocity),
+                    "confidence": float(n.confidence) if n.confidence is not None else None,
+                }
+                for n in t_out.notes
+            ]
+
             provenance = build_transcription_provenance(
                 source_audio_path=local_source,
                 preprocessing_config=get_preprocessing_profile(prep_profile_name),
@@ -393,7 +411,7 @@ class RealTranscriptionHandler:
 
             score_data = build_score_data(
                 title=clean_score_title(job.get("project_title") or safe_name),
-                detected_notes=refined_notes,
+                detected_notes=arranged_notes,
                 tempo_bpm=tempo_bpm,
                 tempo_estimated=tempo_est,
                 time_signature=time_sig,
@@ -412,8 +430,12 @@ class RealTranscriptionHandler:
                     "fallback_reason": exec_res.fallback_reason,
                     "model": t_out.metadata.get("model"),
                     "raw_note_count": len(t_out.notes),
-                    "note_count": len(refined_notes),
+                    "note_count": len(arranged_notes),
                     "refiner": refinement.stats,
+                    "arrangement_detail": arrangement.arrangement_detail,
+                    "arrangement": arrangement.stats,
+                    "quantization": settings.quantization,
+                    "raw_detected_notes": raw_detected_snapshot,
                     "tempo_diagnostics": tempo_diag,
                     "provenance": provenance,
                     "preprocessing_profile": prep_profile_name,
@@ -502,6 +524,8 @@ class RealTranscriptionHandler:
                     "model": t_out.metadata.get("model"),
                     "note_count": len(score_data.notes),
                     "chord_count": len(score_data.chords),
+                    "arrangement_detail": arrangement.arrangement_detail,
+                    "quantization": settings.quantization,
                     "tempo_bpm": tempo_bpm,
                     "key_signature": key_sig,
                     "time_signature": time_sig,

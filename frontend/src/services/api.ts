@@ -316,6 +316,14 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ score_json, expected_version }),
     }),
+  regenerateArrangement: (
+    projectId: string,
+    data: { arrangement_detail: "simple" | "balanced" | "detailed"; quantization?: string },
+  ) =>
+    request<ProjectScoreResponse>(`/projects/${projectId}/score/regenerate`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
 
   // Exports
   listExports: (projectId: string) => request<ExportRecord[]>(`/projects/${projectId}/exports`),

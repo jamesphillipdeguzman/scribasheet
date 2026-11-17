@@ -7,40 +7,55 @@ import type { TranscriptionJob, TranscriptionSettings } from "@/types/api";
 
 interface Props {
   hasMedia: boolean;
+  hasScore?: boolean;
   activeJob: TranscriptionJob | null;
   workerOnline?: boolean | null;
   defaultInstrument: string;
   defaultMode: string;
+  initialArrangementDetail?: "simple" | "balanced" | "detailed";
+  initialQuantization?: TranscriptionSettings["quantization"];
   onStart: (settings: TranscriptionSettings) => void;
   onCancel: (jobId: string) => void;
   onRetry: (jobId: string) => void;
+  onRegenerateArrangement?: (
+    arrangementDetail: "simple" | "balanced" | "detailed",
+    quantization: TranscriptionSettings["quantization"],
+  ) => Promise<void> | void;
+  isRegeneratingArrangement?: boolean;
   isStarting: boolean;
 }
 
 export function TranscriptionConfigPanel({
   hasMedia,
+  hasScore = false,
   activeJob,
   workerOnline = null,
   defaultInstrument,
   defaultMode,
+  initialArrangementDetail,
+  initialQuantization,
   onStart,
   onCancel,
   onRetry,
+  onRegenerateArrangement,
+  isRegeneratingArrangement = false,
   isStarting,
 }: Props) {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [confirmOfflineQueue, setConfirmOfflineQueue] = useState(false);
+  const [quantizationManuallySet, setQuantizationManuallySet] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [settings, setSettings] = useState<TranscriptionSettings>({
     mode: defaultMode || "single_instrument",
     instrument: defaultInstrument || "piano",
+    arrangement_detail: initialArrangementDetail || activeJob?.settings_json?.arrangement_detail || "balanced",
     tempo_mode: "auto",
     manual_tempo_bpm: 120,
     time_signature: "auto",
     key_signature: "auto",
     concert_pitch_hz: 440,
     transpose_semitones: 0,
-    quantization: "sixteenth",
+    quantization: initialQuantization || activeJob?.settings_json?.quantization || "sixteenth",
     onset_threshold: 0.5,
     frame_threshold: 0.3,
     min_note_length_ms: 58,
@@ -48,6 +63,18 @@ export function TranscriptionConfigPanel({
     max_midi_pitch: 108,
     enable_source_separation: false,
   });
+
+  useEffect(() => {
+    const restoredDetail = initialArrangementDetail || activeJob?.settings_json?.arrangement_detail;
+    const restoredQuant = initialQuantization || activeJob?.settings_json?.quantization;
+    if (restoredDetail || restoredQuant) {
+      setSettings((prev) => ({
+        ...prev,
+        ...(restoredDetail ? { arrangement_detail: restoredDetail } : {}),
+        ...(restoredQuant ? { quantization: restoredQuant } : {}),
+      }));
+    }
+  }, [initialArrangementDetail, initialQuantization, activeJob?.settings_json?.arrangement_detail, activeJob?.settings_json?.quantization]);
 
   const isRunning =
     activeJob &&
@@ -146,20 +173,72 @@ export function TranscriptionConfigPanel({
         )}
 
         <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[#A1A1AA]">Quantization</label>
+          <label htmlFor="quantization-select" className="block text-xs font-medium text-[#A1A1AA]">
+            Quantization
+          </label>
           <select
+            id="quantization-select"
             value={settings.quantization}
-            onChange={(e) =>
-              setSettings({ ...settings, quantization: e.target.value as TranscriptionSettings["quantization"] })
-            }
+            onChange={(e) => {
+              setQuantizationManuallySet(true);
+              setSettings({ ...settings, quantization: e.target.value as TranscriptionSettings["quantization"] });
+            }}
             className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
           >
             <option value="none">None (Raw timing)</option>
+            <option value="quarter">1/4 Note</option>
             <option value="eighth">1/8 Note</option>
+            <option value="eighth_triplet">1/8 Triplet</option>
             <option value="sixteenth">1/16 Note</option>
             <option value="thirtysecond">1/32 Note</option>
           </select>
         </div>
+      </div>
+
+      {/* Arrangement Detail */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <label htmlFor="arrangement-detail-select" className="block text-xs font-medium text-[#A1A1AA]">
+            Arrangement Detail
+          </label>
+          {hasScore && onRegenerateArrangement && (
+            <button
+              type="button"
+              disabled={isRegeneratingArrangement}
+              onClick={() =>
+                onRegenerateArrangement(
+                  settings.arrangement_detail || "balanced",
+                  settings.quantization,
+                )
+              }
+              className="text-xs font-medium text-[#A78BFA] hover:underline disabled:opacity-50"
+            >
+              {isRegeneratingArrangement ? "Updating..." : "Apply Arrangement"}
+            </button>
+          )}
+        </div>
+        <select
+          id="arrangement-detail-select"
+          value={settings.arrangement_detail || "balanced"}
+          onChange={(e) => {
+            const nextDetail = e.target.value as "simple" | "balanced" | "detailed";
+            setSettings((prev) => ({
+              ...prev,
+              arrangement_detail: nextDetail,
+              ...(!quantizationManuallySet
+                ? { quantization: nextDetail === "simple" ? "eighth" : "sixteenth" }
+                : {}),
+            }));
+          }}
+          className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
+        >
+          <option value="simple">Simple / Syllabic</option>
+          <option value="balanced">Balanced (Recommended)</option>
+          <option value="detailed">Detailed / Solo</option>
+        </select>
+        <p className="text-[11px] text-[#71717A]">
+          Controls note density, LH/RH complexity, and phrase continuity without changing the original audio.
+        </p>
       </div>
 
       {/* Advanced Musical Settings Toggle */}
