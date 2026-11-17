@@ -22,10 +22,11 @@ export const WS_BASE_URL =
 const ACCESS_TOKEN_KEY = "scribasheet_access_token";
 const REFRESH_TOKEN_KEY = "scribasheet_refresh_token";
 const TRANSIENT_STATUSES = new Set([502, 503, 504]);
-const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const WAKEUP_TIMEOUT_MS = 30_000;
 const MAX_TRANSIENT_RETRIES = 3;
-const BASE_RETRY_DELAY_MS = 600;
-const MAX_TOTAL_RETRY_WAIT_MS = 5_000;
+const BASE_RETRY_DELAY_MS = 800;
+const MAX_TOTAL_RETRY_WAIT_MS = 8_000;
 
 export function getStoredTokens() {
   if (typeof window === "undefined" || typeof window.localStorage?.getItem !== "function") {
@@ -61,19 +62,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isAbortError(err: unknown): boolean {
+  return (err instanceof DOMException && err.name === "AbortError") || (err instanceof Error && err.name === "AbortError");
+}
+
 function isTransientNetworkError(err: unknown, callerAborted: boolean): boolean {
   if (callerAborted) return false;
   if (err instanceof TypeError) return true;
-  if (err instanceof DOMException && err.name === "AbortError") return true;
-  return err instanceof Error && err.name === "AbortError";
+  return isAbortError(err);
 }
 
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS
-): Promise<Response> {
+): Promise<{ response: Response; timedOut: () => boolean }> {
   const controller = new AbortController();
+  let didTimeout = false;
   const externalSignal = init.signal;
   const onExternalAbort = () => controller.abort();
   if (externalSignal) {
@@ -83,9 +88,13 @@ async function fetchWithTimeout(
       externalSignal.addEventListener("abort", onExternalAbort, { once: true });
     }
   }
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => {
+    didTimeout = true;
+    controller.abort();
+  }, timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    return { response, timedOut: () => didTimeout };
   } finally {
     clearTimeout(timer);
     externalSignal?.removeEventListener("abort", onExternalAbort);
@@ -97,8 +106,8 @@ let inFlightWakeUp: Promise<boolean> | null = null;
 async function wakeUpBackend(): Promise<boolean> {
   if (inFlightWakeUp) return inFlightWakeUp;
   const healthUrl = `${API_ORIGIN_URL}/health`;
-  inFlightWakeUp = fetchWithTimeout(healthUrl, { method: "GET" }, 8_000)
-    .then((res) => res.ok)
+  inFlightWakeUp = fetchWithTimeout(healthUrl, { method: "GET" }, WAKEUP_TIMEOUT_MS)
+    .then(({ response }) => response.ok)
     .catch(() => false)
     .finally(() => {
       inFlightWakeUp = null;
@@ -127,7 +136,8 @@ async function request<T>(
 
   for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
     try {
-      res = await fetchWithTimeout(`${API_BASE_URL}${path}`, { ...init, headers });
+      const result = await fetchWithTimeout(`${API_BASE_URL}${path}`, { ...init, headers });
+      res = result.response;
       lastNetworkError = null;
       if (!TRANSIENT_STATUSES.has(res.status) || attempt === MAX_TRANSIENT_RETRIES) {
         break;
@@ -135,8 +145,13 @@ async function request<T>(
     } catch (err) {
       lastNetworkError = err;
       const callerAborted = Boolean(init.signal?.aborted);
+      if (callerAborted) {
+        throw err;
+      }
       if (!isTransientNetworkError(err, callerAborted) || attempt === MAX_TRANSIENT_RETRIES) {
-        if (callerAborted) throw err;
+        if (isAbortError(err)) {
+          throw new ApiError(504, "The server took too long to respond. Please try again.", true);
+        }
         throw new ApiError(
           503,
           "Backend is waking up or temporarily unreachable. Please try again in a moment.",
@@ -165,7 +180,7 @@ async function request<T>(
   }
 
   if (res.status === 401 && retryAuth && refreshToken) {
-    const refRes = await fetchWithTimeout(`${API_BASE_URL}/auth/refresh`, {
+    const { response: refRes } = await fetchWithTimeout(`${API_BASE_URL}/auth/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refresh_token: refreshToken }),

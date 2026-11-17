@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -40,6 +40,7 @@ export function LoginPage() {
   const navigate = useNavigate();
   const [serverError, setServerError] = useState<string | null>(null);
   const [wakingUp, setWakingUp] = useState(false);
+  const loginInFlightRef = useRef(false);
 
   useEffect(() => {
     void api.wakeUpBackend();
@@ -51,16 +52,22 @@ export function LoginPage() {
   } = useForm<z.infer<typeof loginSchema>>({ resolver: zodResolver(loginSchema) });
 
   const onSubmit = async (values: z.infer<typeof loginSchema>) => {
+    if (loginInFlightRef.current) return;
+    loginInFlightRef.current = true;
     setServerError(null);
     const wakeTimer = window.setTimeout(() => setWakingUp(true), 1500);
     try {
       await login(values.email, values.password);
       navigate("/dashboard");
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return;
+      }
       setServerError(err instanceof ApiError ? err.message : "Failed to sign in.");
     } finally {
       clearTimeout(wakeTimer);
       setWakingUp(false);
+      loginInFlightRef.current = false;
     }
   };
 

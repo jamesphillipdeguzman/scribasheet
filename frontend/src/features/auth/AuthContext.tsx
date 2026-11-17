@@ -50,8 +50,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const res = await api.login({ email, password });
     setStoredTokens(res.access_token, res.refresh_token);
     setUser(res.user);
-    const u = await api.getUsage();
-    setUsage(u);
+    try {
+      const u = await api.getUsage();
+      setUsage(u);
+    } catch {
+      // Non-fatal: usage summary can refresh later on dashboard
+    }
   };
 
   const register = async (email: string, password: string, displayName: string) => {

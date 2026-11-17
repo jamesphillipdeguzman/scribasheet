@@ -1,8 +1,11 @@
+import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "@/App";
+import { AuthProvider } from "@/features/auth/AuthContext";
+import { LoginPage } from "@/features/auth/AuthPages";
 import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
 import { WorkerControlPanel } from "@/components/WorkerControlPanel";
 import * as controllerSvc from "@/services/workerController";
