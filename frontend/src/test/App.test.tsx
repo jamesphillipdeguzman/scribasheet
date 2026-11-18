@@ -560,6 +560,91 @@ describe("ScribaSheet Frontend", () => {
     expect(screen.getByText(/cannot start or stop a worker on another device/i)).toBeInTheDocument();
   });
 
+  it("enables Stop/Restart for external workers and displays pairing token instructions with Copy Command", async () => {
+    vi.restoreAllMocks();
+    vi.spyOn(api, "getWorkerStatus").mockResolvedValue({
+      worker_online: true,
+      status: "online",
+      last_seen_seconds: 2,
+      worker_id: "win-1",
+      active_job_count: 0,
+      queue_depth: 0,
+      freshness_threshold_seconds: 45,
+    });
+    vi.spyOn(controllerSvc, "isMobileDevice").mockReturnValue(false);
+
+    // 1. Pairing state (401) shows PowerShell command, missing-token guidance, and Copy Command
+    vi.spyOn(controllerSvc, "getControllerToken").mockReturnValue("");
+    const healthSpy = vi
+      .spyOn(controllerSvc.workerController, "checkHealth")
+      .mockResolvedValue({ controller_online: true, requires_pairing: true });
+    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: writeTextSpy },
+      configurable: true,
+    });
+
+    const qcPair = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { unmount } = render(
+      <QueryClientProvider client={qcPair}>
+        <WorkerControlPanel />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(screen.getByText(/Where do I get my pairing token\?/i)).toBeInTheDocument());
+    expect(screen.getByText(/type logs\\worker_controller\.token \| clip & type logs\\worker_controller\.token/i)).toBeInTheDocument();
+    expect(screen.getByText(/install or start the local worker controller first/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Copy Command/i }));
+    expect(writeTextSpy).toHaveBeenCalledWith("type logs\\worker_controller.token | clip & type logs\\worker_controller.token");
+    unmount();
+
+    // 2. External worker running -> Stop Worker & Restart Worker enabled and functional
+    vi.spyOn(controllerSvc, "getControllerToken").mockReturnValue("pair-tok");
+    healthSpy.mockResolvedValue({ controller_online: true, requires_pairing: true });
+    vi.spyOn(controllerSvc.workerController, "getStatus").mockResolvedValue({
+      controller_online: true,
+      worker_running: true,
+      managed_by_controller: false,
+      external_worker_detected: true,
+      external_manageable: true,
+      pid: 9876,
+      started_at: null,
+      last_exit_code: null,
+      last_error: null,
+      log_path: "logs/worker.log",
+      log_tail: [],
+    });
+    const stopSpy = vi.spyOn(controllerSvc.workerController, "stopWorker").mockResolvedValue({
+      controller_online: true,
+      worker_running: false,
+      managed_by_controller: false,
+      external_worker_detected: false,
+      pid: null,
+      started_at: null,
+      last_exit_code: null,
+      last_error: null,
+      log_path: "logs/worker.log",
+      log_tail: [],
+      ok: true,
+      message: "Stopped external worker (PID 9876).",
+    });
+
+    const qcExt = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qcExt}>
+        <WorkerControlPanel />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(screen.getByText(/Running \(external, PID: 9876/i)).toBeInTheDocument());
+    const stopBtn = screen.getByRole("button", { name: /Stop Worker/i }) as HTMLButtonElement;
+    const restartBtn = screen.getByRole("button", { name: /Restart Worker/i }) as HTMLButtonElement;
+    expect(stopBtn.disabled).toBe(false);
+    expect(restartBtn.disabled).toBe(false);
+
+    fireEvent.click(stopBtn);
+    await waitFor(() => expect(stopSpy).toHaveBeenCalledTimes(1));
+  });
+
   it("retries transient 502/503 and network errors up to 3 times without retrying 401", async () => {
     vi.restoreAllMocks();
     let planCalls = 0;

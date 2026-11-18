@@ -7,6 +7,7 @@ export interface ControllerHealth {
   controller_online: boolean;
   requires_pairing: boolean;
   host?: string;
+  token_file_exists?: boolean;
 }
 
 export interface ControllerStatus {
@@ -14,7 +15,9 @@ export interface ControllerStatus {
   worker_running: boolean;
   managed_by_controller: boolean;
   external_worker_detected: boolean;
+  external_manageable?: boolean;
   pid: number | null;
+  pids?: number[];
   started_at: string | null;
   last_exit_code: number | null;
   last_error: string | null;

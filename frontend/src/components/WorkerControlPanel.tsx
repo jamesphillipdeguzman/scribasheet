@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Cpu, KeyRound, Play, RotateCw, Smartphone, Square, Terminal } from "lucide-react";
+import { AlertCircle, Check, Copy, Cpu, KeyRound, Play, RotateCw, Smartphone, Square, Terminal } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 import { api } from "@/services/api";
@@ -17,9 +17,12 @@ interface WorkerControlPanelProps {
   currentJobLabel?: string | null;
 }
 
+const PAIRING_TOKEN_COMMAND = "type logs\\worker_controller.token | clip & type logs\\worker_controller.token";
+
 export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps) {
   const queryClient = useQueryClient();
   const [tokenInput, setTokenInput] = useState("");
+  const [copiedCommand, setCopiedCommand] = useState(false);
   const [actionPending, setActionPending] = useState<"start" | "stop" | "restart" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
@@ -148,14 +151,11 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
             </div>
           </div>
         ) : needsPairing ? (
-          <form onSubmit={handlePair} className="rounded-lg border border-[#27273A] bg-[#09090F] p-3 space-y-2 text-xs">
+          <form onSubmit={handlePair} className="rounded-lg border border-[#27273A] bg-[#09090F] p-3 space-y-3 text-xs">
             <div className="flex items-center gap-1.5 font-medium text-[#F5F3FF]">
               <KeyRound className="h-3.5 w-3.5 text-[#A78BFA]" />
               <span>Pair Local Controller</span>
             </div>
-            <p className="text-[#A1A1AA]">
-              Paste the pairing token from <code className="text-[#F5F3FF]">logs\worker_controller.token</code> on your Windows PC:
-            </p>
             <div className="flex flex-wrap gap-2">
               <input
                 type="password"
@@ -169,26 +169,58 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
                 Pair Controller
               </Button>
             </div>
+            <div className="rounded-md border border-[#27273A] bg-[#11111B] p-2.5 space-y-2 text-[11px] text-[#A1A1AA]">
+              <div className="font-medium text-[#F5F3FF]">Where do I get my pairing token?</div>
+              <p>
+                The token is saved in <code className="text-[#F5F3FF]">logs\worker_controller.token</code> inside your ScribaSheet project folder.
+              </p>
+              <p>Open PowerShell in your ScribaSheet project root and run:</p>
+              <div className="flex items-center justify-between gap-2 rounded bg-[#181825] px-2.5 py-1.5 font-mono text-[11px] text-[#E4E4E7] overflow-x-auto">
+                <span className="truncate">{PAIRING_TOKEN_COMMAND}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(PAIRING_TOKEN_COMMAND);
+                    setCopiedCommand(true);
+                    window.setTimeout(() => setCopiedCommand(false), 1800);
+                  }}
+                  className="inline-flex shrink-0 items-center gap-1 rounded border border-[#27273A] bg-[#11111B] px-2 py-1 text-[10px] font-sans text-[#F5F3FF] hover:border-[#A78BFA]"
+                >
+                  {copiedCommand ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                  {copiedCommand ? "Copied" : "Copy Command"}
+                </button>
+              </div>
+              <p>
+                The command copies your token to the clipboard and displays it in the terminal. Return here and paste it into the Pairing Token field.
+              </p>
+              <p className="text-[#71717A]">
+                If <code className="text-[#A1A1AA]">logs\worker_controller.token</code> is missing, install or start the local worker controller first (<code className="text-[#A1A1AA]">.\scripts\install_worker_controller.ps1</code>).
+              </p>
+            </div>
           </form>
         ) : controllerStatus ? (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#27273A] bg-[#09090F] p-3">
             <div className="space-y-1 text-xs">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span
                   className={`h-2 w-2 rounded-full ${
                     controllerStatus.worker_running ? "bg-emerald-400" : "bg-zinc-500"
                   }`}
                 />
                 <span className="font-medium text-[#F5F3FF]">
-                  Local Process: {controllerStatus.worker_running ? "Running" : "Stopped"}
+                  Local Process:{" "}
+                  {!controllerStatus.worker_running
+                    ? "Stopped"
+                    : controllerStatus.managed_by_controller
+                      ? `Running (controller-managed${controllerStatus.pid ? `, PID: ${controllerStatus.pid}` : ""})`
+                      : controllerStatus.pid
+                        ? `Running (external, PID: ${controllerStatus.pid} — manageable by controller)`
+                        : "Running (external)"}
                 </span>
-                {controllerStatus.pid && (
-                  <span className="font-mono text-[11px] text-[#A1A1AA]">PID {controllerStatus.pid}</span>
-                )}
               </div>
               {controllerStatus.external_worker_detected && (
                 <div className="text-amber-300">
-                  Worker is running externally (started outside this controller).
+                  Worker was started externally and can be stopped or restarted from here.
                 </div>
               )}
               {controllerStatus.last_error && (
@@ -213,7 +245,10 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
                     size="sm"
                     variant="danger"
                     onClick={() => void runAction("stop")}
-                    disabled={actionPending !== null || controllerStatus.external_worker_detected}
+                    disabled={
+                      actionPending !== null ||
+                      (controllerStatus.external_worker_detected && controllerStatus.external_manageable === false)
+                    }
                   >
                     <Square className="h-3.5 w-3.5" />
                     {actionPending === "stop" ? "Stopping..." : "Stop Worker"}
@@ -222,7 +257,10 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
                     size="sm"
                     variant="outline"
                     onClick={() => void runAction("restart")}
-                    disabled={actionPending !== null || controllerStatus.external_worker_detected}
+                    disabled={
+                      actionPending !== null ||
+                      (controllerStatus.external_worker_detected && controllerStatus.external_manageable === false)
+                    }
                   >
                     <RotateCw className="h-3.5 w-3.5" />
                     {actionPending === "restart" ? "Restarting..." : "Restart Worker"}

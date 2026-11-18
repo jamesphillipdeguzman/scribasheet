@@ -110,6 +110,50 @@ def _load_backend_env(backend_dir: Path) -> dict[str, str]:
     return env
 
 
+def _is_path_within(candidate: str | None, root: Path) -> bool:
+    if not candidate:
+        return False
+    try:
+        cand_resolved = Path(candidate).resolve()
+        root_resolved = root.resolve()
+        return cand_resolved == root_resolved or root_resolved in cand_resolved.parents
+    except Exception:
+        return False
+
+
+def is_scribasheet_worker_process(
+    *,
+    pid: int,
+    exe: str | None,
+    cmdline: list[str] | None,
+    cwd: str | None,
+    repo_root: Path,
+    self_pid: int | None = None,
+    managed_pid: int | None = None,
+) -> bool:
+    """Validate that a process is a ScribaSheet worker_agent.py belonging to this repo."""
+    if pid <= 0 or pid == (self_pid or os.getpid()) or (managed_pid is not None and pid == managed_pid):
+        return False
+    if not cmdline:
+        return False
+    exe_name = Path(exe).name.lower() if exe else Path(cmdline[0]).name.lower()
+    if "python" not in exe_name:
+        return False
+
+    has_worker_module = False
+    for idx, arg in enumerate(cmdline):
+        if arg == "-m" and idx + 1 < len(cmdline) and cmdline[idx + 1] == "app.worker_agent":
+            has_worker_module = True
+            break
+        if "app.worker_agent" in arg or arg.replace("\\", "/").endswith("app/worker_agent.py"):
+            has_worker_module = True
+            break
+    if not has_worker_module:
+        return False
+
+    return _is_path_within(cwd, repo_root) or _is_path_within(exe, repo_root)
+
+
 class WorkerProcessManager:
     """Manages the fixed local worker subprocess with single-instance safety."""
 
@@ -172,6 +216,136 @@ class WorkerProcessManager:
             return False
         return True
 
+    def _discover_external_worker_pids(self) -> list[int]:
+        """Discover validated external app.worker_agent processes for this repo."""
+        managed_pid = self._proc.pid if self._proc is not None and self._proc.poll() is None else None
+        discovered: list[int] = []
+        try:
+            import psutil  # type: ignore
+
+            for proc in psutil.process_iter(["pid", "exe", "cmdline", "cwd"]):
+                try:
+                    info = proc.info
+                    pid = int(info.get("pid") or 0)
+                    if is_scribasheet_worker_process(
+                        pid=pid,
+                        exe=info.get("exe"),
+                        cmdline=info.get("cmdline"),
+                        cwd=info.get("cwd"),
+                        repo_root=self.repo_root,
+                        managed_pid=managed_pid,
+                    ):
+                        discovered.append(pid)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+        except ImportError:
+            if sys.platform == "win32":
+                try:
+                    ps_cmd = (
+                        "Get-CimInstance Win32_Process -Filter \"Name LIKE 'python%'\" | "
+                        "Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+                    )
+                    res = subprocess.run(
+                        ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    )
+                    if res.returncode == 0 and res.stdout.strip():
+                        rows = json.loads(res.stdout)
+                        if isinstance(rows, dict):
+                            rows = [rows]
+                        for row in rows:
+                            pid = int(row.get("ProcessId") or 0)
+                            cmdline_str = str(row.get("CommandLine") or "")
+                            exe = row.get("ExecutablePath")
+                            if is_scribasheet_worker_process(
+                                pid=pid,
+                                exe=exe,
+                                cmdline=cmdline_str.split(),
+                                cwd=None,
+                                repo_root=self.repo_root,
+                                managed_pid=managed_pid,
+                            ):
+                                discovered.append(pid)
+                except Exception:
+                    pass
+        return sorted(set(discovered))
+
+    def _validate_pid_is_worker(self, pid: int) -> bool:
+        """Revalidate PID immediately before termination to guard against PID reuse."""
+        managed_pid = self._proc.pid if self._proc is not None and self._proc.poll() is None else None
+        try:
+            import psutil  # type: ignore
+
+            proc = psutil.Process(pid)
+            with proc.oneshot():
+                return is_scribasheet_worker_process(
+                    pid=pid,
+                    exe=proc.exe(),
+                    cmdline=proc.cmdline(),
+                    cwd=proc.cwd(),
+                    repo_root=self.repo_root,
+                    managed_pid=managed_pid,
+                )
+        except ImportError:
+            return pid in self._discover_external_worker_pids()
+        except Exception:
+            return False
+
+    def _terminate_external_pid(self, pid: int, timeout_sec: float = 5.0) -> tuple[bool, str]:
+        """Safely terminate a validated external worker PID (graceful first, taskkill fallback)."""
+        if not self._validate_pid_is_worker(pid):
+            return False, f"Refused to terminate PID {pid}: process is no longer a validated ScribaSheet worker."
+
+        try:
+            import psutil  # type: ignore
+
+            proc = psutil.Process(pid)
+            proc.terminate()
+            try:
+                proc.wait(timeout=timeout_sec)
+                return True, f"Stopped external worker (PID {pid})."
+            except psutil.TimeoutExpired:
+                if not self._validate_pid_is_worker(pid):
+                    return False, f"PID {pid} changed identity during shutdown; aborted forced kill."
+                logger.warning("External worker PID %s did not exit within %.1fs; forcing termination.", pid, timeout_sec)
+                if sys.platform == "win32":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                else:
+                    proc.kill()
+                try:
+                    proc.wait(timeout=3.0)
+                except psutil.TimeoutExpired:
+                    if psutil.pid_exists(pid):
+                        return False, f"External worker PID {pid} did not exit after forced termination."
+                return True, f"Stopped external worker (PID {pid})."
+        except ImportError:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                return True, f"Stopped external worker (PID {pid})."
+            return False, "psutil is unavailable to stop external worker."
+        except Exception as exc:
+            msg = str(exc)
+            if "NoSuchProcess" in type(exc).__name__:
+                return True, f"External worker (PID {pid}) already exited."
+            if "AccessDenied" in type(exc).__name__:
+                return False, f"Permission denied terminating external worker PID {pid}."
+            return False, f"Failed to stop external worker PID {pid}: {msg}"
+
     def _read_log_tail(self, max_lines: int = 12) -> list[str]:
         if not self.log_file.exists():
             return []
@@ -186,13 +360,23 @@ class WorkerProcessManager:
         with self._lock:
             self._reap_if_exited()
             managed_running = self._proc is not None and self._proc.poll() is None
-            external_running = False if managed_running else self._is_external_lock_held()
+            external_pids = [] if managed_running else self._discover_external_worker_pids()
+            lock_held = False if (managed_running or external_pids) else self._is_external_lock_held()
+            external_running = bool(external_pids) or lock_held
+            external_manageable = bool(external_pids)
+            active_pid = (
+                self._proc.pid
+                if managed_running and self._proc
+                else (external_pids[0] if external_pids else None)
+            )
             return {
                 "controller_online": True,
                 "worker_running": managed_running or external_running,
                 "managed_by_controller": managed_running,
                 "external_worker_detected": external_running,
-                "pid": self._proc.pid if managed_running and self._proc else None,
+                "external_manageable": external_manageable,
+                "pid": active_pid,
+                "pids": [self._proc.pid] if managed_running and self._proc else external_pids,
                 "started_at": self._started_at,
                 "last_exit_code": self._last_exit_code,
                 "last_error": self._last_error,
@@ -253,10 +437,27 @@ class WorkerProcessManager:
         with self._lock:
             self._reap_if_exited()
             if self._proc is None:
+                external_pids = self._discover_external_worker_pids()
+                if external_pids:
+                    errors: list[str] = []
+                    for ext_pid in external_pids:
+                        ok, msg = self._terminate_external_pid(ext_pid, timeout_sec=timeout_sec)
+                        if not ok:
+                            errors.append(msg)
+                    # Wait briefly for Windows named mutex/lock release after process exit
+                    for _ in range(15):
+                        if not self._is_external_lock_held():
+                            break
+                        time.sleep(0.1)
+                    if errors:
+                        self._last_error = "; ".join(errors)
+                        return False, self._last_error, self.get_status()
+                    self._last_error = None
+                    return True, f"Stopped external worker (PID {', '.join(str(p) for p in external_pids)}).", self.get_status()
                 if self._is_external_lock_held():
                     return (
                         False,
-                        "Worker is running externally (not started by this controller). Stop it from Task Scheduler or its terminal.",
+                        "Worker lock is held by an external process whose PID could not be verified.",
                         self.get_status(),
                     )
                 return True, "Worker is already stopped.", self.get_status()
