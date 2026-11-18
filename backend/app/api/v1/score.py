@@ -7,6 +7,7 @@ from app.db.session import get_db
 from app.models import Project, ProjectScore, User
 from app.notation.arrangement import simplify_arrangement
 from app.notation.generator import (
+    build_piano_vocal_score_data,
     build_score_data,
     score_data_to_midi_bytes,
     score_data_to_musicxml,
@@ -161,16 +162,39 @@ def regenerate_project_arrangement(
     refinement = refine_detected_notes(raw_notes, config=NoteRefinerConfig())
     refined_notes = refinement.notes or raw_notes
     effective_mode = payload.mode or analysis.get("mode") or project.transcription_mode
+    norm_mode = normalize_transcription_mode(str(effective_mode))
     lead_melody_active = is_lead_melody_mode(effective_mode)
-    if lead_melody_active:
+    piano_vocal_active = norm_mode == "piano_vocal"
+
+    def _hydrate_notes(key: str) -> list[DetectedNote]:
+        stored = analysis.get(key)
+        if not isinstance(stored, list):
+            return []
+        return [
+            DetectedNote(
+                pitch_midi=int(n["pitch_midi"]),
+                onset_sec=float(n["onset_sec"]),
+                offset_sec=float(n["offset_sec"]),
+                velocity=int(n.get("velocity", 80)),
+                confidence=n.get("confidence"),
+            )
+            for n in stored
+        ]
+
+    vocal_notes = _hydrate_notes("vocal_detected_notes")
+    bass_notes = _hydrate_notes("bass_detected_notes")
+    other_notes = _hydrate_notes("other_detected_notes")
+
+    if lead_melody_active or piano_vocal_active:
+        melody_source = vocal_notes if vocal_notes else refined_notes
         melody_result = extract_lead_melody(
-            refined_notes,
+            melody_source,
             tempo_bpm=existing.tempo_bpm,
         )
-        arranged_notes = melody_result.notes or refined_notes
+        arranged_notes = melody_result.notes or melody_source
         analysis["arrangement_detail"] = payload.arrangement_detail
         analysis["arrangement"] = {
-            "mode": "lead_melody",
+            "mode": norm_mode,
             "input_note_count": len(refined_notes),
             "output_note_count": len(arranged_notes),
         }
@@ -190,7 +214,7 @@ def regenerate_project_arrangement(
 
     quant = payload.quantization or str(analysis.get("quantization") or "sixteenth")
     if effective_mode:
-        analysis["mode"] = normalize_transcription_mode(str(effective_mode))
+        analysis["mode"] = norm_mode
 
     analysis["quantization"] = quant
     analysis["refiner"] = refinement.stats
@@ -207,23 +231,43 @@ def regenerate_project_arrangement(
             for n in raw_notes
         ]
 
-    new_score = build_score_data(
-        title=project.title,
-        detected_notes=arranged_notes,
-        tempo_bpm=existing.tempo_bpm,
-        tempo_estimated=existing.tempo_estimated,
-        time_signature=existing.time_signature,
-        time_signature_estimated=existing.time_signature_estimated,
-        key_signature=existing.key_signature,
-        key_signature_estimated=existing.key_signature_estimated,
-        duration_seconds=existing.duration_seconds,
-        instrument=project.instrument or "piano",
-        quantization=quant,
-        clef_override="treble" if lead_melody_active else None,
-        track_name_override="Lead Melody" if lead_melody_active else None,
-        chord_source_notes=refined_notes if lead_melody_active else None,
-        analysis=analysis,
-    )
+    if piano_vocal_active:
+        new_score = build_piano_vocal_score_data(
+            title=project.title,
+            melody_notes=arranged_notes,
+            chord_source_notes=refined_notes,
+            bass_notes=bass_notes or None,
+            other_notes=other_notes or None,
+            tempo_bpm=existing.tempo_bpm,
+            tempo_estimated=existing.tempo_estimated,
+            time_signature=existing.time_signature,
+            time_signature_estimated=existing.time_signature_estimated,
+            key_signature=existing.key_signature,
+            key_signature_estimated=existing.key_signature_estimated,
+            duration_seconds=existing.duration_seconds,
+            quantization=quant,
+            arrangement_detail=payload.arrangement_detail,
+            analysis=analysis,
+        )
+    else:
+        new_score = build_score_data(
+            title=project.title,
+            detected_notes=arranged_notes,
+            tempo_bpm=existing.tempo_bpm,
+            tempo_estimated=existing.tempo_estimated,
+            time_signature=existing.time_signature,
+            time_signature_estimated=existing.time_signature_estimated,
+            key_signature=existing.key_signature,
+            key_signature_estimated=existing.key_signature_estimated,
+            duration_seconds=existing.duration_seconds,
+            instrument=project.instrument or "piano",
+            quantization=quant,
+            clef_override="treble" if lead_melody_active else None,
+            track_name_override="Lead Melody" if lead_melody_active else None,
+            chord_source_notes=refined_notes if lead_melody_active else None,
+            monophonic=lead_melody_active,
+            analysis=analysis,
+        )
 
     musicxml_str = score_data_to_musicxml(new_score)
     midi_bytes = score_data_to_midi_bytes(new_score)

@@ -66,8 +66,15 @@ export const SUPPORTED_INSTRUMENTS = [
 export const TRANSCRIPTION_MODES = [
   { id: "single_instrument", label: "Single Instrument", description: "Best accuracy for solo recordings" },
   { id: "piano", label: "Piano (Grand Staff)", description: "Splits treble & bass staves at middle C" },
-  { id: "melody", label: "Lead Melody", description: "Focuses on primary melodic line" },
+  { id: "melody", label: "Lead Melody", description: "Monophonic treble melody with optional chord symbols" },
+  { id: "piano_vocal", label: "Piano + Vocal", description: "Upper staff melody + lower staff playable piano accompaniment" },
   { id: "chords", label: "Chords & Harmony", description: "Polyphonic capture with chord detection" },
   { id: "vocal_melody", label: "Vocal Melody", description: "Optimized for singing & monophonic voice" },
   { id: "multi_instrument", label: "Multi-Instrument", description: "Experimental polyphonic mix capture" },
+] as const;
+
+export const AUDIO_SOURCE_TYPES = [
+  { id: "auto", label: "Automatic", description: "Detects whether the recording is a full vocal mix or solo instrumental." },
+  { id: "full_song", label: "Full Song with Vocals", description: "Prioritizes separated vocal melody and harmonic accompaniment." },
+  { id: "solo_piano", label: "Solo Piano / Instrumental", description: "Uses direct polyphonic transcription without vocal-stem routing." },
 ] as const;

@@ -48,6 +48,7 @@ def build_score_data(
     clef_override: str | None = None,
     track_name_override: str | None = None,
     chord_source_notes: list[DetectedNote] | None = None,
+    monophonic: bool = False,
 ) -> ScoreData:
     program, default_clef = get_instrument_program_and_clef(instrument)
     clef = clef_override or default_clef
@@ -104,6 +105,21 @@ def build_score_data(
         return quantized
 
     score_notes = _quantize_notes(detected_notes)
+    if monophonic and len(score_notes) > 1:
+        mono_quantized: list[ScoreNote] = [score_notes[0]]
+        for cur in score_notes[1:]:
+            prev = mono_quantized[-1]
+            if cur.onset_sec <= prev.onset_sec + 1e-4:
+                prev_rank = prev.velocity + (prev.pitch_midi * 0.25)
+                cur_rank = cur.velocity + (cur.pitch_midi * 0.25)
+                if cur_rank > prev_rank:
+                    mono_quantized[-1] = cur
+                continue
+            if prev.offset_sec > cur.onset_sec:
+                prev.offset_sec = round(cur.onset_sec, 4)
+            mono_quantized.append(cur)
+        score_notes = mono_quantized
+
     chord_notes = _quantize_notes(chord_source_notes) if chord_source_notes is not None else score_notes
     chords = detect_chords(
         chord_notes,
@@ -144,6 +160,118 @@ def build_score_data(
         tracks=[track],
         notes=score_notes,
         chords=chords,
+        analysis=merged_analysis,
+    )
+
+
+def build_piano_vocal_score_data(
+    *,
+    title: str,
+    melody_notes: list[DetectedNote],
+    chord_source_notes: list[DetectedNote],
+    bass_notes: list[DetectedNote] | None = None,
+    other_notes: list[DetectedNote] | None = None,
+    tempo_bpm: float = 120.0,
+    tempo_estimated: bool = True,
+    time_signature: str = "4/4",
+    time_signature_estimated: bool = True,
+    key_signature: str = "C major",
+    key_signature_estimated: bool = True,
+    duration_seconds: float = 0.0,
+    quantization: str = "sixteenth",
+    arrangement_detail: str = "balanced",
+    analysis: dict | None = None,
+    timing_map: TimingMap | None = None,
+) -> ScoreData:
+    """Build a synchronized 2-staff Piano + Vocal ScoreData (Track 0 = Melody, Track 1 = Piano Accompaniment)."""
+    from app.notation.accompaniment import generate_piano_accompaniment
+
+    melody_score = build_score_data(
+        title=title,
+        detected_notes=melody_notes,
+        tempo_bpm=tempo_bpm,
+        tempo_estimated=tempo_estimated,
+        time_signature=time_signature,
+        time_signature_estimated=time_signature_estimated,
+        key_signature=key_signature,
+        key_signature_estimated=key_signature_estimated,
+        duration_seconds=duration_seconds,
+        instrument="vocals",
+        quantization=quantization,
+        timing_map=timing_map,
+        clef_override="treble",
+        track_name_override="Vocal Melody",
+        chord_source_notes=chord_source_notes,
+        monophonic=True,
+        analysis=analysis,
+    )
+
+    effective_bpm = melody_score.tempo_bpm
+    accomp_result = generate_piano_accompaniment(
+        chords=melody_score.chords,
+        melody_notes=melody_notes,
+        bass_notes=bass_notes,
+        other_notes=other_notes,
+        tempo_bpm=effective_bpm,
+        time_signature=time_signature,
+        key_signature=key_signature,
+        duration_seconds=melody_score.duration_seconds,
+        arrangement_detail=arrangement_detail,  # type: ignore[arg-type]
+    )
+
+    accomp_score = build_score_data(
+        title=title,
+        detected_notes=accomp_result.notes,
+        tempo_bpm=effective_bpm,
+        tempo_estimated=tempo_estimated,
+        time_signature=time_signature,
+        time_signature_estimated=time_signature_estimated,
+        key_signature=key_signature,
+        key_signature_estimated=key_signature_estimated,
+        duration_seconds=melody_score.duration_seconds,
+        instrument="piano",
+        quantization=quantization,
+        timing_map=timing_map,
+        clef_override="bass",
+        track_name_override="Piano Accompaniment",
+    )
+
+    melody_track = ScoreTrack(
+        index=0,
+        name="Vocal Melody",
+        instrument="vocals",
+        clef="treble",
+        program=0,
+        muted=False,
+    )
+    accomp_track = ScoreTrack(
+        index=1,
+        name="Piano Accompaniment",
+        instrument="piano",
+        clef="bass",
+        program=0,
+        muted=False,
+    )
+    accomp_notes = [n.model_copy(update={"track_index": 1}) for n in accomp_score.notes]
+    combined_notes = sorted([*melody_score.notes, *accomp_notes], key=lambda x: (x.onset_sec, x.track_index, x.pitch_midi))
+
+    merged_analysis = dict(melody_score.analysis or {})
+    merged_analysis["accompaniment"] = accomp_result.stats
+    merged_analysis["arrangement_detail"] = accomp_result.arrangement_detail
+    merged_analysis["note_count"] = len(combined_notes)
+
+    return ScoreData(
+        title=title,
+        tempo_bpm=effective_bpm,
+        tempo_estimated=tempo_estimated,
+        time_signature=time_signature,
+        time_signature_estimated=time_signature_estimated,
+        key_signature=key_signature,
+        key_signature_estimated=key_signature_estimated,
+        duration_seconds=melody_score.duration_seconds,
+        tracks=[melody_track, accomp_track],
+        notes=combined_notes,
+        chords=melody_score.chords,
         analysis=merged_analysis,
     )
 
@@ -652,7 +780,7 @@ def score_data_to_musicxml(score: ScoreData, *, include_chords: bool = True) -> 
             )
             if track.clef == "treble":
                 _attach_ottava_spanners(p)
-            if include_chords:
+            if include_chords and (len(tracks) == 1 or track.index == 0):
                 _attach_chord_symbols(p, score.chords)
             m21_score.insert(0, p)
 

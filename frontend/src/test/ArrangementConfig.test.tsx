@@ -108,4 +108,41 @@ describe("TranscriptionConfigPanel Arrangement Detail & Quantization", () => {
     fireEvent.click(retranscribeBtn);
     expect(onStart).toHaveBeenCalledWith(expect.objectContaining({ mode: "melody" }));
   });
+
+  it("exposes Audio Source, Demucs Stem Separation, and Piano + Vocal mode in job payload", () => {
+    const onStart = vi.fn();
+    render(
+      <TranscriptionConfigPanel
+        hasMedia={true}
+        hasScore={true}
+        activeJob={null}
+        workerOnline={true}
+        defaultInstrument="piano"
+        defaultMode="piano"
+        initialMode="piano"
+        onStart={onStart}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        isStarting={false}
+      />,
+    );
+
+    const modeSelect = screen.getByLabelText(/output arrangement/i) as HTMLSelectElement;
+    const sourceSelect = screen.getByLabelText(/audio source/i) as HTMLSelectElement;
+    const demucsToggle = screen.getByLabelText(/separate audio stems/i) as HTMLInputElement;
+
+    fireEvent.change(modeSelect, { target: { value: "piano_vocal" } });
+    fireEvent.change(sourceSelect, { target: { value: "full_song" } });
+    fireEvent.click(demucsToggle);
+
+    const retranscribeBtn = screen.getByRole("button", { name: /re-transcribe in piano \+ vocal mode/i });
+    fireEvent.click(retranscribeBtn);
+    expect(onStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "piano_vocal",
+        audio_source_type: "full_song",
+        enable_source_separation: true,
+      }),
+    );
+  });
 });

@@ -22,6 +22,11 @@ class TranscriptionSettings(BaseModel):
     min_midi_pitch: int = Field(default=21, ge=0, le=127)
     max_midi_pitch: int = Field(default=108, ge=0, le=127)
     enable_source_separation: bool = Field(default=False)
+    audio_source_type: Literal["auto", "full_song", "solo_piano"] = Field(default="auto")
+    demucs_model: str = Field(default="htdemucs")
+    demucs_segment_sec: float | None = Field(default=None, ge=4.0, le=60.0)
+    demucs_overlap: float = Field(default=0.25, ge=0.05, le=0.75)
+    show_chord_symbols: bool = Field(default=True)
 
 
 class TranscriptionCreateRequest(BaseModel):

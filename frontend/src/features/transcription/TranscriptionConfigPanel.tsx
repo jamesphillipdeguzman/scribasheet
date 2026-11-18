@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, ChevronDown, Clock, Loader2, Play, RotateCcw, Square } from "lucide-react";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
+import { AUDIO_SOURCE_TYPES, SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
 import type { TranscriptionJob, TranscriptionSettings } from "@/types/api";
 
 interface Props {
@@ -71,19 +71,24 @@ export function TranscriptionConfigPanel({
     min_note_length_ms: 58,
     min_midi_pitch: 21,
     max_midi_pitch: 108,
-    enable_source_separation: false,
+    enable_source_separation: activeJob?.settings_json?.enable_source_separation ?? false,
+    audio_source_type: activeJob?.settings_json?.audio_source_type || "auto",
   });
 
   useEffect(() => {
     const restoredMode = initialMode || activeJob?.settings_json?.mode;
     const restoredDetail = initialArrangementDetail || activeJob?.settings_json?.arrangement_detail;
     const restoredQuant = initialQuantization || activeJob?.settings_json?.quantization;
-    if (restoredMode || restoredDetail || restoredQuant) {
+    const restoredSourceType = activeJob?.settings_json?.audio_source_type;
+    const restoredSep = activeJob?.settings_json?.enable_source_separation;
+    if (restoredMode || restoredDetail || restoredQuant || restoredSourceType !== undefined || restoredSep !== undefined) {
       setSettings((prev) => ({
         ...prev,
         ...(restoredMode ? { mode: normalizeModeId(restoredMode) } : {}),
         ...(restoredDetail ? { arrangement_detail: restoredDetail } : {}),
         ...(restoredQuant ? { quantization: restoredQuant } : {}),
+        ...(restoredSourceType ? { audio_source_type: restoredSourceType } : {}),
+        ...(restoredSep !== undefined ? { enable_source_separation: restoredSep } : {}),
       }));
     }
   }, [
@@ -93,6 +98,8 @@ export function TranscriptionConfigPanel({
     activeJob?.settings_json?.mode,
     activeJob?.settings_json?.arrangement_detail,
     activeJob?.settings_json?.quantization,
+    activeJob?.settings_json?.audio_source_type,
+    activeJob?.settings_json?.enable_source_separation,
   ]);
 
   const currentScoreMode = normalizeModeId(initialMode || activeJob?.settings_json?.mode || defaultMode);
@@ -128,8 +135,11 @@ export function TranscriptionConfigPanel({
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[#A1A1AA]">Transcription Mode</label>
+          <label htmlFor="transcription-mode-select" className="block text-xs font-medium text-[#A1A1AA]">
+            Output Arrangement
+          </label>
           <select
+            id="transcription-mode-select"
             value={settings.mode}
             onChange={(e) => setSettings({ ...settings, mode: e.target.value })}
             className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
@@ -140,11 +150,17 @@ export function TranscriptionConfigPanel({
               </option>
             ))}
           </select>
+          <p className="text-[11px] text-[#71717A]">
+            {TRANSCRIPTION_MODES.find((m) => m.id === settings.mode)?.description}
+          </p>
         </div>
 
         <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[#A1A1AA]">Instrument</label>
+          <label htmlFor="instrument-select" className="block text-xs font-medium text-[#A1A1AA]">
+            Instrument
+          </label>
           <select
+            id="instrument-select"
             value={settings.instrument}
             onChange={(e) => setSettings({ ...settings, instrument: e.target.value })}
             className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
@@ -155,6 +171,57 @@ export function TranscriptionConfigPanel({
               </option>
             ))}
           </select>
+        </div>
+      </div>
+
+      {/* Audio Source & Demucs Stem Separation */}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <label htmlFor="audio-source-select" className="block text-xs font-medium text-[#A1A1AA]">
+            Audio Source
+          </label>
+          <select
+            id="audio-source-select"
+            value={settings.audio_source_type || "auto"}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                audio_source_type: e.target.value as TranscriptionSettings["audio_source_type"],
+              })
+            }
+            className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
+          >
+            {AUDIO_SOURCE_TYPES.map((src) => (
+              <option key={src.id} value={src.id}>
+                {src.label}
+              </option>
+            ))}
+          </select>
+          <p className="text-[11px] text-[#71717A]">
+            {AUDIO_SOURCE_TYPES.find((src) => src.id === (settings.audio_source_type || "auto"))?.description}
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor="demucs-separation-toggle" className="block text-xs font-medium text-[#A1A1AA]">
+            Separate Audio Stems (Demucs)
+          </label>
+          <label
+            htmlFor="demucs-separation-toggle"
+            className="flex h-9 items-center gap-2 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF] cursor-pointer"
+          >
+            <input
+              id="demucs-separation-toggle"
+              type="checkbox"
+              checked={settings.enable_source_separation}
+              onChange={(e) => setSettings({ ...settings, enable_source_separation: e.target.checked })}
+              className="accent-[#A78BFA]"
+            />
+            <span>{settings.enable_source_separation ? "On — Separate Vocals & Accompaniment" : "Off"}</span>
+          </label>
+          <p className="text-[11px] text-[#71717A]">
+            Separates vocals, bass, drums, and other instruments before transcription. Recommended for full songs with vocals and accompaniment.
+          </p>
         </div>
       </div>
 
@@ -331,15 +398,6 @@ export function TranscriptionConfigPanel({
               className="w-full h-8 rounded border border-[#27273A] bg-[#11111B] px-2"
             />
           </div>
-          <label className="sm:col-span-2 flex items-center gap-2 text-[#A1A1AA]">
-            <input
-              type="checkbox"
-              checked={settings.enable_source_separation}
-              onChange={(e) => setSettings({ ...settings, enable_source_separation: e.target.checked })}
-              className="accent-[#A78BFA]"
-            />
-            Attempt stem separation if configured on worker
-          </label>
         </div>
       )}
 
@@ -420,7 +478,11 @@ export function TranscriptionConfigPanel({
             <div className="rounded-lg border border-[#A78BFA]/30 bg-[#181825] p-2.5 text-xs text-[#E4E4E7]">
               Transcription mode changed — click{" "}
               <span className="font-medium text-[#A78BFA]">
-                {normalizeModeId(settings.mode) === "melody" ? "Re-Transcribe in Lead Melody Mode" : "Re-Transcribe Audio"}
+                {normalizeModeId(settings.mode) === "melody"
+                  ? "Re-Transcribe in Lead Melody Mode"
+                  : normalizeModeId(settings.mode) === "piano_vocal"
+                    ? "Re-Transcribe in Piano + Vocal Mode"
+                    : "Re-Transcribe Audio"}
               </span>{" "}
               below to apply the new mode.
             </div>
@@ -463,9 +525,11 @@ export function TranscriptionConfigPanel({
                 ? "Starting..."
                 : modeChangedSinceScore && normalizeModeId(settings.mode) === "melody"
                   ? "Re-Transcribe in Lead Melody Mode"
-                  : activeJob?.status === "completed"
-                    ? "Re-Transcribe Audio"
-                    : "Start AI Transcription"}
+                  : modeChangedSinceScore && normalizeModeId(settings.mode) === "piano_vocal"
+                    ? "Re-Transcribe in Piano + Vocal Mode"
+                    : activeJob?.status === "completed"
+                      ? "Re-Transcribe Audio"
+                      : "Start AI Transcription"}
             </Button>
           )}
         </div>

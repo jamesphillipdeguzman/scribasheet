@@ -31,6 +31,7 @@ from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit
 import httpx
 
 from app.audio.processor import get_preprocessing_profile, preprocess_to_wav, probe_media
+from app.audio.separator import detect_audio_source_route, separate_audio_stems
 from app.notation.analyzer import (
     estimate_key_signature,
     get_instrument_program_and_clef,
@@ -39,6 +40,7 @@ from app.notation.arrangement import simplify_arrangement
 from app.notation.beat_tracker import track_beats_and_downbeats
 from app.notation.generator import (
     _render_pdf_from_musicxml_via_musescore,
+    build_piano_vocal_score_data,
     build_score_data,
     clean_score_title,
     score_data_to_midi_bytes,
@@ -381,6 +383,37 @@ class RealTranscriptionHandler:
                 local_source, processed_wav, target_sr=target_sr, profile=prep_profile_name
             )
 
+            # 3b. Optional Demucs stem separation (30%)
+            sep_res = None
+            if settings.enable_source_separation:
+                self._check_cancelled(job_id, cancel_event)
+                report_progress(
+                    "separating",
+                    30,
+                    "Separating Stems",
+                    f"Separating vocals, bass, drums, and other instruments using Demucs ({settings.demucs_model}).",
+                )
+                sep_res = separate_audio_stems(
+                    local_source,
+                    tmp_path / "stems",
+                    enabled=True,
+                    model_name=settings.demucs_model,
+                    segment_sec=settings.demucs_segment_sec,
+                    overlap=settings.demucs_overlap,
+                )
+                if not sep_res.available:
+                    raise TranscriptionInferenceError(
+                        sep_res.error_code or "STEM_SEPARATION_FAILED",
+                        sep_res.message,
+                    )
+
+            source_route = detect_audio_source_route(
+                local_source,
+                sep_res.stems if sep_res and sep_res.available else None,
+                requested_source_type=settings.audio_source_type,
+                mode=settings.mode,
+            )
+
             # 4. Load AI model & run transcription inference (35% -> 60%)
             self._check_cancelled(job_id, cancel_event)
             report_progress(
@@ -393,46 +426,103 @@ class RealTranscriptionHandler:
                 verify_onnx_cpu_runtime(resolve_onnx_model_path())
 
             self._check_cancelled(job_id, cancel_event)
+            is_vocal_melody_route = (
+                sep_res is not None
+                and sep_res.available
+                and source_route.get("resolved_source_type") == "full_song"
+                and "vocals" in sep_res.stems
+            )
             report_progress(
                 "transcribing",
                 60,
-                "Running AI Transcription",
-                f"Detecting musical notes on CPU using {requested_engine}.",
+                "Transcribing Melody" if is_vocal_melody_route else "Running AI Transcription",
+                (
+                    "Transcribing separated vocals, bass, and accompaniment stems (drums excluded)."
+                    if is_vocal_melody_route
+                    else f"Detecting musical notes on CPU using {requested_engine}."
+                ),
             )
             program, _ = get_instrument_program_and_clef(settings.instrument)
-            exec_res = transcribe_with_provider(
-                processed_wav,
-                engine=requested_engine,
-                allow_fallback=allow_fallback,
-                provider=self._provider if requested_engine == self.requested_engine else None,
-                onset_threshold=settings.onset_threshold,
-                frame_threshold=settings.frame_threshold,
-                min_note_length_ms=settings.min_note_length_ms,
-                min_midi_pitch=settings.min_midi_pitch,
-                max_midi_pitch=settings.max_midi_pitch,
-                midi_program=program,
-                transpose_semitones=settings.transpose_semitones,
-                concert_pitch_hz=settings.concert_pitch_hz,
-            )
-            t_out = exec_res.output
+            refiner_cfg = NoteRefinerConfig()
 
-            if not t_out.notes:
+            def _run_transcribe(audio_target: Path, min_pitch: int, max_pitch: int, midi_prog: int):
+                return transcribe_with_provider(
+                    audio_target,
+                    engine=requested_engine,
+                    allow_fallback=allow_fallback,
+                    provider=self._provider if requested_engine == self.requested_engine else None,
+                    onset_threshold=settings.onset_threshold,
+                    frame_threshold=settings.frame_threshold,
+                    min_note_length_ms=settings.min_note_length_ms,
+                    min_midi_pitch=min_pitch,
+                    max_midi_pitch=max_pitch,
+                    midi_program=midi_prog,
+                    transpose_semitones=settings.transpose_semitones,
+                    concert_pitch_hz=settings.concert_pitch_hz,
+                )
+
+            vocal_refined_notes: list[Any] = []
+            bass_refined_notes: list[Any] = []
+            other_refined_notes: list[Any] = []
+
+            if is_vocal_melody_route and sep_res is not None:
+                vocal_wav = tmp_path / "stems_proc_vocals.wav"
+                preprocess_to_wav(sep_res.stems["vocals"], vocal_wav, target_sr=target_sr, profile="vocals")
+                exec_res = _run_transcribe(vocal_wav, settings.min_midi_pitch, settings.max_midi_pitch, 52)
+                vocal_raw = exec_res.output.notes
+                vocal_refined_notes = refine_detected_notes(vocal_raw, config=refiner_cfg).notes or vocal_raw
+
+                if "bass" in sep_res.stems:
+                    bass_wav = tmp_path / "stems_proc_bass.wav"
+                    preprocess_to_wav(sep_res.stems["bass"], bass_wav, target_sr=target_sr, profile="bass")
+                    bass_exec = _run_transcribe(bass_wav, max(24, settings.min_midi_pitch), min(64, settings.max_midi_pitch), 32)
+                    bass_raw = bass_exec.output.notes
+                    bass_refined_notes = refine_detected_notes(bass_raw, config=refiner_cfg).notes or bass_raw
+
+                if "other" in sep_res.stems:
+                    other_wav = tmp_path / "stems_proc_other.wav"
+                    preprocess_to_wav(sep_res.stems["other"], other_wav, target_sr=target_sr, profile=prep_profile_name)
+                    other_exec = _run_transcribe(other_wav, settings.min_midi_pitch, settings.max_midi_pitch, program)
+                    other_raw = other_exec.output.notes
+                    other_refined_notes = refine_detected_notes(other_raw, config=refiner_cfg).notes or other_raw
+
+                combined_stem_notes = sorted(
+                    [*vocal_refined_notes, *bass_refined_notes, *other_refined_notes],
+                    key=lambda n: (n.onset_sec, n.pitch_midi),
+                )
+                if not combined_stem_notes:
+                    exec_res = _run_transcribe(processed_wav, settings.min_midi_pitch, settings.max_midi_pitch, program)
+                    t_out = exec_res.output
+                    refinement = refine_detected_notes(t_out.notes, config=refiner_cfg)
+                    refined_notes = refinement.notes or t_out.notes
+                else:
+                    t_out = exec_res.output
+                    refinement = refine_detected_notes(combined_stem_notes, config=refiner_cfg)
+                    refined_notes = combined_stem_notes
+            else:
+                exec_res = _run_transcribe(processed_wav, settings.min_midi_pitch, settings.max_midi_pitch, program)
+                t_out = exec_res.output
+                if not t_out.notes:
+                    raise TranscriptionInferenceError(
+                        "NO_NOTES_DETECTED",
+                        "No valid musical notes were detected in the audio recording.",
+                    )
+                refinement = refine_detected_notes(t_out.notes, config=refiner_cfg)
+                refined_notes = refinement.notes or t_out.notes
+
+            if not refined_notes:
                 raise TranscriptionInferenceError(
                     "NO_NOTES_DETECTED",
                     "No valid musical notes were detected in the audio recording.",
                 )
-
-            refiner_cfg = NoteRefinerConfig()
-            refinement = refine_detected_notes(t_out.notes, config=refiner_cfg)
-            refined_notes = refinement.notes or t_out.notes
 
             # 5. Extract musical notes, tempo, key, and timing (70%)
             self._check_cancelled(job_id, cancel_event)
             report_progress(
                 "generating_notation",
                 70,
-                "Extracting Musical Notes",
-                f"Detected {len(t_out.notes)} raw note events ({len(refined_notes)} refined); analyzing tempo, key, and harmony.",
+                "Analyzing Harmony",
+                f"Detected {len(refined_notes)} refined note events; analyzing tempo, key, and harmony.",
             )
             time_sig = "4/4" if settings.time_signature == "auto" else settings.time_signature
             time_est = settings.time_signature == "auto"
@@ -461,18 +551,34 @@ class RealTranscriptionHandler:
                 tempo_diag = timing_map.provenance
             key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
 
+            def _serialize_note_list(note_list: list[Any]) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "pitch_midi": int(n.pitch_midi),
+                        "onset_sec": round(float(n.onset_sec), 4),
+                        "offset_sec": round(float(n.offset_sec), 4),
+                        "velocity": int(n.velocity),
+                        "confidence": float(n.confidence) if n.confidence is not None else None,
+                    }
+                    for n in note_list
+                ]
+
+            norm_mode = normalize_transcription_mode(settings.mode)
             lead_melody_active = is_lead_melody_mode(settings.mode)
+            piano_vocal_active = norm_mode == "piano_vocal"
+            melody_source_notes = vocal_refined_notes if vocal_refined_notes else refined_notes
             melody_result = None
-            if lead_melody_active:
+
+            if lead_melody_active or piano_vocal_active:
                 melody_result = extract_lead_melody(
-                    refined_notes,
+                    melody_source_notes,
                     tempo_bpm=tempo_bpm,
                     timing_map=timing_map,
                 )
-                arranged_notes = melody_result.notes or refined_notes
+                arranged_notes = melody_result.notes or melody_source_notes
                 arrangement_detail_value = settings.arrangement_detail
                 arrangement_stats: dict[str, Any] = {
-                    "mode": "lead_melody",
+                    "mode": norm_mode,
                     "input_note_count": len(refined_notes),
                     "output_note_count": len(arranged_notes),
                 }
@@ -485,16 +591,8 @@ class RealTranscriptionHandler:
                 arranged_notes = arrangement.notes or refined_notes
                 arrangement_detail_value = arrangement.arrangement_detail
                 arrangement_stats = arrangement.stats
-            raw_detected_snapshot = [
-                {
-                    "pitch_midi": int(n.pitch_midi),
-                    "onset_sec": round(float(n.onset_sec), 4),
-                    "offset_sec": round(float(n.offset_sec), 4),
-                    "velocity": int(n.velocity),
-                    "confidence": float(n.confidence) if n.confidence is not None else None,
-                }
-                for n in t_out.notes
-            ]
+
+            raw_detected_snapshot = _serialize_note_list(refined_notes if is_vocal_melody_route else t_out.notes)
 
             provenance = build_transcription_provenance(
                 source_audio_path=local_source,
@@ -521,31 +619,77 @@ class RealTranscriptionHandler:
                 "provenance": provenance,
                 "preprocessing_profile": prep_profile_name,
                 "is_silent_audio": proc_meta.is_silent,
-                "mode": normalize_transcription_mode(settings.mode),
+                "mode": norm_mode,
+                "audio_source_type": settings.audio_source_type,
+                "source_route": source_route,
+                "enable_source_separation": bool(settings.enable_source_separation),
+                "separation": {
+                    "enabled": bool(settings.enable_source_separation),
+                    "available": bool(sep_res and sep_res.available),
+                    "backend": sep_res.backend if sep_res else "none",
+                    "model_name": sep_res.model_name if sep_res else settings.demucs_model,
+                    "device": sep_res.device if sep_res else "cpu",
+                    "stems": sorted(sep_res.stems.keys()) if sep_res and sep_res.available else [],
+                    "message": sep_res.message if sep_res else "Source separation disabled.",
+                },
                 "concert_pitch_hz": settings.concert_pitch_hz,
             }
+            if vocal_refined_notes:
+                score_analysis["vocal_detected_notes"] = _serialize_note_list(vocal_refined_notes)
+            if bass_refined_notes:
+                score_analysis["bass_detected_notes"] = _serialize_note_list(bass_refined_notes)
+            if other_refined_notes:
+                score_analysis["other_detected_notes"] = _serialize_note_list(other_refined_notes)
             if melody_result is not None:
                 score_analysis["melody_extraction"] = melody_result.stats
                 score_analysis["melody_uncertain_segments"] = melody_result.uncertain_segments
 
-            score_data = build_score_data(
-                title=clean_score_title(job.get("project_title") or safe_name),
-                detected_notes=arranged_notes,
-                tempo_bpm=tempo_bpm,
-                tempo_estimated=tempo_est,
-                time_signature=time_sig,
-                time_signature_estimated=time_est,
-                key_signature=key_sig,
-                key_signature_estimated=key_est,
-                duration_seconds=proc_meta.duration_seconds,
-                instrument=settings.instrument,
-                quantization=settings.quantization,
-                timing_map=timing_map,
-                clef_override="treble" if lead_melody_active else None,
-                track_name_override="Lead Melody" if lead_melody_active else None,
-                chord_source_notes=refined_notes if lead_melody_active else None,
-                analysis=score_analysis,
-            )
+            if piano_vocal_active:
+                self._check_cancelled(job_id, cancel_event)
+                report_progress(
+                    "generating_notation",
+                    76,
+                    "Generating Accompaniment",
+                    "Generating playable piano accompaniment coordinated with melody and harmony.",
+                )
+                score_data = build_piano_vocal_score_data(
+                    title=clean_score_title(job.get("project_title") or safe_name),
+                    melody_notes=arranged_notes,
+                    chord_source_notes=refined_notes,
+                    bass_notes=bass_refined_notes or None,
+                    other_notes=other_refined_notes or None,
+                    tempo_bpm=tempo_bpm,
+                    tempo_estimated=tempo_est,
+                    time_signature=time_sig,
+                    time_signature_estimated=time_est,
+                    key_signature=key_sig,
+                    key_signature_estimated=key_est,
+                    duration_seconds=proc_meta.duration_seconds,
+                    quantization=settings.quantization,
+                    arrangement_detail=settings.arrangement_detail,
+                    timing_map=timing_map,
+                    analysis=score_analysis,
+                )
+            else:
+                score_data = build_score_data(
+                    title=clean_score_title(job.get("project_title") or safe_name),
+                    detected_notes=arranged_notes,
+                    tempo_bpm=tempo_bpm,
+                    tempo_estimated=tempo_est,
+                    time_signature=time_sig,
+                    time_signature_estimated=time_est,
+                    key_signature=key_sig,
+                    key_signature_estimated=key_est,
+                    duration_seconds=proc_meta.duration_seconds,
+                    instrument=settings.instrument,
+                    quantization=settings.quantization,
+                    timing_map=timing_map,
+                    clef_override="treble" if lead_melody_active else None,
+                    track_name_override="Lead Melody" if lead_melody_active else None,
+                    chord_source_notes=refined_notes if lead_melody_active else None,
+                    monophonic=lead_melody_active,
+                    analysis=score_analysis,
+                )
 
             # 6. Generate & validate MIDI (80%)
             self._check_cancelled(job_id, cancel_event)
@@ -626,7 +770,7 @@ class RealTranscriptionHandler:
                     "model": t_out.metadata.get("model"),
                     "note_count": len(score_data.notes),
                     "chord_count": len(score_data.chords),
-                    "arrangement_detail": arrangement.arrangement_detail,
+                    "arrangement_detail": arrangement_detail_value,
                     "quantization": settings.quantization,
                     "tempo_bpm": tempo_bpm,
                     "key_signature": key_sig,

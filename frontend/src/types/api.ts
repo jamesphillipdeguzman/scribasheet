@@ -80,6 +80,9 @@ export interface TranscriptionSettings {
   min_midi_pitch: number;
   max_midi_pitch: number;
   enable_source_separation: boolean;
+  audio_source_type?: "auto" | "full_song" | "solo_piano";
+  demucs_model?: string;
+  show_chord_symbols?: boolean;
 }
 
 export interface TranscriptionJob {
