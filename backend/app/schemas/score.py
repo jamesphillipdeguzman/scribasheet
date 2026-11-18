@@ -71,3 +71,4 @@ class ProjectScoreUpdateRequest(BaseModel):
 class ArrangementRegenerateRequest(BaseModel):
     arrangement_detail: Literal["simple", "balanced", "detailed"] = "balanced"
     quantization: str | None = None
+    mode: str | None = None

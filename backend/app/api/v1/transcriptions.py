@@ -75,6 +75,8 @@ def start_transcription(
         settings_json=payload.settings.model_dump(),
     )
     project.status = "processing"
+    project.transcription_mode = payload.settings.mode
+    project.instrument = payload.settings.instrument
     db.add(job)
     db.commit()
     db.refresh(job)

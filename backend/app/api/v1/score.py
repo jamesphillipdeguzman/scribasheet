@@ -11,6 +11,11 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
+from app.notation.melody import (
+    extract_lead_melody,
+    is_lead_melody_mode,
+    normalize_transcription_mode,
+)
 from app.schemas.score import (
     ArrangementRegenerateRequest,
     ProjectScoreResponse,
@@ -155,16 +160,38 @@ def regenerate_project_arrangement(
 
     refinement = refine_detected_notes(raw_notes, config=NoteRefinerConfig())
     refined_notes = refinement.notes or raw_notes
-    arrangement = simplify_arrangement(
-        refined_notes,
-        tempo_bpm=existing.tempo_bpm,
-        arrangement_detail=payload.arrangement_detail,
-    )
-    arranged_notes = arrangement.notes or refined_notes
-    quant = payload.quantization or str(analysis.get("quantization") or "sixteenth")
+    effective_mode = payload.mode or analysis.get("mode") or project.transcription_mode
+    lead_melody_active = is_lead_melody_mode(effective_mode)
+    if lead_melody_active:
+        melody_result = extract_lead_melody(
+            refined_notes,
+            tempo_bpm=existing.tempo_bpm,
+        )
+        arranged_notes = melody_result.notes or refined_notes
+        analysis["arrangement_detail"] = payload.arrangement_detail
+        analysis["arrangement"] = {
+            "mode": "lead_melody",
+            "input_note_count": len(refined_notes),
+            "output_note_count": len(arranged_notes),
+        }
+        analysis["melody_extraction"] = melody_result.stats
+        analysis["melody_uncertain_segments"] = melody_result.uncertain_segments
+    else:
+        arrangement = simplify_arrangement(
+            refined_notes,
+            tempo_bpm=existing.tempo_bpm,
+            arrangement_detail=payload.arrangement_detail,
+        )
+        arranged_notes = arrangement.notes or refined_notes
+        analysis["arrangement_detail"] = arrangement.arrangement_detail
+        analysis["arrangement"] = arrangement.stats
+        analysis.pop("melody_extraction", None)
+        analysis.pop("melody_uncertain_segments", None)
 
-    analysis["arrangement_detail"] = arrangement.arrangement_detail
-    analysis["arrangement"] = arrangement.stats
+    quant = payload.quantization or str(analysis.get("quantization") or "sixteenth")
+    if effective_mode:
+        analysis["mode"] = normalize_transcription_mode(str(effective_mode))
+
     analysis["quantization"] = quant
     analysis["refiner"] = refinement.stats
     analysis["note_count"] = len(arranged_notes)
@@ -192,6 +219,9 @@ def regenerate_project_arrangement(
         duration_seconds=existing.duration_seconds,
         instrument=project.instrument or "piano",
         quantization=quant,
+        clef_override="treble" if lead_melody_active else None,
+        track_name_override="Lead Melody" if lead_melody_active else None,
+        chord_source_notes=refined_notes if lead_melody_active else None,
         analysis=analysis,
     )
 

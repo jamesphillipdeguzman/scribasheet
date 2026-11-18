@@ -27,6 +27,11 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
+from app.notation.melody import (
+    extract_lead_melody,
+    is_lead_melody_mode,
+    normalize_transcription_mode,
+)
 from app.schemas.transcription import TranscriptionSettings
 from app.storage.service import storage_service
 from app.transcription.basic_pitch_provider import BasicPitchProvider
@@ -232,9 +237,29 @@ def run_transcription_pipeline(job_id: str) -> None:
             time_sig = "4/4" if settings.time_signature == "auto" else settings.time_signature
             time_est = settings.time_signature == "auto"
 
+            lead_melody_active = is_lead_melody_mode(settings.mode)
+            melody_result = None
+            final_notes = refined_notes
+            if lead_melody_active:
+                melody_result = extract_lead_melody(refined_notes, tempo_bpm=tempo_bpm)
+                final_notes = melody_result.notes or refined_notes
+
+            pipeline_analysis = {
+                "engine": t_out.engine,
+                "raw_note_count": len(t_out.notes),
+                "note_count": len(final_notes),
+                "refiner": refinement.stats,
+                "is_silent_audio": proc_meta.is_silent,
+                "separation": separation_note,
+                "mode": normalize_transcription_mode(settings.mode),
+            }
+            if melody_result is not None:
+                pipeline_analysis["melody_extraction"] = melody_result.stats
+                pipeline_analysis["melody_uncertain_segments"] = melody_result.uncertain_segments
+
             score_data = build_score_data(
                 title=project.title,
-                detected_notes=refined_notes,
+                detected_notes=final_notes,
                 tempo_bpm=tempo_bpm,
                 tempo_estimated=tempo_est,
                 time_signature=time_sig,
@@ -244,15 +269,11 @@ def run_transcription_pipeline(job_id: str) -> None:
                 duration_seconds=proc_meta.duration_seconds,
                 instrument=settings.instrument,
                 quantization=settings.quantization,
-                analysis={
-                    "engine": t_out.engine,
-                    "raw_note_count": len(t_out.notes),
-                    "note_count": len(refined_notes),
-                    "refiner": refinement.stats,
-                    "is_silent_audio": proc_meta.is_silent,
-                    "separation": separation_note,
-                    "mode": settings.mode,
-                },
+                clef_override="treble" if lead_melody_active else None,
+                track_name_override="Lead Melody" if lead_melody_active else None,
+                chord_source_notes=refined_notes if lead_melody_active else None,
+                monophonic=lead_melody_active,
+                analysis=pipeline_analysis,
             )
 
             musicxml_str = score_data_to_musicxml(score_data)

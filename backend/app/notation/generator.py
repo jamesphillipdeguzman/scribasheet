@@ -45,9 +45,13 @@ def build_score_data(
     quantization: str = "sixteenth",
     analysis: dict | None = None,
     timing_map: TimingMap | None = None,
+    clef_override: str | None = None,
+    track_name_override: str | None = None,
+    chord_source_notes: list[DetectedNote] | None = None,
 ) -> ScoreData:
-    program, clef = get_instrument_program_and_clef(instrument)
-    is_guitar = "guitar" in instrument.lower()
+    program, default_clef = get_instrument_program_and_clef(instrument)
+    clef = clef_override or default_clef
+    is_guitar = "guitar" in instrument.lower() and clef != "treble"
     effective_bpm = timing_map.tempo_bpm if timing_map is not None else tempo_bpm
     sec_per_beat = 60.0 / max(20.0, effective_bpm)
     min_dur = max(0.05, sec_per_beat * 0.125)
@@ -64,41 +68,45 @@ def build_score_data(
     }
     grid_ql = grid_map_ql.get(quantization, 0.25)
 
-    score_notes: list[ScoreNote] = []
-    for n in detected_notes:
-        if timing_map is not None and quantization != "none":
-            raw_onset_ql = max(0.0, timing_map.seconds_to_ql(n.onset_sec))
-            raw_offset_ql = max(raw_onset_ql + grid_ql, timing_map.seconds_to_ql(n.offset_sec))
-            q_onset_ql = max(0.0, round(raw_onset_ql / grid_ql) * grid_ql)
-            raw_dur_ql = max(grid_ql, raw_offset_ql - raw_onset_ql)
-            q_dur_ql = max(grid_ql, round(raw_dur_ql / grid_ql) * grid_ql)
-            onset = round(q_onset_ql * sec_per_beat, 4)
-            offset = round((q_onset_ql + q_dur_ql) * sec_per_beat, 4)
-        else:
-            onset = quantize_seconds(n.onset_sec, effective_bpm, quantization)
-            offset = quantize_seconds(n.offset_sec, effective_bpm, quantization)
-        if offset <= onset:
-            offset = round(onset + min_dur, 4)
-        str_num, fret_num = assign_guitar_tab(n.pitch_midi) if is_guitar else (None, None)
-        score_notes.append(
-            ScoreNote(
-                id=uuid.uuid4().hex[:12],
-                pitch_midi=n.pitch_midi,
-                onset_sec=onset,
-                offset_sec=offset,
-                raw_onset_sec=round(n.onset_sec, 4),
-                raw_offset_sec=round(n.offset_sec, 4),
-                velocity=n.velocity,
-                confidence=n.confidence,
-                track_index=0,
-                string_num=str_num,
-                fret_num=fret_num,
+    def _quantize_notes(raw_notes: list[DetectedNote]) -> list[ScoreNote]:
+        quantized: list[ScoreNote] = []
+        for n in raw_notes:
+            if timing_map is not None and quantization != "none":
+                raw_onset_ql = max(0.0, timing_map.seconds_to_ql(n.onset_sec))
+                raw_offset_ql = max(raw_onset_ql + grid_ql, timing_map.seconds_to_ql(n.offset_sec))
+                q_onset_ql = max(0.0, round(raw_onset_ql / grid_ql) * grid_ql)
+                raw_dur_ql = max(grid_ql, raw_offset_ql - raw_onset_ql)
+                q_dur_ql = max(grid_ql, round(raw_dur_ql / grid_ql) * grid_ql)
+                onset = round(q_onset_ql * sec_per_beat, 4)
+                offset = round((q_onset_ql + q_dur_ql) * sec_per_beat, 4)
+            else:
+                onset = quantize_seconds(n.onset_sec, effective_bpm, quantization)
+                offset = quantize_seconds(n.offset_sec, effective_bpm, quantization)
+            if offset <= onset:
+                offset = round(onset + min_dur, 4)
+            str_num, fret_num = assign_guitar_tab(n.pitch_midi) if is_guitar else (None, None)
+            quantized.append(
+                ScoreNote(
+                    id=uuid.uuid4().hex[:12],
+                    pitch_midi=n.pitch_midi,
+                    onset_sec=onset,
+                    offset_sec=offset,
+                    raw_onset_sec=round(n.onset_sec, 4),
+                    raw_offset_sec=round(n.offset_sec, 4),
+                    velocity=n.velocity,
+                    confidence=n.confidence,
+                    track_index=0,
+                    string_num=str_num,
+                    fret_num=fret_num,
+                )
             )
-        )
+        quantized.sort(key=lambda x: (x.onset_sec, x.pitch_midi))
+        return quantized
 
-    score_notes.sort(key=lambda x: (x.onset_sec, x.pitch_midi))
+    score_notes = _quantize_notes(detected_notes)
+    chord_notes = _quantize_notes(chord_source_notes) if chord_source_notes is not None else score_notes
     chords = detect_chords(
-        score_notes,
+        chord_notes,
         effective_bpm,
         time_signature,
         key_signature=key_signature,
@@ -107,7 +115,7 @@ def build_score_data(
 
     track = ScoreTrack(
         index=0,
-        name=instrument.replace("_", " ").title(),
+        name=track_name_override or instrument.replace("_", " ").title(),
         instrument=instrument,
         clef=clef,
         program=program,

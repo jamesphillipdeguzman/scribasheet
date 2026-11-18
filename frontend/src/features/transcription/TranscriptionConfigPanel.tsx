@@ -12,6 +12,7 @@ interface Props {
   workerOnline?: boolean | null;
   defaultInstrument: string;
   defaultMode: string;
+  initialMode?: string;
   initialArrangementDetail?: "simple" | "balanced" | "detailed";
   initialQuantization?: TranscriptionSettings["quantization"];
   onStart: (settings: TranscriptionSettings) => void;
@@ -20,9 +21,17 @@ interface Props {
   onRegenerateArrangement?: (
     arrangementDetail: "simple" | "balanced" | "detailed",
     quantization: TranscriptionSettings["quantization"],
+    mode?: string,
   ) => Promise<void> | void;
   isRegeneratingArrangement?: boolean;
   isStarting: boolean;
+}
+
+function normalizeModeId(mode?: string | null): string {
+  const cleaned = (mode || "").trim().toLowerCase();
+  if (!cleaned) return "single_instrument";
+  if (cleaned === "lead_melody") return "melody";
+  return cleaned;
 }
 
 export function TranscriptionConfigPanel({
@@ -32,6 +41,7 @@ export function TranscriptionConfigPanel({
   workerOnline = null,
   defaultInstrument,
   defaultMode,
+  initialMode,
   initialArrangementDetail,
   initialQuantization,
   onStart,
@@ -46,7 +56,7 @@ export function TranscriptionConfigPanel({
   const [quantizationManuallySet, setQuantizationManuallySet] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [settings, setSettings] = useState<TranscriptionSettings>({
-    mode: defaultMode || "single_instrument",
+    mode: normalizeModeId(initialMode || activeJob?.settings_json?.mode || defaultMode),
     instrument: defaultInstrument || "piano",
     arrangement_detail: initialArrangementDetail || activeJob?.settings_json?.arrangement_detail || "balanced",
     tempo_mode: "auto",
@@ -65,16 +75,28 @@ export function TranscriptionConfigPanel({
   });
 
   useEffect(() => {
+    const restoredMode = initialMode || activeJob?.settings_json?.mode;
     const restoredDetail = initialArrangementDetail || activeJob?.settings_json?.arrangement_detail;
     const restoredQuant = initialQuantization || activeJob?.settings_json?.quantization;
-    if (restoredDetail || restoredQuant) {
+    if (restoredMode || restoredDetail || restoredQuant) {
       setSettings((prev) => ({
         ...prev,
+        ...(restoredMode ? { mode: normalizeModeId(restoredMode) } : {}),
         ...(restoredDetail ? { arrangement_detail: restoredDetail } : {}),
         ...(restoredQuant ? { quantization: restoredQuant } : {}),
       }));
     }
-  }, [initialArrangementDetail, initialQuantization, activeJob?.settings_json?.arrangement_detail, activeJob?.settings_json?.quantization]);
+  }, [
+    initialMode,
+    initialArrangementDetail,
+    initialQuantization,
+    activeJob?.settings_json?.mode,
+    activeJob?.settings_json?.arrangement_detail,
+    activeJob?.settings_json?.quantization,
+  ]);
+
+  const currentScoreMode = normalizeModeId(initialMode || activeJob?.settings_json?.mode || defaultMode);
+  const modeChangedSinceScore = Boolean(hasScore && normalizeModeId(settings.mode) !== currentScoreMode);
 
   const isRunning =
     activeJob &&
@@ -204,11 +226,17 @@ export function TranscriptionConfigPanel({
           {hasScore && onRegenerateArrangement && (
             <button
               type="button"
-              disabled={isRegeneratingArrangement}
+              disabled={isRegeneratingArrangement || modeChangedSinceScore}
+              title={
+                modeChangedSinceScore
+                  ? "Transcription mode changed — click Re-Transcribe below to regenerate."
+                  : undefined
+              }
               onClick={() =>
                 onRegenerateArrangement(
                   settings.arrangement_detail || "balanced",
                   settings.quantization,
+                  settings.mode,
                 )
               }
               className="text-xs font-medium text-[#A78BFA] hover:underline disabled:opacity-50"
@@ -388,6 +416,15 @@ export function TranscriptionConfigPanel({
               Previous transcription job was cancelled.
             </div>
           )}
+          {modeChangedSinceScore && (
+            <div className="rounded-lg border border-[#A78BFA]/30 bg-[#181825] p-2.5 text-xs text-[#E4E4E7]">
+              Transcription mode changed — click{" "}
+              <span className="font-medium text-[#A78BFA]">
+                {normalizeModeId(settings.mode) === "melody" ? "Re-Transcribe in Lead Melody Mode" : "Re-Transcribe Audio"}
+              </span>{" "}
+              below to apply the new mode.
+            </div>
+          )}
           {confirmOfflineQueue ? (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 space-y-3 text-xs">
               <p className="text-amber-100">
@@ -422,7 +459,13 @@ export function TranscriptionConfigPanel({
               onClick={handlePrimaryClick}
             >
               <Play className="h-4 w-4" />
-              {isStarting ? "Starting..." : activeJob?.status === "completed" ? "Re-Transcribe Audio" : "Start AI Transcription"}
+              {isStarting
+                ? "Starting..."
+                : modeChangedSinceScore && normalizeModeId(settings.mode) === "melody"
+                  ? "Re-Transcribe in Lead Melody Mode"
+                  : activeJob?.status === "completed"
+                    ? "Re-Transcribe Audio"
+                    : "Start AI Transcription"}
             </Button>
           )}
         </div>

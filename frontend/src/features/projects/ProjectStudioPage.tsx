@@ -572,6 +572,10 @@ export function ProjectStudioPage() {
                   workerOnline={workerStatus?.worker_online ?? null}
                   defaultInstrument={project.instrument}
                   defaultMode={project.transcription_mode}
+                  initialMode={
+                    (scoreData?.analysis?.mode as string | undefined) ||
+                    activeJob?.settings_json?.mode
+                  }
                   initialArrangementDetail={
                     (scoreData?.analysis?.arrangement_detail as "simple" | "balanced" | "detailed" | undefined) ||
                     activeJob?.settings_json?.arrangement_detail
@@ -589,13 +593,14 @@ export function ProjectStudioPage() {
                     const retried = await api.retryJob(jobId);
                     setActiveJob(retried);
                   }}
-                  onRegenerateArrangement={async (arrangementDetail, quantization) => {
+                  onRegenerateArrangement={async (arrangementDetail, quantization, mode) => {
                     if (!projectId) return;
                     setIsRegeneratingArrangement(true);
                     try {
                       const updated = await api.regenerateArrangement(projectId, {
                         arrangement_detail: arrangementDetail,
                         quantization,
+                        mode,
                       });
                       setScoreData(updated.score_json);
                       setMusicxml(updated.musicxml);

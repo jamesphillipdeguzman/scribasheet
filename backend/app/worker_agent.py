@@ -44,6 +44,11 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
+from app.notation.melody import (
+    extract_lead_melody,
+    is_lead_melody_mode,
+    normalize_transcription_mode,
+)
 from app.notation.omr import OMRError, process_satb_pdf
 from app.notation.timing_map import build_timing_map
 from app.schemas.transcription import TranscriptionSettings
@@ -456,12 +461,30 @@ class RealTranscriptionHandler:
                 tempo_diag = timing_map.provenance
             key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
 
-            arrangement = simplify_arrangement(
-                refined_notes,
-                tempo_bpm=tempo_bpm,
-                arrangement_detail=settings.arrangement_detail,
-            )
-            arranged_notes = arrangement.notes or refined_notes
+            lead_melody_active = is_lead_melody_mode(settings.mode)
+            melody_result = None
+            if lead_melody_active:
+                melody_result = extract_lead_melody(
+                    refined_notes,
+                    tempo_bpm=tempo_bpm,
+                    timing_map=timing_map,
+                )
+                arranged_notes = melody_result.notes or refined_notes
+                arrangement_detail_value = settings.arrangement_detail
+                arrangement_stats: dict[str, Any] = {
+                    "mode": "lead_melody",
+                    "input_note_count": len(refined_notes),
+                    "output_note_count": len(arranged_notes),
+                }
+            else:
+                arrangement = simplify_arrangement(
+                    refined_notes,
+                    tempo_bpm=tempo_bpm,
+                    arrangement_detail=settings.arrangement_detail,
+                )
+                arranged_notes = arrangement.notes or refined_notes
+                arrangement_detail_value = arrangement.arrangement_detail
+                arrangement_stats = arrangement.stats
             raw_detected_snapshot = [
                 {
                     "pitch_midi": int(n.pitch_midi),
@@ -480,6 +503,31 @@ class RealTranscriptionHandler:
                 run_id=job_id,
             )
 
+            score_analysis: dict[str, Any] = {
+                "engine": t_out.engine,
+                "requested_engine": exec_res.requested_engine,
+                "actual_engine": exec_res.actual_engine,
+                "fallback_used": exec_res.fallback_used,
+                "fallback_reason": exec_res.fallback_reason,
+                "model": t_out.metadata.get("model"),
+                "raw_note_count": len(t_out.notes),
+                "note_count": len(arranged_notes),
+                "refiner": refinement.stats,
+                "arrangement_detail": arrangement_detail_value,
+                "arrangement": arrangement_stats,
+                "quantization": settings.quantization,
+                "raw_detected_notes": raw_detected_snapshot,
+                "tempo_diagnostics": tempo_diag,
+                "provenance": provenance,
+                "preprocessing_profile": prep_profile_name,
+                "is_silent_audio": proc_meta.is_silent,
+                "mode": normalize_transcription_mode(settings.mode),
+                "concert_pitch_hz": settings.concert_pitch_hz,
+            }
+            if melody_result is not None:
+                score_analysis["melody_extraction"] = melody_result.stats
+                score_analysis["melody_uncertain_segments"] = melody_result.uncertain_segments
+
             score_data = build_score_data(
                 title=clean_score_title(job.get("project_title") or safe_name),
                 detected_notes=arranged_notes,
@@ -493,27 +541,10 @@ class RealTranscriptionHandler:
                 instrument=settings.instrument,
                 quantization=settings.quantization,
                 timing_map=timing_map,
-                analysis={
-                    "engine": t_out.engine,
-                    "requested_engine": exec_res.requested_engine,
-                    "actual_engine": exec_res.actual_engine,
-                    "fallback_used": exec_res.fallback_used,
-                    "fallback_reason": exec_res.fallback_reason,
-                    "model": t_out.metadata.get("model"),
-                    "raw_note_count": len(t_out.notes),
-                    "note_count": len(arranged_notes),
-                    "refiner": refinement.stats,
-                    "arrangement_detail": arrangement.arrangement_detail,
-                    "arrangement": arrangement.stats,
-                    "quantization": settings.quantization,
-                    "raw_detected_notes": raw_detected_snapshot,
-                    "tempo_diagnostics": tempo_diag,
-                    "provenance": provenance,
-                    "preprocessing_profile": prep_profile_name,
-                    "is_silent_audio": proc_meta.is_silent,
-                    "mode": settings.mode,
-                    "concert_pitch_hz": settings.concert_pitch_hz,
-                },
+                clef_override="treble" if lead_melody_active else None,
+                track_name_override="Lead Melody" if lead_melody_active else None,
+                chord_source_notes=refined_notes if lead_melody_active else None,
+                analysis=score_analysis,
             )
 
             # 6. Generate & validate MIDI (80%)

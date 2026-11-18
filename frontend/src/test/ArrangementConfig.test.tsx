@@ -43,7 +43,7 @@ describe("TranscriptionConfigPanel Arrangement Detail & Quantization", () => {
 
     // Apply Arrangement regenerates without triggering ML transcription
     fireEvent.click(screen.getByRole("button", { name: /apply arrangement/i }));
-    expect(onRegenerate).toHaveBeenCalledWith("detailed", "eighth_triplet");
+    expect(onRegenerate).toHaveBeenCalledWith("detailed", "eighth_triplet", "single_instrument");
     expect(onStart).not.toHaveBeenCalled();
 
     // Start Transcription sends arrangement_detail & quantization in payload
@@ -76,5 +76,36 @@ describe("TranscriptionConfigPanel Arrangement Detail & Quantization", () => {
 
     expect((screen.getByLabelText(/arrangement detail/i) as HTMLSelectElement).value).toBe("simple");
     expect((screen.getByLabelText(/quantization/i) as HTMLSelectElement).value).toBe("eighth");
+  });
+
+  it("switches to Re-Transcribe in Lead Melody Mode and disables Apply Arrangement when mode changes", () => {
+    const onStart = vi.fn();
+    render(
+      <TranscriptionConfigPanel
+        hasMedia={true}
+        hasScore={true}
+        activeJob={null}
+        workerOnline={true}
+        defaultInstrument="piano"
+        defaultMode="single_instrument"
+        initialMode="single_instrument"
+        onStart={onStart}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onRegenerateArrangement={vi.fn()}
+        isStarting={false}
+      />,
+    );
+
+    const modeSelect = screen.getByDisplayValue("Single Instrument") as HTMLSelectElement;
+    fireEvent.change(modeSelect, { target: { value: "melody" } });
+    expect(modeSelect.value).toBe("melody");
+
+    const applyBtn = screen.getByRole("button", { name: /apply arrangement/i }) as HTMLButtonElement;
+    expect(applyBtn.disabled).toBe(true);
+
+    const retranscribeBtn = screen.getByRole("button", { name: /re-transcribe in lead melody mode/i });
+    fireEvent.click(retranscribeBtn);
+    expect(onStart).toHaveBeenCalledWith(expect.objectContaining({ mode: "melody" }));
   });
 });
