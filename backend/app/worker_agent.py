@@ -60,6 +60,7 @@ from app.transcription.basic_pitch_provider import (
     resolve_onnx_model_path,
     verify_onnx_cpu_runtime,
 )
+from app.transcription.lyrics import LyricsTranscriptionError, transcribe_lyrics
 from app.transcription.note_refiner import NoteRefinerConfig, refine_detected_notes
 from app.transcription.provider_factory import (
     get_target_sample_rate_for_engine,
@@ -364,7 +365,80 @@ class RealTranscriptionHandler:
             # 2. Validate audio (15%)
             self._check_cancelled(job_id, cancel_event)
             report_progress("validating", 15, "Validating Audio", "Inspecting audio stream metadata.")
-            probe_media(local_source)
+            probe_meta = probe_media(local_source)
+
+            if settings.mode == "lyrics_transcription":
+                self._check_cancelled(job_id, cancel_event)
+                report_progress(
+                    "preprocessing",
+                    25,
+                    "Preparing Audio for Lyrics",
+                    "Normalizing audio to 16 kHz mono WAV for lyrics recognition.",
+                )
+                lyrics_wav = tmp_path / "lyrics_input.wav"
+                proc_lyrics = preprocess_to_wav(local_source, lyrics_wav, target_sr=16000, profile="vocals")
+                target_audio = lyrics_wav
+                source_used: str = "original_audio"
+                demucs_fallback_used = False
+
+                if settings.enable_source_separation:
+                    self._check_cancelled(job_id, cancel_event)
+                    report_progress(
+                        "separating",
+                        40,
+                        "Separating Vocal Stem",
+                        "Isolating vocals with Demucs for cleaner lyrics recognition.",
+                    )
+                    sep_res = separate_audio_stems(
+                        local_source,
+                        tmp_path / "lyrics_stems",
+                        enabled=True,
+                        model_name=settings.demucs_model,
+                        segment_sec=settings.demucs_segment_sec,
+                        overlap=settings.demucs_overlap,
+                    )
+                    if sep_res.available and "vocals" in sep_res.stems:
+                        vocals_16k = tmp_path / "lyrics_vocals_16k.wav"
+                        preprocess_to_wav(sep_res.stems["vocals"], vocals_16k, target_sr=16000, profile="vocals")
+                        target_audio = vocals_16k
+                        source_used = "vocals_stem"
+                    elif allow_fallback:
+                        demucs_fallback_used = True
+                        source_used = "original_audio"
+                    else:
+                        raise TranscriptionInferenceError(
+                            sep_res.error_code or "STEM_SEPARATION_FAILED",
+                            sep_res.message,
+                        )
+
+                self._check_cancelled(job_id, cancel_event)
+                report_progress(
+                    "transcribing",
+                    70,
+                    "Recognizing Sung Lyrics",
+                    f"Running Whisper ({settings.whisper_model}) lyrics recognition.",
+                )
+                try:
+                    lyrics_data = transcribe_lyrics(
+                        target_audio,
+                        model_name=settings.whisper_model,
+                        language=settings.language,
+                        source_used=source_used,  # type: ignore[arg-type]
+                        demucs_requested=bool(settings.enable_source_separation),
+                        demucs_fallback_used=demucs_fallback_used,
+                    )
+                except LyricsTranscriptionError as exc:
+                    raise TranscriptionInferenceError(exc.code, exc.message) from exc
+
+                return JobCompletionResult(
+                    is_simulated=False,
+                    duration_seconds=proc_lyrics.duration_seconds or probe_meta.duration_seconds,
+                    metadata_json={
+                        "handler": "lyrics_whisper",
+                        "engine": "faster_whisper",
+                        "lyrics": lyrics_data.model_dump(),
+                    },
+                )
 
             # 3. Preprocess to target mono WAV (25%)
             self._check_cancelled(job_id, cancel_event)

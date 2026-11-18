@@ -487,9 +487,10 @@ def complete_job(
     xml_key = _validate_project_key(payload.musicxml_key, job.user_id, job.project_id)
 
     is_simulated = payload.is_simulated or payload.metadata_json.get("handler") == "phase_a_test"
+    is_lyrics_only = (job.settings_json or {}).get("mode") == "lyrics_transcription"
     validated_score: ScoreData | None = None
 
-    if not is_simulated:
+    if not is_simulated and not is_lyrics_only:
         if not payload.score_json:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -560,10 +561,65 @@ def complete_job(
         db.flush()
         xml_asset_id = xml_asset.id
 
-    if not is_simulated and validated_score is not None:
+    if is_lyrics_only:
+        raw_lyrics = (payload.metadata_json or {}).get("lyrics")
+        existing_score = db.query(ProjectScore).filter(ProjectScore.project_id == job.project_id).first()
+        force_overwrite = bool((job.settings_json or {}).get("force_overwrite", False))
+        if isinstance(raw_lyrics, dict):
+            if existing_score:
+                score_dict = dict(existing_score.score_json or {})
+                analysis = dict(score_dict.get("analysis") or {})
+                prior_lyrics = analysis.get("lyrics") if isinstance(analysis.get("lyrics"), dict) else None
+                if not (prior_lyrics and prior_lyrics.get("manually_edited") and not force_overwrite):
+                    analysis["lyrics"] = raw_lyrics
+                    score_dict["analysis"] = analysis
+                    existing_score.score_json = score_dict
+                    existing_score.version += 1
+                    if score_dict.get("notes"):
+                        try:
+                            from app.notation.generator import score_data_to_musicxml
+
+                            xml_str = score_data_to_musicxml(ScoreData(**score_dict))
+                            new_xml_key = storage_service.build_key(job.user_id, job.project_id, "musicxml", "score.musicxml")
+                            storage_service.save_bytes(
+                                new_xml_key,
+                                xml_str.encode("utf-8"),
+                                content_type="application/vnd.recordare.musicxml+xml",
+                            )
+                            existing_score.musicxml_path = new_xml_key
+                        except Exception:
+                            pass
+                persisted_score_version = existing_score.version
+            else:
+                minimal_score = ScoreData(
+                    title=project.title if project else "Lyrics Transcription",
+                    tracks=[],
+                    notes=[],
+                    chords=[],
+                    analysis={"lyrics": raw_lyrics},
+                )
+                db.add(
+                    ProjectScore(
+                        project_id=job.project_id,
+                        version=1,
+                        score_json=minimal_score.model_dump(),
+                        musicxml_path=None,
+                        midi_path=None,
+                    )
+                )
+                persisted_score_version = 1
+        else:
+            persisted_score_version = existing_score.version if existing_score else None
+    elif not is_simulated and validated_score is not None:
         score_dict = validated_score.model_dump()
         existing_score = db.query(ProjectScore).filter(ProjectScore.project_id == job.project_id).first()
         if existing_score:
+            # Preserve existing recognized/edited lyrics across music re-transcription
+            old_analysis = (existing_score.score_json or {}).get("analysis") or {}
+            if isinstance(old_analysis, dict) and isinstance(old_analysis.get("lyrics"), dict):
+                new_analysis = dict(score_dict.get("analysis") or {})
+                new_analysis.setdefault("lyrics", old_analysis["lyrics"])
+                score_dict["analysis"] = new_analysis
             existing_score.version += 1
             existing_score.score_json = score_dict
             if xml_key:

@@ -272,7 +272,6 @@ def run_transcription_pipeline(job_id: str) -> None:
                 clef_override="treble" if lead_melody_active else None,
                 track_name_override="Lead Melody" if lead_melody_active else None,
                 chord_source_notes=refined_notes if lead_melody_active else None,
-                monophonic=lead_melody_active,
                 analysis=pipeline_analysis,
             )
 

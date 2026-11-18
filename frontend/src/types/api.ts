@@ -190,3 +190,37 @@ export interface ExportRecord {
   created_at: string;
   completed_at: string | null;
 }
+
+export interface LyricWord {
+  text: string;
+  start_sec: number;
+  end_sec: number;
+  confidence?: number | null;
+  needs_review?: boolean;
+}
+
+export interface LyricSegment {
+  id: string;
+  text: string;
+  start_sec: number;
+  end_sec: number;
+  confidence?: number | null;
+  needs_review?: boolean;
+  words: LyricWord[];
+}
+
+export interface LyricsData {
+  text: string;
+  segments: LyricSegment[];
+  language: string | null;
+  language_probability?: number | null;
+  source_used: "vocals_stem" | "original_audio" | "manual";
+  demucs_requested: boolean;
+  demucs_fallback_used: boolean;
+  model_name: string;
+  device: string;
+  has_word_timestamps: boolean;
+  uncertain_segments: Array<Record<string, unknown>>;
+  manually_edited: boolean;
+  updated_at: string | null;
+}

@@ -1,5 +1,6 @@
 import type {
   ExportRecord,
+  LyricsData,
   MediaAsset,
   Project,
   ProjectListResponse,
@@ -290,7 +291,14 @@ export const api = {
     });
   },
   checkExternalUrl: (url: string) =>
-    request<{ supported: boolean; reason: string }>("/uploads/url-check", {
+    request<{
+      supported: boolean;
+      reason: string;
+      is_youtube?: boolean;
+      video_id?: string | null;
+      title?: string | null;
+      author_name?: string | null;
+    }>("/uploads/url-check", {
       method: "POST",
       body: JSON.stringify({ url }),
     }),
@@ -332,6 +340,51 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
+
+  // Lyrics
+  getLyrics: (projectId: string) => request<LyricsData>(`/projects/${projectId}/lyrics`),
+  updateLyrics: (
+    projectId: string,
+    data: { text: string; segments?: LyricsData["segments"]; language?: string | null },
+  ) =>
+    request<LyricsData>(`/projects/${projectId}/lyrics`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  transcribeLyrics: (
+    projectId: string,
+    data: {
+      enable_source_separation?: boolean;
+      whisper_model?: string;
+      language?: string | null;
+      force_overwrite?: boolean;
+    },
+  ) =>
+    request<TranscriptionJob>(`/projects/${projectId}/lyrics/transcribe`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  exportLyrics: async (projectId: string, format: "txt" | "timestamped_txt" | "srt", filename: string) => {
+    const { accessToken } = getStoredTokens();
+    const res = await fetch(
+      `${API_BASE_URL}/projects/${projectId}/lyrics/export?format=${encodeURIComponent(format)}`,
+      {
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(res.status, "Failed to export lyrics.");
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
   exportSatbAudio: async (
     projectId: string,
     payload: {

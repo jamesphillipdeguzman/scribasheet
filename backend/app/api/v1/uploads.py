@@ -280,15 +280,61 @@ def check_external_video_url(
     payload: VideoUrlCheckRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Honest evaluation of external media URLs without bypassing DRM or platform restrictions."""
-    parsed = urlparse(payload.url.strip())
+    """Evaluate external media URLs and fetch public YouTube oEmbed metadata without bypassing DRM."""
+    raw_url = payload.url.strip()
+    parsed = urlparse(raw_url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Please enter a valid http/https URL.")
 
     host = parsed.netloc.lower()
+    if "youtube.com" in host or "youtu.be" in host:
+        from urllib.parse import parse_qs
+
+        import httpx
+
+        video_id: str | None = None
+        if "youtu.be" in host:
+            video_id = parsed.path.strip("/").split("/")[0] or None
+        elif parsed.path.startswith("/shorts/"):
+            video_id = parsed.path.split("/shorts/", 1)[1].split("/")[0] or None
+        else:
+            video_id = parse_qs(parsed.query).get("v", [None])[0]
+
+        if not video_id or len(video_id) < 6:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Please enter a valid YouTube video URL (youtube.com/watch?v=... or youtu.be/...).",
+            )
+
+        title: str | None = None
+        author_name: str | None = None
+        try:
+            oembed_resp = httpx.get(
+                "https://www.youtube.com/oembed",
+                params={"url": f"https://www.youtube.com/watch?v={video_id}", "format": "json"},
+                timeout=3.0,
+            )
+            if oembed_resp.status_code == 200:
+                meta = oembed_resp.json()
+                title = meta.get("title")
+                author_name = meta.get("author_name")
+        except Exception:
+            pass
+
+        return {
+            "supported": False,
+            "is_youtube": True,
+            "video_id": video_id,
+            "title": title,
+            "author_name": author_name,
+            "reason": (
+                "Direct audio extraction from YouTube is disabled because ScribaSheet respects platform "
+                "terms of service and DRM protections. Please upload an authorized local audio/video file "
+                "(MP3, WAV, FLAC, M4A, or MP4) directly."
+            ),
+        }
+
     restricted_hosts = (
-        "youtube.com",
-        "youtu.be",
         "spotify.com",
         "music.apple.com",
         "soundcloud.com",
@@ -298,6 +344,7 @@ def check_external_video_url(
     if any(h in host for h in restricted_hosts):
         return {
             "supported": False,
+            "is_youtube": False,
             "reason": (
                 f"Direct ingestion from {host} is not supported because ScribaSheet respects platform "
                 "terms of service, authentication, and DRM protections. Please export or record the audio "
@@ -307,6 +354,7 @@ def check_external_video_url(
 
     return {
         "supported": False,
+        "is_youtube": False,
         "reason": (
             "Remote URL fetching is disabled for security and copyright compliance. "
             "Please download your own authorized audio/video file and upload it directly."

@@ -159,7 +159,11 @@ export function MediaUploader({
     if (!externalUrl.trim()) return;
     try {
       const res = await api.checkExternalUrl(externalUrl.trim());
-      setUrlNotice(res.reason);
+      if (res.is_youtube && res.title) {
+        setUrlNotice(`YouTube video: "${res.title}"${res.author_name ? ` (${res.author_name})` : ""} — ${res.reason}`);
+      } else {
+        setUrlNotice(res.reason);
+      }
     } catch (err) {
       setUrlNotice(err instanceof ApiError ? err.message : "Could not check URL.");
     }

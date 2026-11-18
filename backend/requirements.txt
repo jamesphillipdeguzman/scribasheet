@@ -39,9 +39,9 @@ basic-pitch>=0.4.0; python_version < "3.12"
 #   pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
 #   pip install moduleconf setuptools
 #   pip install --no-deps transkun==2.0.1
-# Optional Demucs stem separation (isolated local Windows worker venv only, not Railway API):
+# Optional Demucs + faster-whisper (isolated local Windows worker venv only, not Railway API):
 #   python -m venv backend/.venv_demucs
-#   backend/.venv_demucs/Scripts/pip install demucs torch torchaudio soundfile
+#   backend/.venv_demucs/Scripts/pip install demucs faster-whisper torch torchaudio soundfile
 
 # PDF & Export Rendering
 reportlab>=4.2.5

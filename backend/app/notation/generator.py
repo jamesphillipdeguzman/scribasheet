@@ -708,7 +708,67 @@ def _attach_ottava_spanners(
     return attached
 
 
-def score_data_to_musicxml(score: ScoreData, *, include_chords: bool = True) -> str:
+def _attach_lyrics_to_part(
+    part: music21.stream.Part,
+    lyrics_dict: dict,
+    track_notes: list[ScoreNote],
+    tempo_bpm: float,
+) -> int:
+    """Attach aligned MusicXML <lyric> elements to melody notes without altering note timing."""
+    if not lyrics_dict or not track_notes:
+        return 0
+    try:
+        from app.notation.lyrics_alignment import align_lyrics_to_notes
+        from app.schemas.lyrics import LyricsData
+
+        lyrics_obj = LyricsData(**lyrics_dict)
+    except Exception:
+        return 0
+
+    alignment = align_lyrics_to_notes(lyrics_obj, track_notes)
+    if not alignment.by_onset_sec:
+        return 0
+
+    beats_per_sec = max(20.0, float(tempo_bpm or 120.0)) / 60.0
+    # Flatten notes with their offset in quarterLengths relative to part start
+    m21_notes: list[tuple[float, music21.note.Note]] = []
+    for el in part.recurse().notes:
+        if isinstance(el, music21.note.Note):
+            offset_ql = float(el.getOffsetInHierarchy(part))
+            m21_notes.append((offset_ql / beats_per_sec, el))
+    m21_notes.sort(key=lambda pair: pair[0])
+
+    attached = 0
+    used_idx: set[int] = set()
+    search_start = 0
+    for target_sec, item in alignment.by_onset_sec:
+        best_i: int | None = None
+        best_d = float("inf")
+        for i in range(search_start, len(m21_notes)):
+            if i in used_idx:
+                continue
+            d = abs(m21_notes[i][0] - target_sec)
+            if d < best_d:
+                best_d = d
+                best_i = i
+            if m21_notes[i][0] - target_sec > 0.35:
+                break
+        if best_i is not None and best_d <= 0.35:
+            note_el = m21_notes[best_i][1]
+            lyr = music21.note.Lyric(text=item.text, syllabic=item.syllabic)
+            note_el.lyrics.append(lyr)
+            used_idx.add(best_i)
+            search_start = best_i + 1
+            attached += 1
+    return attached
+
+
+def score_data_to_musicxml(
+    score: ScoreData,
+    *,
+    include_chords: bool = True,
+    include_lyrics: bool = True,
+) -> str:
     m21_score = music21.stream.Score()
     m21_score.metadata = music21.metadata.Metadata()
     clean_title = clean_score_title(score.title)
@@ -782,6 +842,8 @@ def score_data_to_musicxml(score: ScoreData, *, include_chords: bool = True) -> 
                 _attach_ottava_spanners(p)
             if include_chords and (len(tracks) == 1 or track.index == 0):
                 _attach_chord_symbols(p, score.chords)
+            if include_lyrics and track.index == 0 and isinstance(score.analysis, dict) and score.analysis.get("lyrics"):
+                _attach_lyrics_to_part(p, score.analysis["lyrics"], track_notes, score.tempo_bpm)
             m21_score.insert(0, p)
 
     exporter = music21.musicxml.m21ToXml.GeneralObjectExporter(m21_score)

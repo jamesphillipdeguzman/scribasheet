@@ -6,6 +6,7 @@ import {
   Check,
   Download,
   FileMusic,
+  FileText,
   Guitar,
   Loader2,
   PanelLeftClose,
@@ -23,6 +24,7 @@ import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ChordAndTabPanel } from "@/features/editor/ChordAndTabPanel";
 import { ExportCenter } from "@/features/editor/ExportCenter";
+import { LyricsPanel } from "@/features/editor/LyricsPanel";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { SATBMixerPanel } from "@/features/editor/SATBMixerPanel";
 import { SheetMusicViewer } from "@/features/editor/SheetMusicViewer";
@@ -32,7 +34,7 @@ import { MediaUploader } from "@/features/uploads/MediaUploader";
 import { api, ApiError, WS_BASE_URL, getStoredTokens } from "@/services/api";
 import type { ScoreData, ScoreNote, TranscriptionJob, TranscriptionSettings } from "@/types/api";
 
-type StudioTab = "notation" | "pianoroll" | "chords" | "exports";
+type StudioTab = "notation" | "pianoroll" | "chords" | "lyrics" | "exports";
 
 export function ProjectStudioPage() {
   const { projectId = "" } = useParams();
@@ -644,6 +646,7 @@ export function ProjectStudioPage() {
                   { id: "notation" as const, label: "Sheet Music", icon: FileMusic },
                   { id: "pianoroll" as const, label: "Piano Roll Editor", icon: Piano },
                   { id: "chords" as const, label: "Chords & Guitar Tab", icon: Guitar },
+                  { id: "lyrics" as const, label: "Lyrics", icon: FileText },
                   { id: "exports" as const, label: "Export Center", icon: Download },
                 ].map((t) => {
                   const Icon = t.icon;
@@ -773,6 +776,18 @@ export function ProjectStudioPage() {
                     Run AI transcription to inspect detected chords and guitar tablature.
                   </div>
                 ))}
+
+              {activeTab === "lyrics" && (
+                <LyricsPanel
+                  projectId={project.id}
+                  projectTitle={project.title}
+                  hasMedia={Boolean(originalAsset)}
+                  activeJob={activeJob}
+                  onJobStarted={(job) => setActiveJob(job)}
+                  onSeek={(sec) => setPlayheadSec(sec)}
+                  onLyricsSaved={() => loadScore()}
+                />
+              )}
 
               {activeTab === "exports" && (
                 <ExportCenter
