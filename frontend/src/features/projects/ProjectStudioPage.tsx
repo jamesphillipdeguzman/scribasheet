@@ -221,6 +221,50 @@ export function ProjectStudioPage() {
     };
   }, [activeJob?.id, activeJob?.status, workerStatus?.worker_online, projectId, queryClient, loadScore]);
 
+  const isJobRunning = Boolean(
+    activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status),
+  );
+
+  useEffect(() => {
+    if (!isJobRunning) return;
+    setRuntimeNowMs(Date.now());
+    const timer = window.setInterval(() => setRuntimeNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [isJobRunning, activeJob?.id, activeJob?.started_at, activeJob?.created_at]);
+
+  const formatRuntimeMmSs = (totalSeconds: number): string => {
+    const clamped = Math.max(0, Math.floor(totalSeconds));
+    const mins = Math.floor(clamped / 60);
+    const secs = clamped % 60;
+    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  };
+
+  const runtimeBadgeText = (() => {
+    if (!activeJob) return null;
+    const startIso = activeJob.started_at || activeJob.created_at;
+    const startMs = startIso ? Date.parse(startIso) : NaN;
+    if (!Number.isFinite(startMs)) return null;
+
+    if (isJobRunning) {
+      return `Elapsed: ${formatRuntimeMmSs((runtimeNowMs - startMs) / 1000)}`;
+    }
+    if (activeJob.status === "completed" && activeJob.completed_at) {
+      const completedMs = Date.parse(activeJob.completed_at);
+      if (!Number.isFinite(completedMs)) return null;
+      return `Completed in ${formatRuntimeMmSs((completedMs - startMs) / 1000)}`;
+    }
+    return null;
+  })();
+
+  const isGenuineSatb = Boolean(
+    scoreData &&
+      (project?.transcription_mode === "satb_pdf" ||
+        scoreData.analysis?.mode === "satb_pdf" ||
+        Boolean(scoreData.analysis?.satb)),
+  );
+  const canShowMixer = Boolean(scoreData && (isGenuineSatb || scoreData.tracks.length > 1));
+  const mixerOpen = showPartMixerOverride ?? isGenuineSatb;
+
   // Warn on unsaved changes before unload
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
