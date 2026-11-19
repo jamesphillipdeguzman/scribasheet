@@ -23,6 +23,7 @@ from app.models import (
     User,
     WorkerNode,
 )
+from app.schemas.common import serialize_utc_z
 from app.schemas.score import ScoreData
 from app.storage.service import storage_service
 from app.workers.ws_manager import job_ws_manager
@@ -386,7 +387,7 @@ def claim_next_job(
             "engine": job.engine,
             "settings": job.settings_json,
             "attempt_count": job.attempt_count,
-            "lease_expires_at": job.lease_expires_at.isoformat() if job.lease_expires_at else None,
+            "lease_expires_at": serialize_utc_z(job.lease_expires_at) if job.lease_expires_at else None,
             "source_download_url": source_download_url,
             "source_filename": source_asset.original_filename if source_asset else None,
             "artifact_upload_urls": artifact_targets,
@@ -412,7 +413,7 @@ def heartbeat_job(
     return {
         "job_id": job.id,
         "status": job.status,
-        "lease_expires_at": job.lease_expires_at.isoformat(),
+        "lease_expires_at": serialize_utc_z(job.lease_expires_at) if job.lease_expires_at else None,
     }
 
 

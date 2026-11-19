@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from app.schemas.common import serialize_utc_z
 from app.schemas.lyrics import LyricsData, LyricSegment, LyricWord
 
 logger = logging.getLogger(__name__)
@@ -212,7 +213,7 @@ def _build_lyrics_data_from_raw(
         original_segments=segments,
         processing_metadata=processing_metadata or {},
         manually_edited=False,
-        updated_at=datetime.now(UTC).isoformat(),
+        updated_at=serialize_utc_z(datetime.now(UTC)),
     )
 
 

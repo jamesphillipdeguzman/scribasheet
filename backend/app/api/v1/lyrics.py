@@ -19,6 +19,7 @@ from app.models import (
     User,
 )
 from app.notation.generator import score_data_to_musicxml
+from app.schemas.common import serialize_utc_z
 from app.schemas.lyrics import LyricsData, LyricsTranscribeRequest, LyricsUpdateRequest
 from app.schemas.score import ScoreData
 from app.schemas.transcription import TranscriptionJobResponse
@@ -133,7 +134,7 @@ def update_project_lyrics(
             "original_text": original_text,
             "original_segments": original_segments,
             "manually_edited": True,
-            "updated_at": datetime.now(UTC).isoformat(),
+            "updated_at": serialize_utc_z(datetime.now(UTC)),
         }
     )
 

@@ -12,17 +12,70 @@ export function formatDuration(seconds: number | null | undefined): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
-export function formatLocalDateTime(value?: string | null): string {
-  if (!value || !value.trim()) return "—";
+export const DEFAULT_APP_TIMEZONE = "Asia/Manila";
+
+export function getAppTimeZone(): string {
+  const configured = import.meta.env.VITE_APP_TIMEZONE?.trim();
+  if (!configured) return DEFAULT_APP_TIMEZONE;
+  try {
+    new Intl.DateTimeFormat("en-PH", { timeZone: configured });
+    return configured;
+  } catch {
+    return DEFAULT_APP_TIMEZONE;
+  }
+}
+
+function parseUtcTimestamp(value?: string | null): Date | null {
+  if (!value || !value.trim()) return null;
   const trimmed = value.trim();
   const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed);
   const normalized = hasTimezone ? trimmed : `${trimmed}Z`;
   const date = new Date(normalized);
-  if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat(undefined, {
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+export function formatDateTime(
+  value?: string | null,
+  options?: Intl.DateTimeFormatOptions
+): string {
+  const date = parseUtcTimestamp(value);
+  if (!date) return "—";
+  return new Intl.DateTimeFormat("en-PH", {
+    timeZone: getAppTimeZone(),
     dateStyle: "short",
     timeStyle: "medium",
+    ...options,
   }).format(date);
+}
+
+export function formatDate(
+  value?: string | null,
+  options?: Intl.DateTimeFormatOptions
+): string {
+  const date = parseUtcTimestamp(value);
+  if (!date) return "—";
+  return new Intl.DateTimeFormat("en-PH", {
+    timeZone: getAppTimeZone(),
+    dateStyle: "medium",
+    ...options,
+  }).format(date);
+}
+
+export function formatTime(
+  value?: string | null,
+  options?: Intl.DateTimeFormatOptions
+): string {
+  const date = parseUtcTimestamp(value);
+  if (!date) return "—";
+  return new Intl.DateTimeFormat("en-PH", {
+    timeZone: getAppTimeZone(),
+    timeStyle: "medium",
+    ...options,
+  }).format(date);
+}
+
+export function formatLocalDateTime(value?: string | null): string {
+  return formatDateTime(value);
 }
 
 export function formatBytes(bytes: number): string {

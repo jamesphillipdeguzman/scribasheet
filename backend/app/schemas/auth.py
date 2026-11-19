@@ -1,6 +1,6 @@
-from datetime import datetime
-
 from pydantic import BaseModel, EmailStr, Field
+
+from app.schemas.common import UTCDatetime
 
 
 class RegisterRequest(BaseModel):
@@ -39,8 +39,8 @@ class UserResponse(BaseModel):
     plan_tier: str
     is_unlimited: bool = False
     plan_label: str = "FREE"
-    created_at: datetime
-    updated_at: datetime
+    created_at: UTCDatetime
+    updated_at: UTCDatetime
 
     model_config = {"from_attributes": True}
 
