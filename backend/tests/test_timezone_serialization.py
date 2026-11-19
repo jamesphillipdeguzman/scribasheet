@@ -75,10 +75,12 @@ def test_response_schemas_serialize_all_datetimes_with_utc_z():
     job_json = TranscriptionJobResponse(
         id="j-1",
         project_id="p-1",
+        user_id="u-1",
         status="completed",
         progress=100,
         current_stage="Completed",
         engine="basic_pitch",
+        settings_json={},
         started_at=naive_dt,
         completed_at=manila_dt,
         created_at=naive_dt,
