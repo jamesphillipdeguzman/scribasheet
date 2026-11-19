@@ -183,7 +183,7 @@ def build_piano_vocal_score_data(
     analysis: dict | None = None,
     timing_map: TimingMap | None = None,
 ) -> ScoreData:
-    """Build a synchronized 2-staff Piano + Vocal ScoreData (Track 0 = Melody, Track 1 = Piano Accompaniment)."""
+    """Build a synchronized 3-staff Piano + Vocal ScoreData (Track 0 = Vocal Melody, Track 1 = Piano Grand Staff)."""
     from app.notation.accompaniment import generate_piano_accompaniment
 
     melody_score = build_score_data(
@@ -232,7 +232,7 @@ def build_piano_vocal_score_data(
         instrument="piano",
         quantization=quantization,
         timing_map=timing_map,
-        clef_override="bass",
+        clef_override="grand",
         track_name_override="Piano Accompaniment",
     )
 
@@ -248,7 +248,7 @@ def build_piano_vocal_score_data(
         index=1,
         name="Piano Accompaniment",
         instrument="piano",
-        clef="bass",
+        clef="grand",
         program=0,
         muted=False,
     )
@@ -322,25 +322,86 @@ def _parse_key_to_music21(key_str: str) -> music21.key.Key:
 
 
 def _split_rh_lh_notes(notes: list[ScoreNote]) -> tuple[list[ScoreNote], list[ScoreNote]]:
-    """Assign piano notes to RH (treble) and LH (bass) with hysteresis near Middle C."""
+    """Assign piano notes to RH (treble) and LH (bass) using pitch, chord voicing, and phrase context."""
+    ordered = sorted(notes, key=lambda x: (x.onset_sec, x.pitch_midi))
+    if not ordered:
+        return [], []
+
+    clusters: list[list[ScoreNote]] = [[ordered[0]]]
+    for n in ordered[1:]:
+        if n.onset_sec - clusters[-1][0].onset_sec <= 0.035:
+            clusters[-1].append(n)
+        else:
+            clusters.append([n])
+
     treble: list[ScoreNote] = []
     bass: list[ScoreNote] = []
     last_hand = "treble"
-    for n in sorted(notes, key=lambda x: (x.onset_sec, x.pitch_midi)):
-        if n.pitch_midi >= 63:
-            hand = "treble"
-        elif n.pitch_midi <= 56:
-            hand = "bass"
-        else:
-            # Hysteresis zone (57..62): keep with recent hand unless a simultaneous lower/higher note exists
-            hand = last_hand if n.pitch_midi >= 60 or last_hand == "treble" else "bass"
-            if n.pitch_midi < 60 and last_hand == "bass":
+
+    for cluster in clusters:
+        if len(cluster) == 1:
+            n = cluster[0]
+            if n.pitch_midi >= 62:
+                hand = "treble"
+            elif n.pitch_midi <= 57:
                 hand = "bass"
-        last_hand = hand
-        if hand == "treble":
-            treble.append(n)
-        else:
-            bass.append(n)
+            else:
+                hand = last_hand if (n.pitch_midi >= 60 or last_hand == "treble") else "bass"
+            last_hand = hand
+            (treble if hand == "treble" else bass).append(n)
+            continue
+
+        lo = cluster[0].pitch_midi
+        hi = cluster[-1].pitch_midi
+        if lo >= 60:
+            treble.extend(cluster)
+            last_hand = "treble"
+            continue
+        if hi <= 55:
+            bass.extend(cluster)
+            last_hand = "bass"
+            continue
+
+        # Compact single-hand chord with no low bass root below G3: keep chord intact
+        if hi - lo <= 7 and lo >= 52:
+            mean_pitch = sum(n.pitch_midi for n in cluster) / len(cluster)
+            hand = "bass" if mean_pitch < 58.5 else ("treble" if mean_pitch >= 60.0 else last_hand)
+            last_hand = hand
+            if hand == "treble":
+                treble.extend(cluster)
+            else:
+                bass.extend(cluster)
+            continue
+
+        # Multi-hand voicing: find the most natural split index between LH and RH
+        best_split = 1
+        best_score = float("-inf")
+        for idx in range(1, len(cluster)):
+            lh_part = cluster[:idx]
+            rh_part = cluster[idx:]
+            lh_span = lh_part[-1].pitch_midi - lh_part[0].pitch_midi
+            rh_span = rh_part[-1].pitch_midi - rh_part[0].pitch_midi
+            gap = rh_part[0].pitch_midi - lh_part[-1].pitch_midi
+            score = gap * 1.5
+            # Prefer RH starting near or above C4 (60), or at least >= 52 when LH span would exceed an octave
+            if rh_part[0].pitch_midi >= 60:
+                score += 4.0
+            elif rh_part[0].pitch_midi >= 55:
+                score += 1.5
+            if lh_part[-1].pitch_midi < 60:
+                score += 2.5
+            if lh_span > 12:
+                score -= (lh_span - 12) * 3.0
+            if rh_span > 12:
+                score -= (rh_span - 12) * 3.0
+            if score > best_score:
+                best_score = score
+                best_split = idx
+
+        bass.extend(cluster[:best_split])
+        treble.extend(cluster[best_split:])
+        last_hand = "treble"
+
     return treble, bass
 
 
@@ -490,17 +551,99 @@ def _to_music21_ql(dur_ql: float) -> float | Fraction:
     return round(dur_ql, 4)
 
 
+_SHARP_PC_SPELLING: dict[int, tuple[str, float]] = {
+    0: ("C", 0.0),
+    1: ("C", 1.0),
+    2: ("D", 0.0),
+    3: ("D", 1.0),
+    4: ("E", 0.0),
+    5: ("F", 0.0),
+    6: ("F", 1.0),
+    7: ("G", 0.0),
+    8: ("G", 1.0),
+    9: ("A", 0.0),
+    10: ("A", 1.0),
+    11: ("B", 0.0),
+}
+
+_FLAT_PC_SPELLING: dict[int, tuple[str, float]] = {
+    0: ("C", 0.0),
+    1: ("D", -1.0),
+    2: ("D", 0.0),
+    3: ("E", -1.0),
+    4: ("E", 0.0),
+    5: ("F", 0.0),
+    6: ("G", -1.0),
+    7: ("G", 0.0),
+    8: ("A", -1.0),
+    9: ("A", 0.0),
+    10: ("B", -1.0),
+    11: ("B", 0.0),
+}
+
+
+def _build_key_spelling_map(key_obj: music21.key.Key) -> dict[int, tuple[str, float]]:
+    """Build a pitch-class -> (step, alter) map respecting diatonic key signature & minor leading tones."""
+    pc_map: dict[int, tuple[str, float]] = {}
+    for p in key_obj.pitches:
+        alter = float(p.accidental.alter) if p.accidental is not None else 0.0
+        pc_map.setdefault(int(p.pitchClass), (p.step, alter))
+
+    # In minor keys, prefer the raised harmonic-minor leading tone (degree 7 raised by 1 semitone)
+    if key_obj.mode == "minor" and len(key_obj.pitches) >= 7:
+        seventh = key_obj.pitches[6]
+        raised_alter = (float(seventh.accidental.alter) if seventh.accidental is not None else 0.0) + 1.0
+        if -1.0 <= raised_alter <= 2.0:
+            raised_pc = (int(seventh.pitchClass) + 1) % 12
+            pc_map.setdefault(raised_pc, (seventh.step, raised_alter))
+
+    return pc_map
+
+
+def _spell_pitch_for_key(
+    midi_pitch: int,
+    key_obj: music21.key.Key | None,
+    key_pc_map: dict[int, tuple[str, float]] | None = None,
+) -> music21.pitch.Pitch:
+    """Create a music21 Pitch with exact MIDI value spelled appropriately for the active key."""
+    if key_obj is None:
+        return music21.pitch.Pitch(midi=midi_pitch)
+
+    pc_map = key_pc_map if key_pc_map is not None else _build_key_spelling_map(key_obj)
+    pc = midi_pitch % 12
+    spec = pc_map.get(pc)
+    if spec is None:
+        if key_obj.sharps > 0:
+            spec = _SHARP_PC_SPELLING[pc]
+        elif key_obj.sharps < 0:
+            spec = _FLAT_PC_SPELLING[pc]
+        else:
+            return music21.pitch.Pitch(midi=midi_pitch)
+
+    step, alter = spec
+    octave = (midi_pitch - int(round(alter))) // 12 - 1
+    candidate = music21.pitch.Pitch(step=step, octave=octave)
+    if abs(alter) > 1e-6:
+        candidate.accidental = music21.pitch.Accidental(alter)
+    if candidate.midi == midi_pitch:
+        return candidate
+    return music21.pitch.Pitch(midi=midi_pitch)
+
+
 def _build_m21_element(
     pitches: list[int],
     dur_ql: float,
     velocity: int,
     tie_type: str | None,
     stem_direction: str | None = None,
+    key_obj: music21.key.Key | None = None,
+    key_pc_map: dict[int, tuple[str, float]] | None = None,
 ) -> music21.note.NotRest:
-    if len(pitches) == 1:
-        elem: music21.note.NotRest = music21.note.Note(pitches[0])
+    spelled = [_spell_pitch_for_key(p, key_obj, key_pc_map) for p in pitches]
+    if len(spelled) == 1:
+        elem: music21.note.NotRest = music21.note.Note(spelled[0])
     else:
-        elem = music21.chord.Chord(pitches)
+        elem = music21.chord.Chord(spelled)
     elem.quarterLength = _to_music21_ql(dur_ql)
     elem.volume.velocity = max(1, min(127, velocity))
     if tie_type:
@@ -582,6 +725,7 @@ def _populate_part_from_notes(
     ts_obj = music21.meter.TimeSignature(time_sig)
     measure_ql = float(ts_obj.barDuration.quarterLength)
     key_obj = _parse_key_to_music21(key_str)
+    key_pc_map = _build_key_spelling_map(key_obj)
 
     voices = _pack_notes_into_voices(notes, beats_per_sec, grid_ql=grid_ql, measure_ql=measure_ql)
     max_end_ql = max((ev[1] for v in voices for ev in v), default=measure_ql)
@@ -637,7 +781,17 @@ def _populate_part_from_notes(
 
                 seg_dur = round(seg_e - seg_s, 4)
                 if seg_dur > 1e-6:
-                    target_stream.append(_build_m21_element(pitches, seg_dur, vel, tie_type, stem_dir))
+                    target_stream.append(
+                        _build_m21_element(
+                            pitches,
+                            seg_dur,
+                            vel,
+                            tie_type,
+                            stem_dir,
+                            key_obj=key_obj,
+                            key_pc_map=key_pc_map,
+                        )
+                    )
                     cursor = seg_e
             if cursor < m_end - 1e-6:
                 rest = music21.note.Rest(quarterLength=_to_music21_ql(m_end - cursor))
@@ -804,7 +958,7 @@ def score_data_to_musicxml(
                 grid_ql=grid_ql,
             )
             _attach_ottava_spanners(p_treble)
-            if include_chords:
+            if include_chords and (len(tracks) == 1 or track.index == 0):
                 _attach_chord_symbols(p_treble, score.chords)
             m21_score.insert(0, p_treble)
 

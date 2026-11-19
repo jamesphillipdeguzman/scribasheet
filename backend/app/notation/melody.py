@@ -9,6 +9,7 @@ from typing import Any
 from app.transcription.base import DetectedNote
 
 LEAD_MELODY_MODE_ALIASES = frozenset({"lead_melody", "melody"})
+DEFAULT_VOCAL_RANGE: tuple[int, int] = (55, 79)  # G3 - G5
 
 
 def is_lead_melody_mode(mode: str | None) -> bool:
@@ -56,17 +57,29 @@ def _cluster_by_onset(
     return clusters
 
 
-def _estimate_melody_anchor_pitch(clusters: list[list[DetectedNote]]) -> float:
+def _estimate_melody_anchor_pitch(
+    clusters: list[list[DetectedNote]],
+    vocal_range: tuple[int, int] | None = None,
+) -> float:
     """Estimate a soft melodic register center without imposing a hard pitch cutoff."""
     representative_pitches: list[int] = []
     for cluster in clusters:
+        pool = cluster
+        if vocal_range is not None:
+            lo_v, hi_v = vocal_range
+            in_range = [n for n in cluster if lo_v - 2 <= n.pitch_midi <= hi_v + 2]
+            if in_range:
+                pool = in_range
+            else:
+                # Skip isolated extreme outliers when estimating the vocal register center
+                continue
         # Weight toward prominent/upper notes in polyphonic clusters, but include
         # solo notes as-is so low-register melodies keep their true register.
-        if len(cluster) == 1:
-            representative_pitches.append(cluster[0].pitch_midi)
+        if len(pool) == 1:
+            representative_pitches.append(pool[0].pitch_midi)
         else:
             best = max(
-                cluster,
+                pool,
                 key=lambda n: (
                     n.pitch_midi * 0.08
                     + (n.velocity / 127.0) * 1.2
@@ -75,33 +88,124 @@ def _estimate_melody_anchor_pitch(clusters: list[list[DetectedNote]]) -> float:
             )
             representative_pitches.append(best.pitch_midi)
     if not representative_pitches:
+        if vocal_range is not None:
+            return float((vocal_range[0] + vocal_range[1]) / 2.0)
         return 64.0
-    return float(median(representative_pitches))
+    est = float(median(representative_pitches))
+    if vocal_range is not None:
+        return max(float(vocal_range[0]), min(float(vocal_range[1]), est))
+    return est
 
 
-def _is_likely_harmonic_overtone(note: DetectedNote, cluster: list[DetectedNote]) -> bool:
-    """Detect weak +12/+19/+24 harmonic overtone blips above a strong fundamental."""
-    if note.velocity >= 62 and (note.confidence is None or note.confidence >= 0.55):
-        return False
+def _is_likely_harmonic_overtone(
+    note: DetectedNote,
+    cluster: list[DetectedNote],
+    ringing_notes: list[DetectedNote] | None = None,
+) -> bool:
+    """Detect harmonic overtone blips (+12/+19/+24/+28/+31/+36) above a strong fundamental."""
     note_dur = max(0.0, note.offset_sec - note.onset_sec)
-    for other in cluster:
+    candidates = [*cluster, *(ringing_notes or [])]
+    for other in candidates:
         if other is note:
             continue
         interval = note.pitch_midi - other.pitch_midi
-        if interval not in (12, 19, 24):
+        if interval not in (12, 19, 24, 28, 31, 36):
+            continue
+        # Ringing fundamental must overlap the onset of the candidate overtone
+        if other not in cluster and not (
+            other.onset_sec <= note.onset_sec + 0.04 and other.offset_sec >= note.onset_sec + 0.08
+        ):
             continue
         other_dur = max(0.0, other.offset_sec - other.onset_sec)
-        stronger_vel = other.velocity >= note.velocity + 15
+        stronger_vel = other.velocity >= note.velocity + 12
         stronger_conf = (other.confidence or 0.7) >= (note.confidence or 0.5) + 0.12
-        if (stronger_vel or stronger_conf) and other_dur >= note_dur * 0.85:
+        # High compound overtones (+24/+28/+31/+36) above a sustained note are almost always partials
+        high_partial = interval >= 24 and note.pitch_midi >= 84 and other.velocity >= note.velocity - 5
+        if note.velocity >= 68 and (note.confidence or 0.0) >= 0.65 and not high_partial:
+            continue
+        if (stronger_vel or stronger_conf or high_partial) and other_dur >= note_dur * 0.75:
             return True
     return False
+
+
+def _filter_vocal_outliers(
+    valid_notes: list[DetectedNote],
+    vocal_range: tuple[int, int],
+) -> tuple[list[DetectedNote], int]:
+    """Filter sub-bass artifacts and unsupported extreme upper-register outliers without clamping."""
+    min_midi, max_midi = vocal_range
+    ordered = sorted(valid_notes, key=lambda n: (n.onset_sec, n.pitch_midi))
+    in_range_notes = [n for n in ordered if min_midi <= n.pitch_midi <= max_midi]
+
+    # If there are no notes near the vocal range at all, only strip obvious sub-bass (< 36)
+    if not in_range_notes:
+        kept = [n for n in ordered if n.pitch_midi >= 36]
+        return (kept or ordered), max(0, len(ordered) - len(kept or ordered))
+
+    def _has_melodic_support(target: DetectedNote, max_semitones: int, max_gap_sec: float) -> bool:
+        for other in ordered:
+            if other is target:
+                continue
+            if other.pitch_midi < min_midi - 5 or other.pitch_midi > max_midi + 5:
+                continue
+            gap = min(
+                abs(target.onset_sec - other.offset_sec),
+                abs(other.onset_sec - target.offset_sec),
+                abs(target.onset_sec - other.onset_sec),
+            )
+            if gap <= max_gap_sec and abs(target.pitch_midi - other.pitch_midi) <= max_semitones:
+                return True
+        return False
+
+    filtered: list[DetectedNote] = []
+    ringing: list[DetectedNote] = []
+    for n in ordered:
+        ringing = [r for r in ringing if r.offset_sec > n.onset_sec + 0.04]
+        dur = max(0.0, n.offset_sec - n.onset_sec)
+
+        # 1. Obvious sub-bass artifacts (e.g., F1=29, F#2=42 when vocal range starts at G3=55)
+        if n.pitch_midi < min_midi - 7:
+            ringing.append(n)
+            continue
+
+        # 2. Borderline low notes (e.g., C3-F#3): keep only if melodically connected to vocal line
+        if n.pitch_midi < min_midi:
+            if not _has_melodic_support(n, max_semitones=7, max_gap_sec=1.0) or dur < 0.08:
+                ringing.append(n)
+                continue
+
+        # 3. Upper-register notes above max_midi: check harmonic overtones & extreme outliers
+        if n.pitch_midi > max_midi:
+            simultaneous = [
+                r for r in ringing if abs(r.onset_sec - n.onset_sec) <= 0.06
+            ]
+            if _is_likely_harmonic_overtone(n, simultaneous, ringing):
+                continue
+            # Extreme upper outliers (e.g., E6=88, G#6=92 above G5=79):
+            # preserve legitimate high vocal notes only when supported by transcription continuity & strength.
+            if n.pitch_midi > max_midi + 4:
+                supported = _has_melodic_support(n, max_semitones=9, max_gap_sec=1.2)
+                strong = (
+                    dur >= 0.12
+                    and n.velocity >= 55
+                    and (n.confidence is None or n.confidence >= 0.50)
+                )
+                if not (supported and strong):
+                    continue
+
+        filtered.append(n)
+        ringing.append(n)
+
+    if not filtered:
+        return ordered, 0
+    return filtered, len(ordered) - len(filtered)
 
 
 def _unary_score(
     note: DetectedNote,
     cluster: list[DetectedNote],
     anchor_pitch: float,
+    vocal_range: tuple[int, int] | None = None,
 ) -> float:
     """Score a candidate note's melodic salience within its onset cluster."""
     dur = max(0.0, note.offset_sec - note.onset_sec)
@@ -125,6 +229,12 @@ def _unary_score(
 
     # Soft pull toward the piece's melodic register center.
     register_penalty = 0.045 * abs(note.pitch_midi - anchor_pitch)
+    if vocal_range is not None:
+        lo_v, hi_v = vocal_range
+        if note.pitch_midi < lo_v:
+            register_penalty += 0.25 * (lo_v - note.pitch_midi)
+        elif note.pitch_midi > hi_v:
+            register_penalty += 0.18 * (note.pitch_midi - hi_v)
 
     # Reject weak harmonic overtones over a strong fundamental.
     overtone_penalty = 2.2 if _is_likely_harmonic_overtone(note, cluster) else 0.0
@@ -209,6 +319,7 @@ def extract_lead_melody(
     notes: list[DetectedNote],
     tempo_bpm: float = 120.0,
     timing_map: Any = None,
+    vocal_range: tuple[int, int] | None = None,
 ) -> MelodyExtractionResult:
     """Extract a single, coherent monophonic melody line from polyphonic notes.
 
@@ -232,18 +343,22 @@ def extract_lead_melody(
             uncertain_segments=[],
         )
 
+    filtered_outlier_count = 0
+    if vocal_range is not None:
+        valid_notes, filtered_outlier_count = _filter_vocal_outliers(valid_notes, vocal_range)
+
     effective_bpm = float(getattr(timing_map, "tempo_bpm", None) or tempo_bpm or 120.0)
     beat_sec = 60.0 / max(30.0, effective_bpm)
     onset_tolerance_sec = max(0.025, min(0.055, beat_sec * 0.08))
 
     clusters = _cluster_by_onset(valid_notes, onset_tolerance_sec=onset_tolerance_sec)
-    anchor_pitch = _estimate_melody_anchor_pitch(clusters)
+    anchor_pitch = _estimate_melody_anchor_pitch(clusters, vocal_range=vocal_range)
 
     dp_scores: list[list[float]] = []
     backpointers: list[list[int]] = []
     uncertain_segments: list[dict[str, Any]] = []
 
-    first_scores = [_unary_score(n, clusters[0], anchor_pitch) for n in clusters[0]]
+    first_scores = [_unary_score(n, clusters[0], anchor_pitch, vocal_range=vocal_range) for n in clusters[0]]
     dp_scores.append(first_scores)
     backpointers.append([-1] * len(clusters[0]))
 
@@ -255,7 +370,7 @@ def extract_lead_melody(
         cur_bp: list[int] = []
 
         for cur_note in cur_cluster:
-            unary = _unary_score(cur_note, cur_cluster, anchor_pitch)
+            unary = _unary_score(cur_note, cur_cluster, anchor_pitch, vocal_range=vocal_range)
             best_total = float("-inf")
             best_prev = 0
             for prev_idx, prev_note in enumerate(prev_cluster):
@@ -328,6 +443,8 @@ def extract_lead_melody(
             "average_confidence": round(avg_conf, 3),
             "uncertain_segment_count": len(uncertain_segments),
             "trimmed_overlaps": trimmed_overlaps,
+            "filtered_outlier_count": filtered_outlier_count,
+            "vocal_range": list(vocal_range) if vocal_range is not None else None,
         },
         uncertain_segments=uncertain_segments,
     )

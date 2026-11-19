@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_owned_project
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import Project, ProjectScore, User
 from app.notation.arrangement import simplify_arrangement
@@ -187,9 +188,14 @@ def regenerate_project_arrangement(
 
     if lead_melody_active or piano_vocal_active:
         melody_source = vocal_notes if vocal_notes else refined_notes
+        vocal_range = None
+        if piano_vocal_active or (project.instrument or "").strip().lower() == "vocals" or bool(vocal_notes):
+            app_cfg = get_settings()
+            vocal_range = (app_cfg.VOCAL_RANGE_MIN_MIDI, app_cfg.VOCAL_RANGE_MAX_MIDI)
         melody_result = extract_lead_melody(
             melody_source,
             tempo_bpm=existing.tempo_bpm,
+            vocal_range=vocal_range,
         )
         arranged_notes = melody_result.notes or melody_source
         analysis["arrangement_detail"] = payload.arrangement_detail

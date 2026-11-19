@@ -79,24 +79,43 @@ def _parse_chord_pitches(chord: ScoreChord) -> tuple[int, list[int]]:
     return root_pc, [(root_pc + iv) % 12 for iv in intervals]
 
 
-def _choose_bass_midi(bass_pc: int, preferred_low: int = 36, preferred_high: int = 53) -> int:
-    """Place a bass pitch class comfortably in C2-F3."""
+def _choose_bass_midi(
+    bass_pc: int,
+    preferred_low: int = 40,
+    preferred_high: int = 55,
+    reference_bass_notes: list[DetectedNote] | None = None,
+    span_start: float = 0.0,
+    span_end: float = 0.0,
+) -> int:
+    """Place a bass pitch class comfortably in E2-G3 (40-55), preserving legitimate original bass."""
+    if reference_bass_notes and span_end > span_start:
+        matching_orig = [
+            n.pitch_midi
+            for n in reference_bass_notes
+            if n.pitch_midi % 12 == bass_pc
+            and 33 <= n.pitch_midi <= 55
+            and n.offset_sec > span_start + 0.02
+            and n.onset_sec < span_end - 0.02
+        ]
+        if matching_orig:
+            return min(matching_orig)
+
     candidates = [p for p in range(preferred_low, preferred_high + 1) if p % 12 == bass_pc]
     if candidates:
-        return min(candidates, key=lambda p: abs(p - 43))
-    return 36 + bass_pc
+        return min(candidates, key=lambda p: abs(p - 47))
+    return 40 + ((bass_pc - 4) % 12)
 
 
 def _voice_lead_chord(
     chord_pcs: list[int],
     prev_center: float,
-    max_upper_midi: int = 64,
-    min_lower_midi: int = 45,
+    max_upper_midi: int = 67,
+    min_lower_midi: int = 48,
 ) -> list[int]:
     """Select a compact, voice-led chord voicing within a playable hand span (<= 12 semitones)."""
     pcs = chord_pcs[:4] if len(chord_pcs) > 4 else chord_pcs
     if not pcs:
-        return [48, 52, 55]
+        return [52, 55, 60]
 
     best_voicing: list[int] | None = None
     best_cost = float("inf")
@@ -128,7 +147,7 @@ def _voice_lead_chord(
     if best_voicing is not None:
         return best_voicing
 
-    # Safe fallback triad in middle-low range
+    # Safe fallback triad above muddy C2 register
     base = 48 + pcs[0]
     fallback = [base]
     for pc in pcs[1:3]:
@@ -136,7 +155,7 @@ def _voice_lead_chord(
         if p == fallback[-1]:
             p += 12
         fallback.append(p)
-    while fallback[-1] > max_upper_midi and fallback[0] - 12 >= 36:
+    while fallback[-1] > max_upper_midi and fallback[0] - 12 >= 43:
         fallback = [p - 12 for p in fallback]
     return fallback
 
@@ -153,9 +172,9 @@ def _melody_ceiling_at(
         if n.offset_sec > start_sec + 0.02 and n.onset_sec < end_sec - 0.02
     ]
     if not overlapping:
-        return 64
+        return 67
     lowest_melody = min(overlapping)
-    return max(52, min(64, lowest_melody - 2))
+    return max(55, min(69, lowest_melody - 2))
 
 
 def _deduplicate_overlaps(notes: list[DetectedNote]) -> list[DetectedNote]:
@@ -233,20 +252,38 @@ def generate_piano_accompaniment(
 
     ordered_chords = sorted(chords, key=lambda c: c.onset_sec)
     generated: list[DetectedNote] = []
-    prev_center = 54.0
+    prev_center = 58.0
 
+    # Expand long held-chord spans into <= 8-beat phrasing chunks so bass & accompaniment
+    # continue smoothly across multi-measure sections instead of dropping out after 2 bars.
+    chord_spans: list[tuple[ScoreChord, float, float]] = []
+    max_chunk_sec = beat_sec * 8.0
     for idx, chord in enumerate(ordered_chords):
-        span_start = max(0.0, float(chord.onset_sec))
+        full_start = max(0.0, float(chord.onset_sec))
         next_onset = float(ordered_chords[idx + 1].onset_sec) if idx + 1 < len(ordered_chords) else total_dur
-        span_end = max(span_start + beat_sec * 0.5, min(next_onset, span_start + beat_sec * 8.0))
+        full_end = max(full_start + beat_sec * 0.5, next_onset)
+        cursor = full_start
+        while cursor < full_end - beat_sec * 0.35:
+            chunk_end = min(full_end, cursor + max_chunk_sec)
+            if full_end - chunk_end < beat_sec * 0.5:
+                chunk_end = full_end
+            chord_spans.append((chord, cursor, chunk_end))
+            cursor = chunk_end
+
+    for chord, span_start, span_end in chord_spans:
         span_dur = span_end - span_start
         if span_dur < beat_sec * 0.35:
             continue
 
         bass_pc, chord_pcs = _parse_chord_pitches(chord)
-        bass_midi = _choose_bass_midi(bass_pc)
+        bass_midi = _choose_bass_midi(
+            bass_pc,
+            reference_bass_notes=bass_notes,
+            span_start=span_start,
+            span_end=span_end,
+        )
         ceiling = _melody_ceiling_at(melody_notes, span_start, span_end)
-        voicing = _voice_lead_chord(chord_pcs, prev_center, max_upper_midi=ceiling, min_lower_midi=45)
+        voicing = _voice_lead_chord(chord_pcs, prev_center, max_upper_midi=ceiling, min_lower_midi=48)
         if voicing:
             prev_center = sum(voicing) / len(voicing)
 

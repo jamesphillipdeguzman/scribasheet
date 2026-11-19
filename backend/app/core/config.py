@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     STRIPE_PRO_PRICE_ID: str = ""
     STRIPE_STUDIO_PRICE_ID: str = ""
 
+    # Arrangement & Vocal Register Defaults (G3 = 55, G5 = 79)
+    VOCAL_RANGE_MIN_MIDI: int = 55
+    VOCAL_RANGE_MAX_MIDI: int = 79
+
     @property
     def storage_root_path(self) -> Path:
         # In production on Railway, prefer /data/storage_data if /data volume is mounted

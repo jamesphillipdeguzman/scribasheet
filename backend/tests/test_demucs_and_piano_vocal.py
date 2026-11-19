@@ -244,17 +244,18 @@ def test_piano_vocal_score_musicxml_and_midi_sync():
     assert score.tracks[0].name == "Vocal Melody"
     assert score.tracks[0].clef == "treble"
     assert score.tracks[1].name == "Piano Accompaniment"
-    assert score.tracks[1].clef == "bass"
+    assert score.tracks[1].clef == "grand"
     assert any(n.track_index == 0 for n in score.notes)
     assert any(n.track_index == 1 for n in score.notes)
 
     xml_str = score_data_to_musicxml(score, include_chords=True)
     root = ET.fromstring(xml_str)
     parts = root.findall("part")
-    assert len(parts) == 2
-    # Chord symbols only attached to top melody staff (part 0), not duplicated on accompaniment staff (part 1)
+    assert len(parts) == 3
+    # Chord symbols only attached to top melody staff (part 0), not duplicated on piano staves
     assert len(parts[0].findall(".//harmony")) >= 1
     assert len(parts[1].findall(".//harmony")) == 0
+    assert len(parts[2].findall(".//harmony")) == 0
     # Upper staff melody has zero chord-stacked notes
     assert parts[0].findall(".//note/chord") == []
 

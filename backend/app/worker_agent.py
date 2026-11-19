@@ -32,6 +32,7 @@ import httpx
 
 from app.audio.processor import get_preprocessing_profile, preprocess_to_wav, probe_media
 from app.audio.separator import detect_audio_source_route, separate_audio_stems
+from app.core.config import get_settings
 from app.notation.analyzer import (
     estimate_key_signature,
     get_instrument_program_and_clef,
@@ -647,10 +648,15 @@ class RealTranscriptionHandler:
             melody_result = None
 
             if lead_melody_active or piano_vocal_active:
+                vocal_range = None
+                if piano_vocal_active or is_vocal_melody_route or (settings.instrument or "").strip().lower() == "vocals":
+                    app_cfg = get_settings()
+                    vocal_range = (app_cfg.VOCAL_RANGE_MIN_MIDI, app_cfg.VOCAL_RANGE_MAX_MIDI)
                 melody_result = extract_lead_melody(
                     melody_source_notes,
                     tempo_bpm=tempo_bpm,
                     timing_map=timing_map,
+                    vocal_range=vocal_range,
                 )
                 arranged_notes = melody_result.notes or melody_source_notes
                 arrangement_detail_value = settings.arrangement_detail
