@@ -870,21 +870,21 @@ def _attach_lyrics_to_part(
     lyrics_dict: dict,
     track_notes: list[ScoreNote],
     tempo_bpm: float,
-) -> int:
-    """Attach aligned MusicXML <lyric> elements to melody notes without altering note timing."""
+) -> set[int]:
+    """Attach aligned MusicXML <lyric> elements to melody notes and return ordinal indices needing <extend/>."""
     if not lyrics_dict or not track_notes:
-        return 0
+        return set()
     try:
         from app.notation.lyrics_alignment import align_lyrics_to_notes
         from app.schemas.lyrics import LyricsData
 
         lyrics_obj = LyricsData(**lyrics_dict)
     except Exception:
-        return 0
+        return set()
 
     alignment = align_lyrics_to_notes(lyrics_obj, track_notes)
     if not alignment.by_onset_sec:
-        return 0
+        return set()
 
     beats_per_sec = max(20.0, float(tempo_bpm or 120.0)) / 60.0
     # Flatten notes with their offset in quarterLengths relative to part start
@@ -895,7 +895,8 @@ def _attach_lyrics_to_part(
             m21_notes.append((offset_ql / beats_per_sec, el))
     m21_notes.sort(key=lambda pair: pair[0])
 
-    attached = 0
+    extend_ordinals: set[int] = set()
+    lyric_ordinal = 0
     used_idx: set[int] = set()
     search_start = 0
     for target_sec, item in alignment.by_onset_sec:
@@ -914,10 +915,12 @@ def _attach_lyrics_to_part(
             note_el = m21_notes[best_i][1]
             lyr = music21.note.Lyric(text=item.text, syllabic=item.syllabic)
             note_el.lyrics.append(lyr)
+            if item.extend:
+                extend_ordinals.add(lyric_ordinal)
+            lyric_ordinal += 1
             used_idx.add(best_i)
             search_start = best_i + 1
-            attached += 1
-    return attached
+    return extend_ordinals
 
 
 def score_data_to_musicxml(
@@ -943,6 +946,7 @@ def score_data_to_musicxml(
     min_measures = max(1, int(np.ceil(max_note_ql / measure_ql)))
     tracks = score.tracks or [ScoreTrack()]
 
+    extend_ordinals: set[int] = set()
     for track in tracks:
         track_notes = [n for n in score.notes if n.track_index == track.index]
         if track.clef == "grand":
@@ -1000,12 +1004,23 @@ def score_data_to_musicxml(
             if include_chords and (len(tracks) == 1 or track.index == 0):
                 _attach_chord_symbols(p, score.chords)
             if include_lyrics and track.index == 0 and isinstance(score.analysis, dict) and score.analysis.get("lyrics"):
-                _attach_lyrics_to_part(p, score.analysis["lyrics"], track_notes, score.tempo_bpm)
+                extend_ordinals = _attach_lyrics_to_part(p, score.analysis["lyrics"], track_notes, score.tempo_bpm)
             m21_score.insert(0, p)
 
     exporter = music21.musicxml.m21ToXml.GeneralObjectExporter(m21_score)
     xml_bytes = exporter.parse()
-    return xml_bytes.decode("utf-8")
+    xml_str = xml_bytes.decode("utf-8")
+    if extend_ordinals:
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(xml_str)
+        first_part = root.find("part")
+        if first_part is not None:
+            for ord_idx, lyr_el in enumerate(first_part.findall(".//note/lyric")):
+                if ord_idx in extend_ordinals and lyr_el.find("extend") is None:
+                    ET.SubElement(lyr_el, "extend")
+        xml_str = ET.tostring(root, encoding="unicode")
+    return xml_str
 
 
 def score_data_to_midi_bytes(score: ScoreData) -> bytes:
@@ -1132,7 +1147,20 @@ def render_score_pdf(score: ScoreData, *, include_chords: bool = True) -> bytes:
     line_gap = 6.0  # 24pt staff height (5 lines)
     step_pt = line_gap / 2.0  # 3.0pt per diatonic step
     staff_height = 4 * line_gap
-    bass_offset = 54.0  # distance from treble top to bass top
+
+    aligned_note_lyrics: dict[str, object] = {}
+    if isinstance(score.analysis, dict) and score.analysis.get("lyrics"):
+        try:
+            from app.notation.lyrics_alignment import align_lyrics_to_notes
+            from app.schemas.lyrics import LyricsData
+
+            vocal_notes = [n for n in score.notes if n.track_index == 0]
+            lyrics_obj = LyricsData(**score.analysis["lyrics"])
+            aligned_note_lyrics = align_lyrics_to_notes(lyrics_obj, vocal_notes).note_lyrics
+        except Exception:
+            aligned_note_lyrics = {}
+
+    bass_offset = 66.0 if aligned_note_lyrics else 54.0  # room for lyrics beneath treble staff
 
     # Treble bottom line = E4 (midi 64, diatonic step 30); Bass bottom line = G2 (midi 43, diatonic step 18)
     treble_e4_step = _midi_to_diatonic_step(64)
@@ -1200,8 +1228,8 @@ def render_score_pdf(score: ScoreData, *, include_chords: bool = True) -> bytes:
     )
 
     measures_per_sys = 4
-    system_advance = 114.0 if is_grand else 78.0
-    min_y_cursor = 115.0 if is_grand else 85.0
+    system_advance = (126.0 if aligned_note_lyrics else 114.0) if is_grand else (90.0 if aligned_note_lyrics else 78.0)
+    min_y_cursor = 125.0 if is_grand else 95.0
 
     treble_notes, bass_notes = _split_rh_lh_notes(score.notes) if is_grand else (score.notes, [])
     treble_ids = {n.id for n in treble_notes}
@@ -1270,6 +1298,14 @@ def render_score_pdf(score: ScoreData, *, include_chords: bool = True) -> bytes:
                 c.line(x - 2.4, ny, x - 2.4, ny - 13)
             else:
                 c.line(x + 2.4, ny, x + 2.4, ny + 13)
+
+            if n.id in aligned_note_lyrics:
+                lyr_item = aligned_note_lyrics[n.id]
+                syl_label = lyr_item.text + ("-" if lyr_item.syllabic in ("begin", "middle") else "")
+                if lyr_item.extend:
+                    syl_label += "_"
+                c.setFont("Helvetica", 7.5)
+                c.drawCentredString(x, y_treble_bottom - 14, syl_label)
 
         y_cursor -= system_advance
 

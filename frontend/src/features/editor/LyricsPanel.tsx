@@ -100,6 +100,7 @@ export function LyricsPanel({
       activeJob.status === "completed"
     ) {
       loadLyrics();
+      onLyricsSaved?.();
     }
   }, [activeJob?.id, activeJob?.status]);
 

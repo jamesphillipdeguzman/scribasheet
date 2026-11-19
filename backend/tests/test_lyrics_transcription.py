@@ -477,3 +477,125 @@ def test_tagalog_resyllabification_and_save_edits_updates_musicxml_without_alter
     root = ET.fromstring(score_body["musicxml"])
     lyric_texts = [el.text for el in root.findall(".//note/lyric/text") if el.text]
     assert lyric_texts == ["Na", "pa", "ra", "bang"]
+
+
+def test_syllabification_melisma_extender_and_pdf_lyrics_end_to_end(client, db_session):
+    import music21
+
+    from app.notation.generator import build_piano_vocal_score_data, render_score_pdf
+    from app.notation.lyrics_alignment import align_lyrics_to_notes, split_word_into_syllables
+
+    # 1. Explicit hyphens, Tagalog vowel hiatus, and English silent-e
+    assert split_word_into_syllables("na-pa-ra") == ["na", "pa", "ra"]
+    assert split_word_into_syllables("beau-ti-ful") == ["beau", "ti", "ful"]
+    assert split_word_into_syllables("paraan", language="tl") == ["pa", "ra", "an"]
+    assert split_word_into_syllables("kaibigan", language="tl") == ["ka", "i", "bi", "gan"]
+    assert split_word_into_syllables("grace", language="en") == ["grace"]
+
+    # 2. Melisma spanning 2 vocal notes + 3-staff Piano + Vocal (lyrics ONLY on Part 1)
+    melody_notes = [
+        DetectedNote(pitch_midi=64, onset_sec=0.0, offset_sec=0.25, velocity=92, confidence=0.95),
+        DetectedNote(pitch_midi=65, onset_sec=0.3, offset_sec=0.55, velocity=92, confidence=0.95),
+        DetectedNote(pitch_midi=66, onset_sec=0.6, offset_sec=0.95, velocity=92, confidence=0.95),
+        # Melisma on "love" spanning 1.0s..1.9s (2 notes: 1.0s and 1.5s)
+        DetectedNote(pitch_midi=68, onset_sec=1.0, offset_sec=1.45, velocity=94, confidence=0.95),
+        DetectedNote(pitch_midi=66, onset_sec=1.5, offset_sec=1.95, velocity=90, confidence=0.93),
+    ]
+    lyrics = LyricsData(
+        text="Na-pa-ra ko",
+        language="tl",
+        segments=[
+            LyricSegment(
+                id="seg_1",
+                text="Na-pa-ra ko",
+                start_sec=0.0,
+                end_sec=1.95,
+                words=[
+                    LyricWord(text="Na-pa-ra", start_sec=0.0, end_sec=0.9, confidence=0.92),
+                    LyricWord(text="ko", start_sec=1.0, end_sec=1.95, confidence=0.95),
+                ],
+            )
+        ],
+        has_word_timestamps=True,
+    )
+    score = build_piano_vocal_score_data(
+        title="Lyric Melisma Test",
+        melody_notes=melody_notes,
+        chord_source_notes=[
+            *melody_notes,
+            DetectedNote(pitch_midi=40, onset_sec=0.0, offset_sec=1.9, velocity=85, confidence=0.9),
+            DetectedNote(pitch_midi=52, onset_sec=0.0, offset_sec=1.9, velocity=78, confidence=0.88),
+            DetectedNote(pitch_midi=56, onset_sec=0.0, offset_sec=1.9, velocity=78, confidence=0.88),
+        ],
+        tempo_bpm=120.0,
+        key_signature="E major",
+        duration_seconds=2.0,
+        analysis={"mode": "piano_vocal", "lyrics": lyrics.model_dump()},
+    )
+    xml_str = score_data_to_musicxml(score, include_chords=True, include_lyrics=True)
+    root = ET.fromstring(xml_str)
+    parts = root.findall("part")
+    assert len(parts) == 3
+    # Lyrics attached ONLY to Vocal Melody (Part 0), NEVER to Piano RH or LH
+    part0_lyrics = parts[0].findall(".//note/lyric")
+    assert len(part0_lyrics) >= 3
+    assert parts[1].findall(".//note/lyric") == []
+    assert parts[2].findall(".//note/lyric") == []
+    # Melisma extender present in MusicXML and re-parsable by music21
+    assert any(lyr.find("extend") is not None for lyr in part0_lyrics)
+    reparsed = music21.converter.parseData(xml_str, format="musicxml")
+    assert len(reparsed.parts) == 3
+
+    # 3. Missing timestamps handled gracefully without forcing syllables
+    un_timestamped = LyricsData(text="No timestamps here", segments=[])
+    res_missing = align_lyrics_to_notes(un_timestamped, [n for n in score.notes if n.track_index == 0])
+    assert res_missing.matched_count == 0
+
+    # 4. PDF export renders cleanly with aligned lyrics
+    pdf_bytes = render_score_pdf(score, include_chords=True)
+    assert pdf_bytes.startswith(b"%PDF")
+
+    # 5. Repeated Save Edits preserves word-level timestamps & does not duplicate lyrics
+    headers, user_id = _auth_headers(client, "melisma_save@scribasheet.dev")
+    project = Project(
+        user_id=user_id,
+        title="Lyric Persist",
+        instrument="vocals",
+        transcription_mode="piano_vocal",
+        status="ready",
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+    db_session.add(
+        ProjectScore(
+            project_id=project.id,
+            version=1,
+            score_json=score.model_dump(),
+            musicxml_path=None,
+            midi_path=None,
+        )
+    )
+    db_session.commit()
+
+    put1 = client.put(
+        f"/api/v1/projects/{project.id}/lyrics",
+        headers=headers,
+        json={"text": "Sa-la-mat ko", "language": "tl"},
+    )
+    assert put1.status_code == 200
+    assert put1.json()["has_word_timestamps"] is True
+    assert put1.json()["segments"][0]["words"][0]["text"] == "Sa-la-mat"
+
+    put2 = client.put(
+        f"/api/v1/projects/{project.id}/lyrics",
+        headers=headers,
+        json={"text": "Sa-la-mat ko", "language": "tl"},
+    )
+    assert put2.status_code == 200
+    score_resp = client.get(f"/api/v1/projects/{project.id}/score", headers=headers)
+    assert score_resp.status_code == 200
+    saved_xml = score_resp.json()["musicxml"]
+    saved_root = ET.fromstring(saved_xml)
+    saved_lyrics = [el.findtext("text") for el in saved_root.findall("./part[1]//note/lyric")]
+    assert saved_lyrics == ["Sa", "la", "mat", "ko"]

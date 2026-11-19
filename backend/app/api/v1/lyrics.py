@@ -105,6 +105,14 @@ def update_project_lyrics(
                 for i, seg in enumerate(current.segments):
                     line_changed = new_lines[i] != seg.text.strip()
                     if line_changed:
+                        edited_tokens = [tok for tok in new_lines[i].split() if tok.strip()]
+                        preserved_words = []
+                        if seg.words and len(edited_tokens) == len(seg.words):
+                            preserved_words = [
+                                w.model_copy(update={"text": edited_tokens[w_idx]})
+                                for w_idx, w in enumerate(seg.words)
+                            ]
+                            has_word_ts = True
                         updated_segments.append(
                             seg.model_copy(
                                 update={
@@ -112,7 +120,7 @@ def update_project_lyrics(
                                     "needs_review": False,
                                     "reviewed": True,
                                     "edited": True,
-                                    "words": [],
+                                    "words": preserved_words,
                                 }
                             )
                         )

@@ -12,12 +12,16 @@ from app.schemas.score import ScoreNote
 _VOWEL_GROUP_RE = re.compile(
     r"(?:ng|[^aeiouyAEIOUY])*[aeiouyAEIOUY]+(?:(?:ng|[^aeiouyAEIOUY])+(?=$|[^aeiouyAEIOUY]))?"
 )
+_TAGALOG_VOWEL_RE = re.compile(
+    r"(?:ng|[^aeiouAEIOU])*[aeiouAEIOU](?:(?:ng|[^aeiouAEIOU])+(?=$|[^aeiouAEIOU]))?"
+)
 
 
 @dataclass
 class LyricAlignmentItem:
     text: str
     syllabic: str  # single | begin | middle | end
+    extend: bool = False
 
 
 @dataclass
@@ -29,27 +33,61 @@ class LyricAlignmentResult:
     total_syllables: int = 0
 
 
-def split_word_into_syllables(word: str) -> list[str]:
-    """Split an ASCII/Latin word into rough phonetic syllables while preserving Unicode/CJK intact."""
+def split_word_into_syllables(word: str, *, language: str | None = None) -> list[str]:
+    """Split a word into syllables, respecting explicit hyphens and English/Tagalog rules."""
     cleaned = word.strip()
     if not cleaned:
         return []
-    # Preserve non-Latin scripts (e.g. CJK) intact; split Latin/Tagalog words >= 3 chars
-    if len(cleaned) <= 2 or not all(ord(ch) < 256 for ch in cleaned):
-        return [cleaned]
-    core = re.sub(r"^[^\w]+|[^\w]+$", "", cleaned)
-    if not core or not re.search(r"[aeiouyAEIOUY]", core):
-        return [cleaned]
-    parts = [m.group(0) for m in _VOWEL_GROUP_RE.finditer(core) if m.group(0)]
-    if len(parts) <= 1:
-        return [cleaned]
-    # Re-attach leading/trailing punctuation
+
     prefix_match = re.match(r"^([^\w]+)", cleaned)
     suffix_match = re.search(r"([^\w]+)$", cleaned)
-    if prefix_match:
-        parts[0] = prefix_match.group(1) + parts[0]
-    if suffix_match:
-        parts[-1] = parts[-1] + suffix_match.group(1)
+    prefix = prefix_match.group(1) if prefix_match else ""
+    suffix = suffix_match.group(1) if suffix_match else ""
+    core = re.sub(r"^[^\w]+|[^\w]+$", "", cleaned)
+    if not core:
+        return [cleaned]
+
+    # 1. Respect explicit user-provided syllable breaks / hyphens (e.g., "na-pa-ra", "beau-ti-ful")
+    if "-" in core:
+        parts = [p for p in core.split("-") if p]
+        if parts:
+            parts[0] = prefix + parts[0]
+            parts[-1] = parts[-1] + suffix
+            return parts
+
+    # Preserve non-Latin scripts (e.g. CJK) and very short words intact
+    if len(core) <= 2 or not all(ord(ch) < 256 for ch in core):
+        return [cleaned]
+    if not re.search(r"[aeiouyAEIOUY]", core):
+        return [cleaned]
+
+    lang_norm = (language or "").strip().lower()
+    is_tagalog = lang_norm in ("tl", "fil", "tagalog", "filipino")
+
+    if is_tagalog:
+        # Tagalog/Filipino: each vowel typically forms its own syllable nucleus (e.g., pa-ra-an, ka-i-bi-gan)
+        parts = [m.group(0) for m in _TAGALOG_VOWEL_RE.finditer(core) if m.group(0)]
+    else:
+        # English / general Latin: handle silent trailing -e (e.g., love, grace, time)
+        working_core = core
+        silent_e = (
+            len(core) >= 4
+            and core.lower().endswith("e")
+            and not core.lower().endswith(("le", "ye"))
+            and re.search(r"[aeiouy][^aeiouy]e$", core.lower()) is not None
+        )
+        if silent_e:
+            working_core = core[:-1]
+        parts = [m.group(0) for m in _VOWEL_GROUP_RE.finditer(working_core) if m.group(0)]
+        if silent_e and parts:
+            parts[-1] = parts[-1] + core[-1]
+
+    if len(parts) <= 1:
+        return [cleaned]
+    if prefix:
+        parts[0] = prefix + parts[0]
+    if suffix:
+        parts[-1] = parts[-1] + suffix
     return parts
 
 
@@ -64,12 +102,15 @@ def align_lyrics_to_notes(
     if not ordered_notes:
         return LyricAlignmentResult()
 
-    # Build timed syllable tokens from word-level or segment-level timestamps
-    timed_tokens: list[tuple[float, LyricAlignmentItem]] = []
+    # Build timed syllable tokens: (target_start_sec, target_end_sec, item)
+    timed_tokens: list[tuple[float, float, LyricAlignmentItem]] = []
+    lang = lyrics.language
     for seg in lyrics.segments:
         if seg.words:
             for w in seg.words:
-                sylls = split_word_into_syllables(w.text)
+                if w.confidence is not None and w.confidence < 0.15:
+                    continue
+                sylls = split_word_into_syllables(w.text, language=lang)
                 if not sylls:
                     continue
                 span = max(0.05, w.end_sec - w.start_sec)
@@ -80,14 +121,18 @@ def align_lyrics_to_notes(
                         if len(sylls) == 1
                         else ("begin" if i == 0 else ("end" if i == len(sylls) - 1 else "middle"))
                     )
-                    timed_tokens.append((w.start_sec + i * step, LyricAlignmentItem(text=syl, syllabic=syllabic)))
+                    syl_start = w.start_sec + i * step
+                    syl_end = syl_start + step
+                    timed_tokens.append((syl_start, syl_end, LyricAlignmentItem(text=syl, syllabic=syllabic)))
         else:
+            if seg.end_sec <= seg.start_sec:
+                continue
             words = [w for w in seg.text.split() if w.strip()]
             if not words:
                 continue
             syll_tokens: list[LyricAlignmentItem] = []
             for w in words:
-                sylls = split_word_into_syllables(w)
+                sylls = split_word_into_syllables(w, language=lang)
                 for i, syl in enumerate(sylls):
                     syllabic = (
                         "single"
@@ -100,14 +145,19 @@ def align_lyrics_to_notes(
             span = max(0.1, seg.end_sec - seg.start_sec)
             step = span / len(syll_tokens)
             for i, item in enumerate(syll_tokens):
-                timed_tokens.append((seg.start_sec + i * step, item))
+                syl_start = seg.start_sec + i * step
+                syl_end = syl_start + step
+                timed_tokens.append((syl_start, syl_end, item))
 
-    if not timed_tokens and lyrics.text.strip():
-        words = [w for w in lyrics.text.split() if w.strip()]
-        total_span = max(1.0, ordered_notes[-1].offset_sec)
-        step = total_span / max(1, len(words))
-        for i, w in enumerate(words):
-            timed_tokens.append((i * step, LyricAlignmentItem(text=w, syllabic="single")))
+    if not timed_tokens:
+        return LyricAlignmentResult(
+            uncertain_segments=[
+                {"text": lyrics.text.strip(), "target_sec": 0.0, "reason": "missing_timestamps"}
+            ]
+            if lyrics.text.strip()
+            else [],
+            total_syllables=0,
+        )
 
     note_lyrics: dict[str, LyricAlignmentItem] = {}
     by_onset_sec: list[tuple[float, LyricAlignmentItem]] = []
@@ -115,7 +165,8 @@ def align_lyrics_to_notes(
     used_note_indices: set[int] = set()
     search_start = 0
 
-    for target_sec, item in timed_tokens:
+    for tok_idx, (target_sec, target_end_sec, item) in enumerate(timed_tokens):
+        next_target_sec = timed_tokens[tok_idx + 1][0] if tok_idx + 1 < len(timed_tokens) else float("inf")
         best_idx: int | None = None
         best_dist = float("inf")
         for idx in range(search_start, len(ordered_notes)):
@@ -130,10 +181,36 @@ def align_lyrics_to_notes(
 
         if best_idx is not None and best_dist <= max_match_distance_sec:
             matched_note = ordered_notes[best_idx]
+            # Avoid stealing a note that clearly belongs to the next syllable's onset
+            if (
+                next_target_sec < float("inf")
+                and best_dist > 0.20
+                and abs(matched_note.onset_sec - next_target_sec) + 0.12 < best_dist
+            ):
+                uncertain.append(
+                    {
+                        "text": item.text,
+                        "target_sec": round(target_sec, 3),
+                        "reason": "no_nearby_melody_onset",
+                    }
+                )
+                continue
+            # Detect melisma: syllable spans additional melody notes before the next syllable's onset
+            melisma_last_idx = best_idx
+            for m_idx in range(best_idx + 1, len(ordered_notes)):
+                cand = ordered_notes[m_idx]
+                if cand.onset_sec <= target_end_sec - 0.04 and cand.onset_sec < next_target_sec - 0.08:
+                    melisma_last_idx = m_idx
+                    used_note_indices.add(m_idx)
+                else:
+                    break
+            if melisma_last_idx > best_idx and item.syllabic in ("single", "end"):
+                item = LyricAlignmentItem(text=item.text, syllabic=item.syllabic, extend=True)
+
             note_lyrics[matched_note.id] = item
             by_onset_sec.append((matched_note.onset_sec, item))
             used_note_indices.add(best_idx)
-            search_start = best_idx + 1
+            search_start = melisma_last_idx + 1
         else:
             uncertain.append(
                 {
