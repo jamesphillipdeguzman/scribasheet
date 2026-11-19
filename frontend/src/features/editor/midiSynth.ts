@@ -44,6 +44,7 @@ export function computePianoEnvelopeParams(
 export class MidiSynthesizer {
   private ctx: AudioContext | null = null;
   private activeOscs: Set<{ stop: () => void }> = new Set();
+  private sustainedVoices: Map<number, { release: () => void }> = new Map();
   private rafId: number | null = null;
   private isPlaying = false;
   private startPerfMs = 0;
@@ -138,6 +139,108 @@ export class MidiSynthesizer {
     };
     this.activeOscs.add(handle);
     osc1.onended = () => this.activeOscs.delete(handle);
+  }
+
+  public startSustainedNote(pitchMidi: number, velocity = 85, volume = 0.7) {
+    // Stop any previous voice on the same pitch cleanly to avoid stuck notes
+    this.stopSustainedNote(pitchMidi);
+    const ctx = this.ensureContext();
+    const startAt = ctx.currentTime;
+    const freq = midiToFreq(pitchMidi);
+    const env = computePianoEnvelopeParams(pitchMidi, 2.0, velocity, volume);
+
+    const osc1 = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    const osc3 = ctx.createOscillator();
+    const harm2Gain = ctx.createGain();
+    const harm3Gain = ctx.createGain();
+    const filter = ctx.createBiquadFilter();
+    const masterGain = ctx.createGain();
+
+    osc1.type = "triangle";
+    osc1.frequency.setValueAtTime(freq, startAt);
+    osc2.type = "sine";
+    osc2.frequency.setValueAtTime(freq * 2, startAt);
+    osc3.type = "sine";
+    osc3.frequency.setValueAtTime(freq * 3, startAt);
+
+    harm2Gain.gain.setValueAtTime(0.32, startAt);
+    harm3Gain.gain.setValueAtTime(0.10, startAt);
+
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(env.filterCutoffHz, startAt);
+    filter.frequency.exponentialRampToValueAtTime(
+      Math.max(220, env.filterCutoffHz * 0.45),
+      startAt + 1.5
+    );
+
+    masterGain.gain.setValueAtTime(0.0001, startAt);
+    masterGain.gain.linearRampToValueAtTime(env.peakGain, startAt + env.attackSec);
+    masterGain.gain.exponentialRampToValueAtTime(env.sustainGain, startAt + 0.35);
+
+    osc1.connect(filter);
+    osc2.connect(harm2Gain);
+    harm2Gain.connect(filter);
+    osc3.connect(harm3Gain);
+    harm3Gain.connect(filter);
+    filter.connect(masterGain);
+    masterGain.connect(ctx.destination);
+
+    osc1.start(startAt);
+    osc2.start(startAt);
+    osc3.start(startAt);
+
+    let released = false;
+    const stopAll = () => {
+      try {
+        osc1.stop();
+        osc2.stop();
+        osc3.stop();
+      } catch {
+        // already stopped
+      }
+    };
+    const handle = { stop: stopAll };
+    this.activeOscs.add(handle);
+    osc1.onended = () => this.activeOscs.delete(handle);
+
+    this.sustainedVoices.set(pitchMidi, {
+      release: () => {
+        if (released) return;
+        released = true;
+        const now = ctx.currentTime;
+        try {
+          masterGain.gain.cancelScheduledValues(now);
+          masterGain.gain.setValueAtTime(Math.max(0.0001, masterGain.gain.value), now);
+          masterGain.gain.exponentialRampToValueAtTime(0.0001, now + env.releaseSec);
+          const stopAt = now + env.releaseSec + 0.03;
+          osc1.stop(stopAt);
+          osc2.stop(stopAt);
+          osc3.stop(stopAt);
+        } catch {
+          stopAll();
+        }
+      },
+    });
+  }
+
+  public stopSustainedNote(pitchMidi: number) {
+    const voice = this.sustainedVoices.get(pitchMidi);
+    if (voice) {
+      this.sustainedVoices.delete(pitchMidi);
+      voice.release();
+    }
+  }
+
+  public stopAllSustainedNotes() {
+    for (const [pitch, voice] of this.sustainedVoices.entries()) {
+      this.sustainedVoices.delete(pitch);
+      voice.release();
+    }
+  }
+
+  public playMetronomeClick(accent = false, volume = 0.7) {
+    this.triggerMetronomeClick(accent, volume);
   }
 
   private triggerMetronomeClick(accent: boolean, volume: number) {

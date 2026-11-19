@@ -821,12 +821,15 @@ export function ProjectStudioPage() {
                 (scoreData ? (
                   <PianoRollEditor
                     notes={scoreData.notes}
+                    tracks={scoreData.tracks}
                     durationSeconds={scoreData.duration_seconds}
                     tempoBpm={scoreData.tempo_bpm}
+                    timeSignature={scoreData.time_signature}
                     playheadSec={playheadSec}
                     selectedNoteId={selectedNoteId}
                     onSelectNote={setSelectedNoteId}
                     onChangeNotes={handleNotesChange}
+                    onPlayheadChange={setPlayheadSec}
                   />
                 ) : (
                   <div className="py-12 text-center text-sm text-[#A1A1AA]">
