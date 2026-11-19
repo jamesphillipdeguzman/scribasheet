@@ -14,6 +14,7 @@ interface WaveformPlayerProps {
   tempoBpm: number;
   playheadSec: number;
   onPlayheadChange: (sec: number) => void;
+  seekRequest?: { sec: number; autoplay?: boolean; nonce: number } | null;
 }
 
 export function WaveformPlayer({
@@ -23,6 +24,7 @@ export function WaveformPlayer({
   tempoBpm,
   playheadSec,
   onPlayheadChange,
+  seekRequest = null,
 }: WaveformPlayerProps) {
   const waveContainerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
@@ -104,6 +106,36 @@ export function WaveformPlayer({
       midiSynth.stop();
     };
   }, []);
+
+  useEffect(() => {
+    if (!seekRequest) return;
+    const target = Math.max(0, seekRequest.sec);
+    onPlayheadChange(target);
+    if (sourceMode === "original" && wsRef.current) {
+      const dur = wsRef.current.getDuration() || durationSeconds || 1;
+      wsRef.current.seekTo(Math.min(1, target / Math.max(0.01, dur)));
+      if (seekRequest.autoplay) {
+        midiSynth.stop();
+        void wsRef.current.play();
+        setIsPlaying(true);
+      }
+    } else if (seekRequest.autoplay) {
+      if (wsRef.current?.isPlaying()) wsRef.current.pause();
+      setIsPlaying(true);
+      midiSynth.start({
+        notes,
+        fromSec: target,
+        durationSec: durationSeconds,
+        tempoBpm,
+        playbackRate,
+        volume,
+        loop,
+        metronome,
+        onPosition: onPlayheadChange,
+        onEnd: () => setIsPlaying(false),
+      });
+    }
+  }, [seekRequest?.nonce]);
 
   const stopAll = () => {
     midiSynth.stop();

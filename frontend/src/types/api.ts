@@ -206,6 +206,8 @@ export interface LyricSegment {
   end_sec: number;
   confidence?: number | null;
   needs_review?: boolean;
+  reviewed?: boolean;
+  edited?: boolean;
   words: LyricWord[];
 }
 

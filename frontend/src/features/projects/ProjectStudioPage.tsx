@@ -44,6 +44,7 @@ export function ProjectStudioPage() {
   const [activeTab, setActiveTab] = useState<StudioTab>("notation");
   const [showPartMixerOverride, setShowPartMixerOverride] = useState<boolean | null>(null);
   const [playheadSec, setPlayheadSec] = useState(0);
+  const [seekRequest, setSeekRequest] = useState<{ sec: number; autoplay?: boolean; nonce: number } | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
 
   // Score state + Undo/Redo history
@@ -638,6 +639,7 @@ export function ProjectStudioPage() {
               tempoBpm={scoreData?.tempo_bpm || 120}
               playheadSec={playheadSec}
               onPlayheadChange={setPlayheadSec}
+              seekRequest={seekRequest}
             />
 
             {/* Workspace Tabs */}
@@ -807,7 +809,7 @@ export function ProjectStudioPage() {
                   hasMedia={Boolean(originalAsset)}
                   activeJob={activeJob}
                   onJobStarted={(job) => setActiveJob(job)}
-                  onSeek={(sec) => setPlayheadSec(sec)}
+                  onSeek={(sec) => setSeekRequest({ sec, autoplay: true, nonce: Date.now() })}
                   onLyricsSaved={() => loadScore()}
                 />
               )}

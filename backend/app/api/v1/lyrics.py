@@ -71,20 +71,58 @@ def update_project_lyrics(
     original_segments = current.original_segments if current.original_segments else current.segments
 
     text_changed = payload.text.strip() != current.text.strip()
-    updated_segments = payload.segments if payload.segments is not None else current.segments
     has_word_ts = current.has_word_timestamps
-    if payload.segments is None and text_changed:
-        has_word_ts = False
-        new_lines = [ln.strip() for ln in payload.text.splitlines() if ln.strip()]
-        if current.segments and len(new_lines) == len(current.segments):
-            # Keep reliable segment boundaries when line count matches, without fabricating word timings
-            updated_segments = [
-                seg.model_copy(update={"text": new_lines[i], "needs_review": False, "words": []})
-                for i, seg in enumerate(current.segments)
-            ]
-        else:
-            # Clear stale segment timestamps if lines were merged/split; never fabricate timestamps
-            updated_segments = []
+
+    if payload.segments is not None:
+        prior_by_id = {s.id: s for s in current.segments}
+        sanitized_segments = []
+        any_seg_edited = False
+        for seg in payload.segments:
+            prev = prior_by_id.get(seg.id)
+            seg_text_changed = prev is not None and seg.text.strip() != prev.text.strip()
+            if seg_text_changed:
+                any_seg_edited = True
+            sanitized_segments.append(
+                seg.model_copy(
+                    update={
+                        "edited": seg.edited or seg_text_changed,
+                        # Do not fabricate word timestamps for edited segments
+                        "words": [] if (seg_text_changed or seg.edited) else seg.words,
+                    }
+                )
+            )
+        updated_segments = sanitized_segments
+        if any_seg_edited or text_changed:
+            has_word_ts = any(bool(s.words) for s in updated_segments)
+    else:
+        updated_segments = current.segments
+        if text_changed:
+            has_word_ts = False
+            new_lines = [ln.strip() for ln in payload.text.splitlines() if ln.strip()]
+            if current.segments and len(new_lines) == len(current.segments):
+                updated_segments = []
+                for i, seg in enumerate(current.segments):
+                    line_changed = new_lines[i] != seg.text.strip()
+                    if line_changed:
+                        updated_segments.append(
+                            seg.model_copy(
+                                update={
+                                    "text": new_lines[i],
+                                    "needs_review": False,
+                                    "reviewed": True,
+                                    "edited": True,
+                                    "words": [],
+                                }
+                            )
+                        )
+                    else:
+                        updated_segments.append(seg)
+            elif current.segments:
+                # Preserve existing timestamps & flag segments for review when line boundaries shift
+                updated_segments = [
+                    seg.model_copy(update={"needs_review": True, "words": []})
+                    for seg in current.segments
+                ]
 
     updated = current.model_copy(
         update={

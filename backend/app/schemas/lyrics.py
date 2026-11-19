@@ -22,6 +22,8 @@ class LyricSegment(BaseModel):
     end_sec: float = Field(ge=0.0)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     needs_review: bool = False
+    reviewed: bool = False
+    edited: bool = False
     words: list[LyricWord] = Field(default_factory=list)
 
 
