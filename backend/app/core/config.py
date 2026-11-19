@@ -66,17 +66,45 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_TRANSCRIPTIONS: int = 2
 
     # Storage
-    STORAGE_BACKEND: Literal["local", "s3", "supabase"] = "local"
+    STORAGE_BACKEND: Literal["local", "r2", "s3", "supabase"] = "local"
     LOCAL_STORAGE_ROOT: str = "./storage_data"
     SIGNED_URL_SECRET: str = "dev-only-signed-url-secret-change-in-production"
     SIGNED_URL_TTL_SECONDS: int = 900
     S3_PRESIGNED_PUT_TTL_SECONDS: int = 900
+
+    # Cloudflare R2 (preferred) / S3-compatible fallback
+    R2_BUCKET_NAME: str = ""
+    R2_ENDPOINT_URL: str = ""
+    R2_ACCESS_KEY_ID: str = ""
+    R2_SECRET_ACCESS_KEY: str = ""
 
     S3_ENDPOINT_URL: str = ""
     S3_BUCKET_NAME: str = "scribasheet-private"
     S3_ACCESS_KEY_ID: str = ""
     S3_SECRET_ACCESS_KEY: str = ""
     S3_REGION: str = "us-east-1"
+
+    @property
+    def effective_s3_bucket(self) -> str:
+        return (self.R2_BUCKET_NAME or self.S3_BUCKET_NAME).strip()
+
+    @property
+    def effective_s3_endpoint(self) -> str:
+        return (self.R2_ENDPOINT_URL or self.S3_ENDPOINT_URL).strip()
+
+    @property
+    def effective_s3_access_key_id(self) -> str:
+        return (self.R2_ACCESS_KEY_ID or self.S3_ACCESS_KEY_ID).strip()
+
+    @property
+    def effective_s3_secret_access_key(self) -> str:
+        return (self.R2_SECRET_ACCESS_KEY or self.S3_SECRET_ACCESS_KEY).strip()
+
+    @property
+    def effective_s3_region(self) -> str:
+        if self.STORAGE_BACKEND == "r2" and self.S3_REGION == "us-east-1":
+            return "auto"
+        return (self.S3_REGION or "auto").strip()
 
     # Media & AI
     MAX_UPLOAD_SIZE_MB: int = 100

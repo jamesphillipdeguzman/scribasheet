@@ -101,10 +101,10 @@ def presign_upload(
         except MediaValidationError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
 
-    if storage_service.backend != "s3":
+    if not storage_service.is_object_storage:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Direct presigned uploads require STORAGE_BACKEND=s3 (Cloudflare R2). Use multipart POST /api/v1/uploads for local storage.",
+            detail="Direct presigned uploads require STORAGE_BACKEND=r2 (or s3). Use multipart POST /api/v1/uploads for local storage.",
         )
 
     key = storage_service.build_key(current_user.id, project.id, "originals", safe_name)

@@ -372,9 +372,9 @@ def claim_next_job(
             )
 
     artifact_targets: dict[str, dict[str, str | int]] = {}
-    if storage_service.backend == "s3":
-        midi_key = storage_service.build_key(job.user_id, job.project_id, "midi", "transcription.mid")
-        xml_key = storage_service.build_key(job.user_id, job.project_id, "musicxml", "score.musicxml")
+    if storage_service.is_object_storage:
+        midi_key = storage_service.build_key(job.user_id, job.project_id, "midi", "transcription.mid", job_id=job.id)
+        xml_key = storage_service.build_key(job.user_id, job.project_id, "musicxml", "score.musicxml", job_id=job.id)
         artifact_targets["midi"] = storage_service.create_presigned_put_url(midi_key, "audio/midi")
         artifact_targets["musicxml"] = storage_service.create_presigned_put_url(
             xml_key, "application/vnd.recordare.musicxml+xml"
@@ -532,6 +532,8 @@ def complete_job(
 
     midi_asset_id: str | None = None
     if midi_key:
+        if midi_size_bytes == 0:
+            midi_size_bytes = storage_service.get_object_size(midi_key) or 0
         midi_asset = MediaAsset(
             project_id=job.project_id,
             user_id=job.user_id,
@@ -548,6 +550,8 @@ def complete_job(
 
     xml_asset_id: str | None = None
     if xml_key:
+        if xml_size_bytes == 0:
+            xml_size_bytes = storage_service.get_object_size(xml_key) or 0
         xml_asset = MediaAsset(
             project_id=job.project_id,
             user_id=job.user_id,
