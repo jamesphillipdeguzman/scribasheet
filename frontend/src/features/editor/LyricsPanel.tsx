@@ -36,6 +36,9 @@ export function LyricsPanel({
   const [saving, setSaving] = useState(false);
   const [starting, setStarting] = useState(false);
   const [useDemucs, setUseDemucs] = useState(true);
+  const [selectedLang, setSelectedLang] = useState<string>("auto");
+  const [selectedModel, setSelectedModel] = useState<string>("auto");
+  const [showOriginal, setShowOriginal] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -47,6 +50,9 @@ export function LyricsPanel({
       const data = await api.getLyrics(projectId);
       setLyrics(data);
       setDraftText(data.text || "");
+      if (data.language) {
+        setSelectedLang(data.language);
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load lyrics.");
     } finally {
@@ -80,7 +86,8 @@ export function LyricsPanel({
     try {
       const job = await api.transcribeLyrics(projectId, {
         enable_source_separation: useDemucs,
-        whisper_model: "small",
+        whisper_model: selectedModel,
+        language: selectedLang === "auto" ? null : selectedLang,
         force_overwrite: Boolean(lyrics?.manually_edited),
       });
       onJobStarted?.(job);
@@ -165,6 +172,30 @@ export function LyricsPanel({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <select
+            aria-label="Lyrics Language"
+            value={selectedLang}
+            onChange={(e) => setSelectedLang(e.target.value)}
+            className="h-8 rounded-lg border border-[#27273A] bg-[#11111B] px-2 text-xs text-[#F5F3FF]"
+          >
+            <option value="auto">Auto Language</option>
+            <option value="tl">Tagalog (tl)</option>
+            <option value="en">English (en)</option>
+            <option value="es">Spanish (es)</option>
+            <option value="ja">Japanese (ja)</option>
+            <option value="ko">Korean (ko)</option>
+          </select>
+          <select
+            aria-label="Whisper Model"
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            className="h-8 rounded-lg border border-[#27273A] bg-[#11111B] px-2 text-xs text-[#F5F3FF]"
+          >
+            <option value="auto">Model: Auto</option>
+            <option value="medium">Model: Medium</option>
+            <option value="small">Model: Small</option>
+            <option value="large-v3-turbo">Model: Large v3 Turbo</option>
+          </select>
           <label className="flex items-center gap-1.5 text-xs text-[#A1A1AA] cursor-pointer">
             <input
               type="checkbox"
@@ -251,7 +282,34 @@ export function LyricsPanel({
               <Button size="sm" variant="outline" onClick={() => handleExport("srt")} disabled={!hasContent}>
                 <Download className="h-3 w-3" /> .srt
               </Button>
+              {lyrics?.manually_edited && lyrics.original_text && lyrics.original_text !== lyrics.text && (
+                <button
+                  type="button"
+                  onClick={() => setShowOriginal((prev) => !prev)}
+                  className="ml-auto text-[11px] text-[#A78BFA] hover:underline"
+                >
+                  {showOriginal ? "Hide Original Whisper Transcript" : "Compare Original Whisper Transcript"}
+                </button>
+              )}
             </div>
+            {showOriginal && lyrics?.original_text && (
+              <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-3 space-y-1">
+                <div className="text-[11px] font-medium text-[#A1A1AA]">
+                  Original Whisper Transcript (for comparison)
+                </div>
+                <pre className="whitespace-pre-wrap text-xs text-[#A1A1AA] font-sans leading-relaxed">
+                  {lyrics.original_text}
+                </pre>
+              </div>
+            )}
+            {lyrics?.alignment_uncertain_segments && lyrics.alignment_uncertain_segments.length > 0 && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-[11px] text-amber-200 flex items-center gap-2">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  {lyrics.alignment_uncertain_segments.length} lyric syllable(s) could not be matched cleanly to melody note onsets and were flagged for review.
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="space-y-2">

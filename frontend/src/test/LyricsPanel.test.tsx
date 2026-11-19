@@ -88,4 +88,41 @@ describe("LyricsPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /re-transcribe lyrics/i }));
     await waitFor(() => expect(transcribeSpy).toHaveBeenCalled());
   });
+
+  it("supports Tagalog language selection, model selection, and original Whisper comparison", async () => {
+    vi.restoreAllMocks();
+    vi.spyOn(api, "getLyrics").mockResolvedValue({
+      text: "Na para bang",
+      original_text: "Na pa rang",
+      segments: [],
+      language: "tl",
+      source_used: "vocals_stem",
+      demucs_requested: true,
+      demucs_fallback_used: false,
+      model_name: "medium",
+      device: "cpu",
+      has_word_timestamps: false,
+      uncertain_segments: [],
+      alignment_uncertain_segments: [{ text: "bang", target_sec: 2.1 }],
+      manually_edited: true,
+      updated_at: null,
+    });
+    const transcribeSpy = vi.spyOn(api, "transcribeLyrics").mockResolvedValue({} as never);
+
+    render(<LyricsPanel projectId="proj-tl" projectTitle="Na Para Bang" hasMedia={true} activeJob={null} />);
+
+    await waitFor(() => expect(screen.getByText(/compare original whisper transcript/i)).toBeInTheDocument());
+    fireEvent.click(screen.getByText(/compare original whisper transcript/i));
+    expect(screen.getByText("Na pa rang")).toBeInTheDocument();
+    expect(screen.getByText(/1 lyric syllable\(s\) could not be matched/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Whisper Model"), { target: { value: "medium" } });
+    fireEvent.click(screen.getByRole("button", { name: /re-transcribe lyrics/i }));
+    await waitFor(() =>
+      expect(transcribeSpy).toHaveBeenCalledWith(
+        "proj-tl",
+        expect.objectContaining({ language: "tl", whisper_model: "medium" }),
+      ),
+    );
+  });
 });

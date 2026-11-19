@@ -426,6 +426,9 @@ class RealTranscriptionHandler:
                         source_used=source_used,  # type: ignore[arg-type]
                         demucs_requested=bool(settings.enable_source_separation),
                         demucs_fallback_used=demucs_fallback_used,
+                        condition_on_previous_text=bool(
+                            job.get("settings_json", {}).get("condition_on_previous_text", False)
+                        ),
                     )
                 except LyricsTranscriptionError as exc:
                     raise TranscriptionInferenceError(exc.code, exc.message) from exc

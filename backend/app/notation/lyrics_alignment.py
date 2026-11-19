@@ -9,7 +9,9 @@ from typing import Any
 from app.schemas.lyrics import LyricsData
 from app.schemas.score import ScoreNote
 
-_VOWEL_GROUP_RE = re.compile(r"[^aeiouyAEIOUY]*[aeiouyAEIOUY]+(?:[^aeiouyAEIOUY]+(?=$|[^aeiouyAEIOUY]))?")
+_VOWEL_GROUP_RE = re.compile(
+    r"(?:ng|[^aeiouyAEIOUY])*[aeiouyAEIOUY]+(?:(?:ng|[^aeiouyAEIOUY])+(?=$|[^aeiouyAEIOUY]))?"
+)
 
 
 @dataclass
@@ -32,8 +34,8 @@ def split_word_into_syllables(word: str) -> list[str]:
     cleaned = word.strip()
     if not cleaned:
         return []
-    # Preserve non-Latin scripts (e.g. Tagalog/CJK/etc.) as single word unless short Latin heuristic applies
-    if len(cleaned) <= 4 or not all(ord(ch) < 256 for ch in cleaned):
+    # Preserve non-Latin scripts (e.g. CJK) intact; split Latin/Tagalog words >= 3 chars
+    if len(cleaned) <= 2 or not all(ord(ch) < 256 for ch in cleaned):
         return [cleaned]
     core = re.sub(r"^[^\w]+|[^\w]+$", "", cleaned)
     if not core or not re.search(r"[aeiouyAEIOUY]", core):
@@ -83,10 +85,22 @@ def align_lyrics_to_notes(
             words = [w for w in seg.text.split() if w.strip()]
             if not words:
                 continue
+            syll_tokens: list[LyricAlignmentItem] = []
+            for w in words:
+                sylls = split_word_into_syllables(w)
+                for i, syl in enumerate(sylls):
+                    syllabic = (
+                        "single"
+                        if len(sylls) == 1
+                        else ("begin" if i == 0 else ("end" if i == len(sylls) - 1 else "middle"))
+                    )
+                    syll_tokens.append(LyricAlignmentItem(text=syl, syllabic=syllabic))
+            if not syll_tokens:
+                continue
             span = max(0.1, seg.end_sec - seg.start_sec)
-            step = span / len(words)
-            for i, w in enumerate(words):
-                timed_tokens.append((seg.start_sec + i * step, LyricAlignmentItem(text=w, syllabic="single")))
+            step = span / len(syll_tokens)
+            for i, item in enumerate(syll_tokens):
+                timed_tokens.append((seg.start_sec + i * step, item))
 
     if not timed_tokens and lyrics.text.strip():
         words = [w for w in lyrics.text.split() if w.strip()]

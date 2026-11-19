@@ -324,3 +324,156 @@ def test_youtube_url_check_metadata_and_validation(client, monkeypatch):
         json={"url": "https://www.youtube.com/watch"},
     )
     assert bad.status_code == 400
+
+
+def test_resolve_whisper_model_size_env_and_resource_aware(monkeypatch):
+    import psutil
+
+    from app.transcription.lyrics import resolve_whisper_model_size
+
+    monkeypatch.setenv("WHISPER_MODEL_SIZE", "large-v3-turbo")
+    assert resolve_whisper_model_size("small", device="cpu") == "large-v3-turbo"
+
+    monkeypatch.delenv("WHISPER_MODEL_SIZE", raising=False)
+    assert resolve_whisper_model_size("auto", device="cuda") == "large-v3-turbo"
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: SimpleNamespace(total=16 * 1024**3))
+    assert resolve_whisper_model_size("auto", device="cpu") == "medium"
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: SimpleNamespace(total=8 * 1024**3))
+    assert resolve_whisper_model_size("auto", device="cpu") == "small"
+
+
+def test_transcribe_lyrics_tagalog_prompt_and_original_snapshot(tmp_path: Path, monkeypatch):
+    from app.transcription.lyrics import TAGALOG_LYRICS_INITIAL_PROMPT
+
+    audio = tmp_path / "na_para_bang_vocals.wav"
+    audio.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+    captured_kwargs: dict = {}
+
+    class _TagalogWhisperModel:
+        def __init__(self, model_size, **kwargs):
+            self.model_size = model_size
+
+        def transcribe(self, path, **kwargs):
+            captured_kwargs.update(kwargs)
+            segs = [
+                SimpleNamespace(
+                    text="Na para bang may kulang",
+                    start=0.2,
+                    end=2.2,
+                    avg_logprob=-0.22,
+                    no_speech_prob=0.02,
+                    words=[],
+                )
+            ]
+            return iter(segs), SimpleNamespace(language="tl", language_probability=0.93)
+
+    fake_fw = types.ModuleType("faster_whisper")
+    fake_fw.WhisperModel = _TagalogWhisperModel  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_fw)
+
+    res = transcribe_lyrics(
+        audio,
+        model_name="medium",
+        language="tl",
+        source_used="vocals_stem",
+        cache_dir=tmp_path / "cache",
+        device="cpu",
+    )
+    assert captured_kwargs["language"] == "tl"
+    assert captured_kwargs["initial_prompt"] == TAGALOG_LYRICS_INITIAL_PROMPT
+    assert captured_kwargs["vad_filter"] is False
+    assert captured_kwargs["condition_on_previous_text"] is False
+    assert res.original_text == "Na para bang may kulang"
+    assert res.processing_metadata["initial_prompt_used"] is True
+
+
+def test_tagalog_resyllabification_and_save_edits_updates_musicxml_without_altering_notes(client, db_session):
+    from app.notation.lyrics_alignment import split_word_into_syllables
+
+    assert split_word_into_syllables("para") == ["pa", "ra"]
+    assert len(split_word_into_syllables("tanging")) == 2
+
+    headers, user_id = _auth_headers(client, "tagalog_edit@scribasheet.dev")
+    project = Project(
+        user_id=user_id,
+        title="Na Para Bang",
+        instrument="vocals",
+        transcription_mode="melody",
+        status="ready",
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    notes = [
+        DetectedNote(pitch_midi=64, onset_sec=0.0, offset_sec=0.45, velocity=92, confidence=0.95),
+        DetectedNote(pitch_midi=65, onset_sec=0.5, offset_sec=0.95, velocity=92, confidence=0.95),
+        DetectedNote(pitch_midi=67, onset_sec=1.0, offset_sec=1.45, velocity=92, confidence=0.95),
+        DetectedNote(pitch_midi=69, onset_sec=1.5, offset_sec=1.95, velocity=92, confidence=0.95),
+    ]
+    initial_lyrics = LyricsData(
+        text="Na pa rang",
+        original_text="Na pa rang",
+        segments=[
+            LyricSegment(
+                id="seg_1",
+                text="Na pa rang",
+                start_sec=0.0,
+                end_sec=1.95,
+                words=[LyricWord(text="Na", start_sec=0.0, end_sec=0.4, confidence=0.7)],
+            )
+        ],
+        language="tl",
+        has_word_timestamps=True,
+    )
+    score = build_score_data(
+        title="Na Para Bang",
+        detected_notes=notes,
+        tempo_bpm=120.0,
+        tempo_estimated=False,
+        time_signature="4/4",
+        time_signature_estimated=False,
+        key_signature="C",
+        key_signature_estimated=False,
+        duration_seconds=2.0,
+        instrument="vocals",
+        clef_override="treble",
+        track_name_override="Lead Melody",
+        monophonic=True,
+        analysis={"mode": "melody", "lyrics": initial_lyrics.model_dump()},
+    )
+    original_pitches = [n.pitch_midi for n in score.notes]
+    db_session.add(
+        ProjectScore(
+            project_id=project.id,
+            version=1,
+            score_json=score.model_dump(),
+            musicxml_path="unused/tl.musicxml",
+            midi_path="unused/tl.mid",
+        )
+    )
+    db_session.commit()
+
+    # Save manual Tagalog correction
+    put_res = client.put(
+        f"/api/v1/projects/{project.id}/lyrics",
+        headers=headers,
+        json={"text": "Na para bang", "language": "tl"},
+    )
+    assert put_res.status_code == 200
+    body = put_res.json()
+    assert body["text"] == "Na para bang"
+    assert body["original_text"] == "Na pa rang"
+    assert body["manually_edited"] is True
+    assert body["has_word_timestamps"] is False
+
+    # Verify MusicXML updated with corrected Tagalog syllables and unaltered note pitches
+    score_res = client.get(f"/api/v1/projects/{project.id}/score", headers=headers)
+    assert score_res.status_code == 200
+    score_body = score_res.json()
+    assert [n["pitch_midi"] for n in score_body["score_json"]["notes"]] == original_pitches
+    root = ET.fromstring(score_body["musicxml"])
+    lyric_texts = [el.text for el in root.findall(".//note/lyric/text") if el.text]
+    assert lyric_texts == ["Na", "pa", "ra", "bang"]

@@ -37,6 +37,10 @@ class LyricsData(BaseModel):
     device: str = "cpu"
     has_word_timestamps: bool = False
     uncertain_segments: list[dict[str, Any]] = Field(default_factory=list)
+    alignment_uncertain_segments: list[dict[str, Any]] = Field(default_factory=list)
+    original_text: str | None = None
+    original_segments: list[LyricSegment] = Field(default_factory=list)
+    processing_metadata: dict[str, Any] = Field(default_factory=dict)
     manually_edited: bool = False
     updated_at: str | None = None
 
@@ -49,6 +53,7 @@ class LyricsUpdateRequest(BaseModel):
 
 class LyricsTranscribeRequest(BaseModel):
     enable_source_separation: bool = False
-    whisper_model: str = Field(default="small")
+    whisper_model: str | None = None
     language: str | None = None
+    condition_on_previous_text: bool = False
     force_overwrite: bool = False

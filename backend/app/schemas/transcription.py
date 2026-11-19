@@ -27,7 +27,7 @@ class TranscriptionSettings(BaseModel):
     demucs_segment_sec: float | None = Field(default=None, ge=4.0, le=60.0)
     demucs_overlap: float = Field(default=0.25, ge=0.05, le=0.75)
     show_chord_symbols: bool = Field(default=True)
-    whisper_model: str = Field(default="small")
+    whisper_model: str = Field(default="auto")
     language: str | None = Field(default=None)
     force_overwrite: bool = Field(default=False)
 

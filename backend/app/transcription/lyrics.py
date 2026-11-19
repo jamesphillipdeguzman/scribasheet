@@ -15,6 +15,43 @@ from app.schemas.lyrics import LyricsData, LyricSegment, LyricWord
 
 logger = logging.getLogger(__name__)
 
+SUPPORTED_WHISPER_MODELS = ("small", "medium", "large-v3-turbo")
+TAGALOG_LYRICS_INITIAL_PROMPT = (
+    "Awit sa Tagalog. Pakinggan nang malinaw ang mga salita at parirala ng kanta."
+)
+
+
+def resolve_whisper_model_size(requested_model: str | None = None, *, device: str = "cpu") -> str:
+    """Resolve Whisper model size from WHISPER_MODEL_SIZE env, request, or system resources."""
+    env_val = os.environ.get("WHISPER_MODEL_SIZE", "").strip().lower()
+    if env_val and env_val != "auto":
+        return env_val
+
+    try:
+        from app.core.config import get_settings
+
+        cfg_val = (get_settings().WHISPER_MODEL_SIZE or "").strip().lower()
+        if cfg_val and cfg_val != "auto":
+            return cfg_val
+    except Exception:
+        pass
+
+    req_val = (requested_model or "").strip().lower()
+    if req_val and req_val != "auto":
+        return req_val
+
+    if device == "cuda":
+        return "large-v3-turbo"
+    try:
+        import psutil  # type: ignore
+
+        ram_gb = psutil.virtual_memory().total / (1024**3)
+        if ram_gb >= 12.0:
+            return "medium"
+    except Exception:
+        pass
+    return "small"
+
 
 class LyricsTranscriptionError(RuntimeError):
     """Actionable lyrics recognition error."""
@@ -91,6 +128,7 @@ def _build_lyrics_data_from_raw(
     source_used: Literal["vocals_stem", "original_audio", "manual"],
     demucs_requested: bool,
     demucs_fallback_used: bool,
+    processing_metadata: dict[str, Any] | None = None,
 ) -> LyricsData:
     segments: list[LyricSegment] = []
     uncertain: list[dict[str, Any]] = []
@@ -157,8 +195,9 @@ def _build_lyrics_data_from_raw(
         )
         lines.append(text)
 
+    full_text = "\n".join(lines)
     return LyricsData(
-        text="\n".join(lines),
+        text=full_text,
         segments=segments,
         language=language,
         language_probability=round(float(language_probability), 3) if language_probability is not None else None,
@@ -169,6 +208,9 @@ def _build_lyrics_data_from_raw(
         device=device,
         has_word_timestamps=has_word_ts,
         uncertain_segments=uncertain,
+        original_text=full_text,
+        original_segments=segments,
+        processing_metadata=processing_metadata or {},
         manually_edited=False,
         updated_at=datetime.now(UTC).isoformat(),
     )
@@ -183,20 +225,26 @@ def _run_whisper_subprocess(
     device: str,
     compute_type: str,
     cache_dir: Path,
+    initial_prompt: str | None = None,
+    condition_on_previous_text: bool = False,
+    vad_filter: bool = False,
 ) -> dict[str, Any]:
     script = (
         "import json, math, sys\n"
         "from faster_whisper import WhisperModel\n"
         "cfg = json.loads(sys.argv[1])\n"
         "model = WhisperModel(cfg['model'], device=cfg['device'], compute_type=cfg['compute_type'], download_root=cfg['cache_dir'])\n"
-        "segs_iter, info = model.transcribe(\n"
-        "    cfg['audio'],\n"
-        "    language=cfg['language'],\n"
-        "    vad_filter=False,\n"
-        "    word_timestamps=True,\n"
-        "    condition_on_previous_text=True,\n"
-        "    beam_size=5,\n"
-        ")\n"
+        "kw = {\n"
+        "    'language': cfg['language'],\n"
+        "    'vad_filter': cfg['vad_filter'],\n"
+        "    'word_timestamps': True,\n"
+        "    'condition_on_previous_text': cfg['condition_on_previous_text'],\n"
+        "    'beam_size': 5,\n"
+        "    'repetition_penalty': 1.15,\n"
+        "    'no_repeat_ngram_size': 3,\n"
+        "}\n"
+        "if cfg.get('initial_prompt'): kw['initial_prompt'] = cfg['initial_prompt']\n"
+        "segs_iter, info = model.transcribe(cfg['audio'], **kw)\n"
         "out_segs = []\n"
         "for s in segs_iter:\n"
         "    words = []\n"
@@ -220,6 +268,9 @@ def _run_whisper_subprocess(
             "device": device,
             "compute_type": compute_type,
             "cache_dir": str(cache_dir),
+            "initial_prompt": initial_prompt,
+            "condition_on_previous_text": bool(condition_on_previous_text),
+            "vad_filter": bool(vad_filter),
         }
     )
     proc = subprocess.run(
@@ -243,13 +294,15 @@ def _run_whisper_subprocess(
 def transcribe_lyrics(
     audio_path: Path,
     *,
-    model_name: str = "small",
+    model_name: str | None = None,
     language: str | None = None,
     source_used: Literal["vocals_stem", "original_audio", "manual"] = "original_audio",
     demucs_requested: bool = False,
     demucs_fallback_used: bool = False,
     cache_dir: Path | None = None,
     device: str | None = None,
+    condition_on_previous_text: bool = False,
+    vad_filter: bool = False,
 ) -> LyricsData:
     """Recognize sung lyrics from an audio file or vocal stem using faster-whisper."""
     if not audio_path.exists():
@@ -257,25 +310,31 @@ def transcribe_lyrics(
 
     resolved_cache = resolve_whisper_cache_dir(cache_dir)
     selected_device, compute_type = detect_whisper_device(device)
-    cleaned_lang = language.strip() if isinstance(language, str) and language.strip() else None
+    resolved_model = resolve_whisper_model_size(model_name, device=selected_device)
+    cleaned_lang = language.strip().lower() if isinstance(language, str) and language.strip() else None
+    initial_prompt = TAGALOG_LYRICS_INITIAL_PROMPT if cleaned_lang == "tl" else None
 
     try:
         from faster_whisper import WhisperModel  # type: ignore
 
         model = WhisperModel(
-            model_name,
+            resolved_model,
             device=selected_device,
             compute_type=compute_type,
             download_root=str(resolved_cache),
         )
-        segs_iter, info = model.transcribe(
-            str(audio_path),
-            language=cleaned_lang,
-            vad_filter=False,
-            word_timestamps=True,
-            condition_on_previous_text=True,
-            beam_size=5,
-        )
+        transcribe_kwargs: dict[str, Any] = {
+            "language": cleaned_lang,
+            "vad_filter": vad_filter,
+            "word_timestamps": True,
+            "condition_on_previous_text": condition_on_previous_text,
+            "beam_size": 5,
+            "repetition_penalty": 1.15,
+            "no_repeat_ngram_size": 3,
+        }
+        if initial_prompt:
+            transcribe_kwargs["initial_prompt"] = initial_prompt
+        segs_iter, info = model.transcribe(str(audio_path), **transcribe_kwargs)
         raw_segments: list[dict[str, Any]] = []
         for s in segs_iter:
             raw_words = []
@@ -310,11 +369,14 @@ def transcribe_lyrics(
         sub_res = _run_whisper_subprocess(
             iso_python,
             audio_path,
-            model_name=model_name,
+            model_name=resolved_model,
             language=cleaned_lang,
             device=selected_device,
             compute_type=compute_type,
             cache_dir=resolved_cache,
+            initial_prompt=initial_prompt,
+            condition_on_previous_text=condition_on_previous_text,
+            vad_filter=vad_filter,
         )
         raw_segments = sub_res.get("segments") or []
         detected_lang = sub_res.get("language") or cleaned_lang
@@ -328,11 +390,18 @@ def transcribe_lyrics(
         raw_segments,
         language=detected_lang,
         language_probability=lang_prob,
-        model_name=model_name,
+        model_name=resolved_model,
         device=selected_device,
         source_used=source_used,
         demucs_requested=demucs_requested,
         demucs_fallback_used=demucs_fallback_used,
+        processing_metadata={
+            "model_name": resolved_model,
+            "language": detected_lang,
+            "vad_filter": vad_filter,
+            "condition_on_previous_text": condition_on_previous_text,
+            "initial_prompt_used": bool(initial_prompt),
+        },
     )
 
 

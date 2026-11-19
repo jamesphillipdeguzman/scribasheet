@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     MAX_AUDIO_DURATION_SECONDS: int = 900
     FFMPEG_BINARY: str = "ffmpeg"
     ENABLE_SOURCE_SEPARATION: bool = False
+    WHISPER_MODEL_SIZE: str = "auto"
     SOURCE_SEPARATION_BACKEND: str = "none"
 
     # Billing (Stripe)

@@ -221,6 +221,9 @@ export interface LyricsData {
   device: string;
   has_word_timestamps: boolean;
   uncertain_segments: Array<Record<string, unknown>>;
+  alignment_uncertain_segments?: Array<Record<string, unknown>>;
+  original_text?: string | null;
+  processing_metadata?: Record<string, unknown>;
   manually_edited: boolean;
   updated_at: string | null;
 }

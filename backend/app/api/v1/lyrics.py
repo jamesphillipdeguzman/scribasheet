@@ -67,21 +67,33 @@ def update_project_lyrics(
     db: Session = Depends(get_db),
 ):
     current = _load_project_lyrics(db, project.id)
+    original_text = current.original_text if current.original_text is not None else (current.text or None)
+    original_segments = current.original_segments if current.original_segments else current.segments
+
+    text_changed = payload.text.strip() != current.text.strip()
     updated_segments = payload.segments if payload.segments is not None else current.segments
-    if payload.segments is None and payload.text.strip() != current.text.strip() and current.segments:
-        # Keep segment timestamps aligned line-by-line where possible when text is edited
+    has_word_ts = current.has_word_timestamps
+    if payload.segments is None and text_changed:
+        has_word_ts = False
         new_lines = [ln.strip() for ln in payload.text.splitlines() if ln.strip()]
-        if len(new_lines) == len(current.segments):
+        if current.segments and len(new_lines) == len(current.segments):
+            # Keep reliable segment boundaries when line count matches, without fabricating word timings
             updated_segments = [
-                seg.model_copy(update={"text": new_lines[i], "needs_review": False})
+                seg.model_copy(update={"text": new_lines[i], "needs_review": False, "words": []})
                 for i, seg in enumerate(current.segments)
             ]
+        else:
+            # Clear stale segment timestamps if lines were merged/split; never fabricate timestamps
+            updated_segments = []
 
     updated = current.model_copy(
         update={
             "text": payload.text,
             "segments": updated_segments,
             "language": payload.language if payload.language is not None else current.language,
+            "has_word_timestamps": has_word_ts,
+            "original_text": original_text,
+            "original_segments": original_segments,
             "manually_edited": True,
             "updated_at": datetime.now(UTC).isoformat(),
         }
@@ -91,6 +103,20 @@ def update_project_lyrics(
     if score_row:
         score_dict = dict(score_row.score_json or {})
         analysis = dict(score_dict.get("analysis") or {})
+
+        if score_dict.get("notes"):
+            try:
+                from app.notation.lyrics_alignment import align_lyrics_to_notes
+
+                validated = ScoreData(**score_dict)
+                melody_notes = [n for n in validated.notes if n.track_index == 0]
+                alignment = align_lyrics_to_notes(updated, melody_notes)
+                updated = updated.model_copy(
+                    update={"alignment_uncertain_segments": alignment.uncertain_segments}
+                )
+            except Exception:
+                pass
+
         analysis["lyrics"] = updated.model_dump()
         score_dict["analysis"] = analysis
         score_row.score_json = score_dict
@@ -170,8 +196,9 @@ def start_lyrics_transcription(
             "mode": "lyrics_transcription",
             "instrument": project.instrument or "vocals",
             "enable_source_separation": bool(payload.enable_source_separation),
-            "whisper_model": payload.whisper_model or "small",
+            "whisper_model": payload.whisper_model or "auto",
             "language": payload.language,
+            "condition_on_previous_text": bool(payload.condition_on_previous_text),
             "force_overwrite": bool(payload.force_overwrite),
         },
     )
