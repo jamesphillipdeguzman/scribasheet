@@ -10,14 +10,25 @@ class Base(DeclarativeBase):
     pass
 
 
+def normalize_database_url(url: str) -> str:
+    """Normalize PostgreSQL URLs to use the Psycopg 3 dialect while preserving query params and SQLite."""
+    cleaned = (url or "").strip()
+    if cleaned.startswith("postgres://"):
+        return "postgresql+psycopg://" + cleaned[len("postgres://") :]
+    if cleaned.startswith("postgresql://"):
+        return "postgresql+psycopg://" + cleaned[len("postgresql://") :]
+    return cleaned
+
+
 def _create_engine():
     settings = get_settings()
+    db_url = normalize_database_url(settings.DATABASE_URL)
     connect_args = {}
-    is_sqlite = settings.DATABASE_URL.startswith("sqlite")
+    is_sqlite = db_url.startswith("sqlite")
     if is_sqlite:
         connect_args = {"check_same_thread": False}
     eng = create_engine(
-        settings.DATABASE_URL,
+        db_url,
         connect_args=connect_args,
         pool_pre_ping=True,
         future=True,
