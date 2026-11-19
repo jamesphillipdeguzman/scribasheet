@@ -212,3 +212,89 @@ def test_satb_pdf_upload_assignment_update_and_mp3_export_api(client, db_session
     )
     assert exp_comb.status_code == 200
     assert "Amazing_Grace_SATB_SATB_Combined.mp3" in exp_comb.headers.get("content-disposition", "")
+
+    # Verify all remaining individual SATB voices export cleanly
+    for voice in ("alto", "tenor", "bass"):
+        exp_v = client.post(
+            f"/api/v1/projects/{project_id}/exports/satb",
+            headers=headers,
+            json={"part": voice, "format": "wav"},
+        )
+        assert exp_v.status_code == 200
+        assert exp_v.content.startswith(b"RIFF")
+
+
+def test_piano_vocal_satb_assignment_inference_and_unassigned_validation(client, db_session):
+    from app.models import ProjectScore
+    from app.notation.satb_audio import infer_satb_voice_assignments
+    from app.schemas.score import ScoreData, ScoreNote, ScoreTrack
+
+    headers = _auth_headers(client, "pv_satb_fix@scribasheet.dev")
+    reg_proj = client.post(
+        "/api/v1/projects",
+        headers=headers,
+        json={"title": "Piano Vocal Export Test", "instrument": "piano", "transcription_mode": "piano_vocal"},
+    )
+    assert reg_proj.status_code == 201
+    project_id = reg_proj.json()["id"]
+
+    pv_score = ScoreData(
+        title="Piano Vocal Export Test",
+        tempo_bpm=120.0,
+        time_signature="4/4",
+        key_signature="C major",
+        duration_seconds=2.0,
+        tracks=[
+            ScoreTrack(index=0, name="Vocal Melody", instrument="vocals", clef="treble", program=0),
+            ScoreTrack(index=1, name="Piano Accompaniment", instrument="piano", clef="bass", program=0),
+        ],
+        notes=[
+            ScoreNote(id="m1", pitch_midi=64, onset_sec=0.0, offset_sec=1.0, velocity=95, track_index=0),
+            ScoreNote(id="a1", pitch_midi=48, onset_sec=0.0, offset_sec=1.0, velocity=75, track_index=1),
+        ],
+        chords=[],
+        analysis={"mode": "piano_vocal"},
+    )
+
+    # Vocal Melody -> soprano, Piano Accompaniment -> None (not Soprano, not Bass)
+    inferred = infer_satb_voice_assignments(pv_score)
+    assert inferred == {0: "soprano", 1: None}
+
+    db_session.add(
+        ProjectScore(
+            project_id=project_id,
+            version=1,
+            score_json=pv_score.model_dump(),
+            musicxml_path="unused/pv.musicxml",
+            midi_path="unused/pv.mid",
+        )
+    )
+    db_session.commit()
+
+    # Assigned voice (soprano) exports cleanly
+    res_sop = client.post(
+        f"/api/v1/projects/{project_id}/exports/satb",
+        headers=headers,
+        json={"part": "soprano", "format": "wav"},
+    )
+    assert res_sop.status_code == 200
+    assert res_sop.content.startswith(b"RIFF")
+
+    # Unassigned voices (tenor, bass) return 422 validation error
+    for missing_voice in ("alto", "tenor", "bass"):
+        res_err = client.post(
+            f"/api/v1/projects/{project_id}/exports/satb",
+            headers=headers,
+            json={"part": missing_voice, "format": "mp3"},
+        )
+        assert res_err.status_code == 422
+        assert "not assigned" in res_err.json()["detail"].lower()
+
+    # Unsaved voice_assignments override enables immediate export for Bass
+    res_override = client.post(
+        f"/api/v1/projects/{project_id}/exports/satb",
+        headers=headers,
+        json={"part": "bass", "format": "wav", "voice_assignments": {"0": "Soprano", "1": "Bass"}},
+    )
+    assert res_override.status_code == 200
+    assert res_override.content.startswith(b"RIFF")

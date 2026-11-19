@@ -75,4 +75,52 @@ describe("SATBMixerPanel", () => {
       expect(assignSpy).toHaveBeenCalledTimes(1);
     });
   });
+
+  it("disables unassigned voices on Piano + Vocal scores and sends unsaved voice_assignments on export", async () => {
+    const pianoVocalScore: ScoreData = {
+      ...sampleSatbScore,
+      title: "Pop Ballad",
+      tracks: [
+        { index: 0, name: "Vocal Melody", instrument: "vocals", clef: "treble", program: 0, muted: false },
+        { index: 1, name: "Piano Accompaniment", instrument: "piano", clef: "bass", program: 0, muted: false },
+      ],
+      notes: [
+        { id: "m1", pitch_midi: 64, onset_sec: 0, offset_sec: 1, velocity: 90, track_index: 0 },
+        { id: "a1", pitch_midi: 48, onset_sec: 0, offset_sec: 1, velocity: 75, track_index: 1 },
+      ],
+      analysis: { mode: "piano_vocal" },
+    };
+
+    const exportSpy = vi.spyOn(api, "exportSatbAudio").mockResolvedValue(undefined);
+    render(<SATBMixerPanel projectId="proj-pv" projectTitle="Pop Ballad" scoreData={pianoVocalScore} />);
+
+    // Part 1 defaults to Soprano; Part 2 (Piano Accompaniment) defaults to Unassigned ("")
+    expect((screen.getByLabelText("Assign Part 1") as HTMLSelectElement).value).toBe("Soprano");
+    expect((screen.getByLabelText("Assign Part 2") as HTMLSelectElement).value).toBe("");
+
+    // Unassigned voices (Alto, Tenor, Bass) show indicator & have disabled download controls
+    expect(screen.getAllByText(/not assigned in score/i)).toHaveLength(3);
+    const wavButtons = screen.getAllByRole("button", { name: /^wav$/i }) as HTMLButtonElement[];
+    expect(wavButtons[0].disabled).toBe(false); // Soprano
+    expect(wavButtons[1].disabled).toBe(true); // Alto
+    expect(wavButtons[2].disabled).toBe(true); // Tenor
+    expect(wavButtons[3].disabled).toBe(true); // Bass
+
+    // Change Part 2 to Bass WITHOUT clicking Save Assignments -> Bass immediately becomes enabled and exports with override
+    fireEvent.change(screen.getByLabelText("Assign Part 2"), { target: { value: "Bass" } });
+    expect(wavButtons[3].disabled).toBe(false);
+
+    fireEvent.click(wavButtons[3]);
+    await waitFor(() => {
+      expect(exportSpy).toHaveBeenCalledWith(
+        "proj-pv",
+        expect.objectContaining({
+          part: "bass",
+          format: "wav",
+          voice_assignments: { 0: "Soprano", 1: "Bass" },
+        }),
+        "Pop_Ballad_Bass.wav",
+      );
+    });
+  });
 });

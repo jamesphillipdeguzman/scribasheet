@@ -243,6 +243,7 @@ class SATBExportRequest(BaseModel):
     format: Literal["mp3", "wav"] = "mp3"
     volumes: dict[str, float] | None = None
     instruments: dict[str, int] | None = None
+    voice_assignments: dict[int | str, str] | None = None
     tempo_bpm: float | None = None
     start_measure: int | None = None
     end_measure: int | None = None
@@ -264,12 +265,22 @@ def export_satb_audio(
 
     score = ScoreData(**score_row.score_json)
     score.title = project.title
-    from app.notation.satb_audio import render_satb_audio_tracks
+    from app.notation.satb_audio import infer_satb_voice_assignments, render_satb_audio_tracks
+
+    if payload.part != "combined":
+        resolved = infer_satb_voice_assignments(score, override_assignments=payload.voice_assignments)
+        assigned_voices = {v for v in resolved.values() if v}
+        if payload.part not in assigned_voices:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"SATB voice '{payload.part}' is not assigned to any part in this score.",
+            )
 
     rendered = render_satb_audio_tracks(
         score,
         part_volumes=payload.volumes,
         part_instruments=payload.instruments,
+        voice_assignments=payload.voice_assignments,
         tempo_bpm=payload.tempo_bpm,
         start_measure=payload.start_measure,
         end_measure=payload.end_measure,
@@ -277,8 +288,8 @@ def export_satb_audio(
     )
     if payload.part not in rendered:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Requested SATB part '{payload.part}' is not present in this score.",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"SATB voice '{payload.part}' is not assigned to any part in this score.",
         )
 
     safe_title = sanitize_filename(project.title).rsplit(".", 1)[0].replace(" ", "_") or "Song_Title"

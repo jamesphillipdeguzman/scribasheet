@@ -13,6 +13,73 @@ interface SATBMixerPanelProps {
 
 const SATB_VOICES = ["Soprano", "Alto", "Tenor", "Bass"] as const;
 
+export function inferDefaultSatbAssignments(scoreData: ScoreData): Record<number, string> {
+  const tracks = scoreData.tracks || [];
+  const result: Record<number, string> = {};
+  const used = new Set<string>();
+
+  const satbMeta = (scoreData.analysis?.satb as {
+    assignments?: Array<{ part_index: number; assigned_voice: string }>;
+  }) || {};
+  const metaMap = new Map<number, string>();
+  for (const item of satbMeta.assignments || []) {
+    if (SATB_VOICES.includes(item.assigned_voice as (typeof SATB_VOICES)[number])) {
+      metaMap.set(item.part_index, item.assigned_voice);
+    }
+  }
+
+  for (const t of tracks) {
+    if (SATB_VOICES.includes(t.name as (typeof SATB_VOICES)[number])) {
+      result[t.index] = t.name;
+      used.add(t.name);
+      continue;
+    }
+    const fromMeta = metaMap.get(t.index);
+    if (fromMeta) {
+      result[t.index] = fromMeta;
+      used.add(fromMeta);
+    }
+  }
+
+  const isGenuineSatb =
+    scoreData.analysis?.mode === "satb_pdf" || Boolean(scoreData.analysis?.satb);
+
+  for (const t of tracks) {
+    if (t.index in result) continue;
+    const label = `${t.name || ""} ${t.instrument || ""}`.toLowerCase();
+    if (
+      label.includes("accompaniment") ||
+      label.includes("piano") ||
+      label.includes("keyboard") ||
+      label.includes("guitar") ||
+      label.includes("drums")
+    ) {
+      result[t.index] = "";
+      continue;
+    }
+    if (label.includes("vocal") || label.includes("melody")) {
+      if (!used.has("Soprano")) {
+        result[t.index] = "Soprano";
+        used.add("Soprano");
+      } else {
+        result[t.index] = "";
+      }
+      continue;
+    }
+    if (isGenuineSatb && tracks.length === 4 && t.index >= 0 && t.index < 4) {
+      const candidate = SATB_VOICES[t.index];
+      if (!used.has(candidate)) {
+        result[t.index] = candidate;
+        used.add(candidate);
+        continue;
+      }
+    }
+    result[t.index] = "";
+  }
+
+  return result;
+}
+
 export function SATBMixerPanel({
   projectId,
   projectTitle,
@@ -49,13 +116,19 @@ export function SATBMixerPanel({
     assignments?: Array<{ part_index: number; source_label: string; assigned_voice: string; uncertain?: boolean }>;
   }) || {};
 
-  const [assignments, setAssignments] = useState<Record<number, string>>(() => {
-    const init: Record<number, string> = {};
-    for (const t of scoreData.tracks || []) {
-      init[t.index] = SATB_VOICES.includes(t.name as (typeof SATB_VOICES)[number]) ? t.name : "Soprano";
-    }
-    return init;
-  });
+  const [assignments, setAssignments] = useState<Record<number, string>>(() =>
+    inferDefaultSatbAssignments(scoreData),
+  );
+
+  useEffect(() => {
+    setAssignments(inferDefaultSatbAssignments(scoreData));
+  }, [scoreData]);
+
+  const assignedVoices = new Set(
+    Object.values(assignments)
+      .map((v) => v.trim().toLowerCase())
+      .filter((v) => v === "soprano" || v === "alto" || v === "tenor" || v === "bass"),
+  );
 
   useEffect(() => {
     setTempoBpm(Math.round(scoreData.tempo_bpm || 100));
@@ -169,6 +242,9 @@ export function SATBMixerPanel({
     part: "soprano" | "alto" | "tenor" | "bass" | "combined",
     format: "mp3" | "wav",
   ) => {
+    if (part !== "combined" && !assignedVoices.has(part)) {
+      return;
+    }
     const key = `${part}_${format}`;
     setExportingKey(key);
     setError(null);
@@ -182,6 +258,7 @@ export function SATBMixerPanel({
           format,
           volumes,
           instruments,
+          voice_assignments: assignments,
           tempo_bpm: tempoBpm,
           start_measure: startMeasure > 1 ? startMeasure : undefined,
         },
@@ -288,20 +365,30 @@ export function SATBMixerPanel({
       <div className="space-y-2">
         {SATB_VOICES.map((voice) => {
           const vKey = voice.toLowerCase() as "soprano" | "alto" | "tenor" | "bass";
+          const isAssigned = assignedVoices.has(vKey);
           const isSolo = soloVoice === vKey;
           const isMuted = Boolean(mutedVoices[vKey]);
           return (
             <div
               key={voice}
-              className="grid grid-cols-1 sm:grid-cols-12 items-center gap-2 rounded-lg border border-[#27273A] bg-[#09090F] px-3 py-2 text-xs"
+              title={isAssigned ? undefined : "Not assigned in score"}
+              className={`grid grid-cols-1 sm:grid-cols-12 items-center gap-2 rounded-lg border border-[#27273A] bg-[#09090F] px-3 py-2 text-xs ${
+                isAssigned ? "" : "opacity-55"
+              }`}
             >
-              <div className="sm:col-span-2 font-semibold text-[#F5F3FF]">{voice}</div>
+              <div className="sm:col-span-2">
+                <div className="font-semibold text-[#F5F3FF]">{voice}</div>
+                {!isAssigned && (
+                  <div className="text-[10px] text-[#71717A]">Not assigned in score</div>
+                )}
+              </div>
               <div className="sm:col-span-2 flex items-center gap-1.5">
                 <button
                   type="button"
                   aria-pressed={isSolo}
+                  disabled={!isAssigned}
                   onClick={() => setSoloVoice(isSolo ? null : vKey)}
-                  className={`rounded px-2 py-1 text-[11px] font-medium border ${
+                  className={`rounded px-2 py-1 text-[11px] font-medium border disabled:opacity-40 disabled:pointer-events-none ${
                     isSolo
                       ? "bg-[#8B5CF6] border-[#A78BFA] text-white"
                       : "bg-[#11111B] border-[#27273A] text-[#A1A1AA]"
@@ -312,8 +399,9 @@ export function SATBMixerPanel({
                 <button
                   type="button"
                   aria-pressed={isMuted}
+                  disabled={!isAssigned}
                   onClick={() => setMutedVoices((prev) => ({ ...prev, [vKey]: !prev[vKey] }))}
-                  className={`rounded px-2 py-1 text-[11px] font-medium border ${
+                  className={`rounded px-2 py-1 text-[11px] font-medium border disabled:opacity-40 disabled:pointer-events-none ${
                     isMuted
                       ? "bg-red-500/20 border-red-500/40 text-red-300"
                       : "bg-[#11111B] border-[#27273A] text-[#A1A1AA]"
@@ -327,6 +415,7 @@ export function SATBMixerPanel({
                 <input
                   type="range"
                   aria-label={`${voice} Volume`}
+                  disabled={!isAssigned}
                   min={0}
                   max={1.5}
                   step={0.05}
@@ -334,17 +423,18 @@ export function SATBMixerPanel({
                   onChange={(e) =>
                     setVolumes((prev) => ({ ...prev, [vKey]: Number(e.target.value) }))
                   }
-                  className="w-full accent-[#8B5CF6]"
+                  className="w-full accent-[#8B5CF6] disabled:opacity-40"
                 />
               </div>
               <div className="sm:col-span-3">
                 <select
                   aria-label={`${voice} Sound`}
+                  disabled={!isAssigned}
                   value={instruments[vKey] ?? 52}
                   onChange={(e) =>
                     setInstruments((prev) => ({ ...prev, [vKey]: Number(e.target.value) }))
                   }
-                  className="w-full h-8 rounded border border-[#27273A] bg-[#11111B] px-2 text-xs text-[#F5F3FF]"
+                  className="w-full h-8 rounded border border-[#27273A] bg-[#11111B] px-2 text-xs text-[#F5F3FF] disabled:opacity-40"
                 >
                   <option value={52}>Choir Aahs</option>
                   <option value={0}>Piano (Fallback)</option>
@@ -354,7 +444,8 @@ export function SATBMixerPanel({
                 <Button
                   size="sm"
                   variant="ghost"
-                  disabled={exportingKey !== null}
+                  disabled={!isAssigned || exportingKey !== null}
+                  title={isAssigned ? `Download ${voice} MP3` : "Not assigned in score"}
                   onClick={() => handleExport(vKey, "mp3")}
                 >
                   {exportingKey === `${vKey}_mp3` ? "..." : "MP3"}
@@ -362,7 +453,8 @@ export function SATBMixerPanel({
                 <Button
                   size="sm"
                   variant="ghost"
-                  disabled={exportingKey !== null}
+                  disabled={!isAssigned || exportingKey !== null}
+                  title={isAssigned ? `Download ${voice} WAV` : "Not assigned in score"}
                   onClick={() => handleExport(vKey, "wav")}
                 >
                   WAV
@@ -385,15 +477,18 @@ export function SATBMixerPanel({
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             {(scoreData.tracks || []).map((t) => (
               <label key={t.index} className="flex items-center justify-between gap-2 text-xs">
-                <span className="text-[#A1A1AA] truncate">Part {t.index + 1}</span>
+                <span className="text-[#A1A1AA] truncate" title={t.name}>
+                  Part {t.index + 1} ({t.name})
+                </span>
                 <select
                   aria-label={`Assign Part ${t.index + 1}`}
-                  value={assignments[t.index] || t.name}
+                  value={assignments[t.index] ?? ""}
                   onChange={(e) =>
                     setAssignments((prev) => ({ ...prev, [t.index]: e.target.value }))
                   }
                   className="h-8 rounded border border-[#27273A] bg-[#11111B] px-2 text-xs text-[#F5F3FF]"
                 >
+                  <option value="">Unassigned</option>
                   {SATB_VOICES.map((v) => (
                     <option key={v} value={v}>
                       {v}

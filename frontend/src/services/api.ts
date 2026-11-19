@@ -392,6 +392,7 @@ export const api = {
       format: "mp3" | "wav";
       volumes?: Record<string, number>;
       instruments?: Record<string, number>;
+      voice_assignments?: Record<number, string>;
       tempo_bpm?: number;
       start_measure?: number;
       end_measure?: number;

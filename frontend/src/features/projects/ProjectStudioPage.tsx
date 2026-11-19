@@ -42,6 +42,7 @@ export function ProjectStudioPage() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeTab, setActiveTab] = useState<StudioTab>("notation");
+  const [showPartMixerOverride, setShowPartMixerOverride] = useState<boolean | null>(null);
   const [playheadSec, setPlayheadSec] = useState(0);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
 
@@ -671,20 +672,42 @@ export function ProjectStudioPage() {
               </div>
 
               {scoreData &&
-                (project.transcription_mode === "satb_pdf" ||
-                  scoreData.analysis?.mode === "satb_pdf" ||
-                  scoreData.tracks.length > 1) && (
-                  <SATBMixerPanel
-                    projectId={project.id}
-                    projectTitle={project.title}
-                    scoreData={scoreData}
-                    onScoreUpdated={(updatedScore, updatedVersion, updatedXml) => {
-                      setScoreData(updatedScore);
-                      setScoreVersion(updatedVersion);
-                      if (updatedXml !== null) setMusicxml(updatedXml);
-                    }}
-                  />
-                )}
+                (() => {
+                  const isGenuineSatb =
+                    project.transcription_mode === "satb_pdf" ||
+                    scoreData.analysis?.mode === "satb_pdf" ||
+                    Boolean(scoreData.analysis?.satb);
+                  const canShowMixer = isGenuineSatb || scoreData.tracks.length > 1;
+                  if (!canShowMixer) return null;
+                  const mixerOpen = showPartMixerOverride ?? isGenuineSatb;
+                  return (
+                    <div className="space-y-2">
+                      {!isGenuineSatb && (
+                        <div className="flex items-center justify-end">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setShowPartMixerOverride(!mixerOpen)}
+                          >
+                            {mixerOpen ? "Hide SATB / Part Mixer" : "Show SATB / Part Mixer"}
+                          </Button>
+                        </div>
+                      )}
+                      {mixerOpen && (
+                        <SATBMixerPanel
+                          projectId={project.id}
+                          projectTitle={project.title}
+                          scoreData={scoreData}
+                          onScoreUpdated={(updatedScore, updatedVersion, updatedXml) => {
+                            setScoreData(updatedScore);
+                            setScoreVersion(updatedVersion);
+                            if (updatedXml !== null) setMusicxml(updatedXml);
+                          }}
+                        />
+                      )}
+                    </div>
+                  );
+                })()}
 
               {activeTab === "notation" &&
                 (activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status) ? (
