@@ -341,31 +341,34 @@ def _split_rh_lh_notes(notes: list[ScoreNote]) -> tuple[list[ScoreNote], list[Sc
     for cluster in clusters:
         if len(cluster) == 1:
             n = cluster[0]
-            if n.pitch_midi >= 62:
+            if n.pitch_midi >= 57:
                 hand = "treble"
-            elif n.pitch_midi <= 57:
+            elif n.pitch_midi <= 52:
                 hand = "bass"
             else:
-                hand = last_hand if (n.pitch_midi >= 60 or last_hand == "treble") else "bass"
+                # F3-G#3 (53-56): use phrase continuity; >= G3 (55) leans RH unless following LH bass
+                hand = last_hand if (n.pitch_midi >= 55 or last_hand == "treble") else "bass"
+                if n.pitch_midi <= 54 and last_hand == "bass":
+                    hand = "bass"
             last_hand = hand
             (treble if hand == "treble" else bass).append(n)
             continue
 
         lo = cluster[0].pitch_midi
         hi = cluster[-1].pitch_midi
-        if lo >= 60:
+        if lo >= 55 and hi >= 59:
             treble.extend(cluster)
             last_hand = "treble"
             continue
-        if hi <= 55:
+        if hi <= 53:
             bass.extend(cluster)
             last_hand = "bass"
             continue
 
-        # Compact single-hand chord with no low bass root below G3: keep chord intact
+        # Compact single-hand chord with no low bass root below E3: keep chord intact
         if hi - lo <= 7 and lo >= 52:
             mean_pitch = sum(n.pitch_midi for n in cluster) / len(cluster)
-            hand = "bass" if mean_pitch < 58.5 else ("treble" if mean_pitch >= 60.0 else last_hand)
+            hand = "bass" if mean_pitch < 55.0 else ("treble" if mean_pitch >= 56.5 else last_hand)
             last_hand = hand
             if hand == "treble":
                 treble.extend(cluster)
@@ -373,7 +376,7 @@ def _split_rh_lh_notes(notes: list[ScoreNote]) -> tuple[list[ScoreNote], list[Sc
                 bass.extend(cluster)
             continue
 
-        # Multi-hand voicing: find the most natural split index between LH and RH
+        # Multi-hand voicing: find the most natural split index between LH (<= F3/G3) and RH (>= G3)
         best_split = 1
         best_score = float("-inf")
         for idx in range(1, len(cluster)):
@@ -383,12 +386,12 @@ def _split_rh_lh_notes(notes: list[ScoreNote]) -> tuple[list[ScoreNote], list[Sc
             rh_span = rh_part[-1].pitch_midi - rh_part[0].pitch_midi
             gap = rh_part[0].pitch_midi - lh_part[-1].pitch_midi
             score = gap * 1.5
-            # Prefer RH starting near or above C4 (60), or at least >= 52 when LH span would exceed an octave
-            if rh_part[0].pitch_midi >= 60:
+            # Prefer RH starting at/above F3-G3 (53-55) and LH staying <= G3 (55)
+            if rh_part[0].pitch_midi >= 55:
                 score += 4.0
-            elif rh_part[0].pitch_midi >= 55:
+            elif rh_part[0].pitch_midi >= 52:
                 score += 1.5
-            if lh_part[-1].pitch_midi < 60:
+            if lh_part[-1].pitch_midi <= 55:
                 score += 2.5
             if lh_span > 12:
                 score -= (lh_span - 12) * 3.0

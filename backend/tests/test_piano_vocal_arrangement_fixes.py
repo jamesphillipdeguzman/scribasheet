@@ -182,3 +182,131 @@ def test_key_signature_enharmonic_spelling_in_e_major_and_minor_keys():
     assert vocal_pitches == ["E", "D#", "F#", "G#", "C#"]
     assert "E-" not in vocal_pitches
     assert "G-" not in vocal_pitches
+
+
+def test_vocal_vibrato_smoothing_and_90ms_same_pitch_merging_preserves_genuine_repeats_and_chromaticism():
+    # Measure 29-30: sustained G#4 (68) fragmented by <= 90ms gaps + brief off-key vibrato dip to G4 (67)
+    # Measure 33: genuine repeated B4 (71) with strong re-attack & gap, plus chromatic passing F#4->G4->G#4
+    notes = [
+        # Fragmented sustained G#4 (0.0 -> 0.45, 50ms gap, 0.50 -> 0.95, 70ms gap, 1.02 -> 1.45)
+        DetectedNote(pitch_midi=68, onset_sec=0.0, offset_sec=0.45, velocity=90, confidence=0.90),
+        DetectedNote(pitch_midi=68, onset_sec=0.50, offset_sec=0.95, velocity=86, confidence=0.86),
+        DetectedNote(pitch_midi=68, onset_sec=1.02, offset_sec=1.45, velocity=84, confidence=0.84),
+        # Brief 1-semitone vibrato dip (E4=64 -> F4=65 (80ms) -> E4=64) in E major
+        DetectedNote(pitch_midi=64, onset_sec=2.0, offset_sec=2.40, velocity=90, confidence=0.90),
+        DetectedNote(pitch_midi=65, onset_sec=2.42, offset_sec=2.50, velocity=74, confidence=0.68),
+        DetectedNote(pitch_midi=64, onset_sec=2.52, offset_sec=3.00, velocity=88, confidence=0.89),
+        # Genuine repeated B4 (71) with clear rhythmic separation (120ms gap) & strong re-attack
+        DetectedNote(pitch_midi=71, onset_sec=3.50, offset_sec=3.80, velocity=85, confidence=0.88),
+        DetectedNote(pitch_midi=71, onset_sec=3.92, offset_sec=4.30, velocity=97, confidence=0.94),
+        # Legitimate chromatic passing line: F#4 (66) -> G4 (67) -> G#4 (68)
+        DetectedNote(pitch_midi=66, onset_sec=4.60, offset_sec=5.00, velocity=90, confidence=0.90),
+        DetectedNote(pitch_midi=67, onset_sec=5.05, offset_sec=5.45, velocity=92, confidence=0.92),
+        DetectedNote(pitch_midi=68, onset_sec=5.50, offset_sec=5.95, velocity=94, confidence=0.94),
+    ]
+
+    result = extract_lead_melody(
+        notes,
+        tempo_bpm=120.0,
+        vocal_range=DEFAULT_VOCAL_RANGE,
+        key_signature="E major",
+    )
+    pitches = [n.pitch_midi for n in result.notes]
+    # Fragmented G#4 merged into 1 sustained note; vibrato E4-F4-E4 merged into 1 sustained E4;
+    # genuine repeated B4 stays 2 notes; chromatic F#4->G4->G#4 is preserved!
+    assert pitches == [68, 64, 71, 71, 66, 67, 68]
+    assert result.notes[0].offset_sec >= 1.44
+    assert result.notes[1].offset_sec >= 2.99
+
+
+def test_piano_rh_not_empty_when_vocal_sings_in_mid_register_mm_29_to_56():
+    # Vocal singing around G3-C#4 (55-61) across mm. 29-56 (56s..112s) should NOT push Piano RH into LH
+    chords = [
+        ScoreChord(id=f"c{i}", measure=29 + i * 2, beat=1.0, onset_sec=56.0 + i * 4.0, symbol=sym, root=sym.rstrip("m"), quality="minor" if sym.endswith("m") else "major", confidence=0.9)
+        for i, sym in enumerate(["E", "B", "C#m", "A"] * 3)
+    ]
+    melody = [
+        DetectedNote(pitch_midi=59, onset_sec=56.0 + i * 2.0, offset_sec=57.8 + i * 2.0, velocity=92, confidence=0.92)
+        for i in range(24)
+    ]
+
+    score = build_piano_vocal_score_data(
+        title="RH Continuity Test",
+        melody_notes=melody,
+        chord_source_notes=melody,
+        tempo_bpm=120.0,
+        key_signature="E major",
+        key_signature_estimated=False,
+        duration_seconds=104.0,
+        arrangement_detail="balanced",
+    )
+    # Force chords into score & test accompaniment splitting directly
+    accomp = generate_piano_accompaniment(
+        chords=chords,
+        melody_notes=melody,
+        tempo_bpm=120.0,
+        key_signature="E major",
+        duration_seconds=104.0,
+        arrangement_detail="balanced",
+    )
+    accomp_score_notes = [
+        ScoreNote(
+            id=f"a{idx}",
+            pitch_midi=n.pitch_midi,
+            onset_sec=n.onset_sec,
+            offset_sec=n.offset_sec,
+            velocity=n.velocity,
+            track_index=1,
+        )
+        for idx, n in enumerate(accomp.notes)
+    ]
+    rh, lh = _split_rh_lh_notes(accomp_score_notes)
+    assert len(rh) >= 24
+    assert len(lh) >= 12
+    assert all(n.pitch_midi >= 53 for n in rh)
+    assert all(n.pitch_midi <= 55 for n in lh)
+    assert score.tracks[1].clef == "grand"
+
+
+def test_chord_detection_prefers_other_stem_and_identifies_e_major_progression():
+    from app.notation.analyzer import detect_chords, select_chord_source_notes
+
+    # E, B, C#m, A in 'other' + 'bass' stems, while 'vocal' has vibrato/passing blips
+    other_notes = [
+        # Bar 1: E major (E3, G#3, B3)
+        DetectedNote(pitch_midi=52, onset_sec=0.0, offset_sec=1.9, velocity=78, confidence=0.9),
+        DetectedNote(pitch_midi=56, onset_sec=0.0, offset_sec=1.9, velocity=78, confidence=0.9),
+        DetectedNote(pitch_midi=59, onset_sec=0.0, offset_sec=1.9, velocity=78, confidence=0.9),
+        # Bar 2: B major (B2, D#3, F#3)
+        DetectedNote(pitch_midi=47, onset_sec=2.0, offset_sec=3.9, velocity=78, confidence=0.9),
+        DetectedNote(pitch_midi=51, onset_sec=2.0, offset_sec=3.9, velocity=78, confidence=0.9),
+        DetectedNote(pitch_midi=54, onset_sec=2.0, offset_sec=3.9, velocity=78, confidence=0.9),
+        # Bar 3: C#m (C#3, E3, G#3)
+        DetectedNote(pitch_midi=49, onset_sec=4.0, offset_sec=5.9, velocity=78, confidence=0.9),
+        DetectedNote(pitch_midi=52, onset_sec=4.0, offset_sec=5.9, velocity=78, confidence=0.9),
+        DetectedNote(pitch_midi=56, onset_sec=4.0, offset_sec=5.9, velocity=78, confidence=0.9),
+        # Bar 4: A major (A2, C#3, E3)
+        DetectedNote(pitch_midi=45, onset_sec=6.0, offset_sec=7.9, velocity=78, confidence=0.9),
+        DetectedNote(pitch_midi=49, onset_sec=6.0, offset_sec=7.9, velocity=78, confidence=0.9),
+        DetectedNote(pitch_midi=52, onset_sec=6.0, offset_sec=7.9, velocity=78, confidence=0.9),
+    ]
+    bass_notes = [
+        DetectedNote(pitch_midi=40, onset_sec=0.0, offset_sec=1.9, velocity=86, confidence=0.92),
+        DetectedNote(pitch_midi=47, onset_sec=2.0, offset_sec=3.9, velocity=86, confidence=0.92),
+        DetectedNote(pitch_midi=49, onset_sec=4.0, offset_sec=5.9, velocity=86, confidence=0.92),
+        DetectedNote(pitch_midi=45, onset_sec=6.0, offset_sec=7.9, velocity=86, confidence=0.92),
+    ]
+    vocal_bleed = [
+        DetectedNote(pitch_midi=70, onset_sec=0.2, offset_sec=0.4, velocity=95, confidence=0.95),  # A#4 vibrato bleed
+        DetectedNote(pitch_midi=67, onset_sec=2.2, offset_sec=2.4, velocity=95, confidence=0.95),  # G4 bleed
+    ]
+
+    chosen = select_chord_source_notes(other_notes, bass_notes, [*other_notes, *bass_notes, *vocal_bleed])
+    assert all(n not in vocal_bleed for n in chosen)
+
+    score_notes = [
+        ScoreNote(id=f"c{i}", pitch_midi=n.pitch_midi, onset_sec=n.onset_sec, offset_sec=n.offset_sec, velocity=n.velocity, confidence=n.confidence, track_index=1)
+        for i, n in enumerate(chosen)
+    ]
+    detected = detect_chords(score_notes, tempo_bpm=120.0, time_signature="4/4", key_signature="E major")
+    assert [c.symbol for c in detected] == ["E", "B", "C#m", "A"]

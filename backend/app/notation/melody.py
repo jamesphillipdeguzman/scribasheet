@@ -201,11 +201,124 @@ def _filter_vocal_outliers(
     return filtered, len(ordered) - len(filtered)
 
 
+def _key_diatonic_pcs(key_signature: str | None) -> frozenset[int] | None:
+    """Return pitch classes of the detected key signature as a soft contextual reference."""
+    if not key_signature or key_signature.strip().lower() == "auto":
+        return None
+    try:
+        import music21
+
+        clean = key_signature.strip()
+        lower = clean.lower()
+        if lower.endswith(" major"):
+            is_minor = False
+            tonic = clean[:-6].strip()
+        elif lower.endswith(" minor"):
+            is_minor = True
+            tonic = clean[:-6].strip()
+        else:
+            is_minor = clean.endswith("m") and len(clean) > 1
+            tonic = clean[:-1] if is_minor else clean
+        key_obj = music21.key.Key(tonic.replace("b", "-"), "minor" if is_minor else "major")
+        return frozenset(int(p.pitchClass) for p in key_obj.pitches)
+    except Exception:
+        return None
+
+
+def _smooth_vocal_vibrato_and_glitches(
+    notes: list[DetectedNote],
+    diatonic_pcs: frozenset[int] | None = None,
+) -> tuple[list[DetectedNote], int, int]:
+    """Smooth brief vibrato/semitone glitches and merge fragmented same-pitch vocal notes (<= 90ms gap)."""
+    if len(notes) < 2:
+        return list(notes), 0, 0
+
+    working = [
+        DetectedNote(
+            pitch_midi=n.pitch_midi,
+            onset_sec=n.onset_sec,
+            offset_sec=n.offset_sec,
+            velocity=n.velocity,
+            confidence=n.confidence,
+        )
+        for n in notes
+    ]
+
+    # 1. Smooth brief 1-semitone vibrato excursions (A -> A±1 -> A) without snapping real chromaticism
+    vibrato_smoothed = 0
+    for idx in range(1, len(working) - 1):
+        prev = working[idx - 1]
+        cur = working[idx]
+        nxt = working[idx + 1]
+        cur_dur = max(0.0, cur.offset_sec - cur.onset_sec)
+        if (
+            prev.pitch_midi == nxt.pitch_midi
+            and abs(cur.pitch_midi - prev.pitch_midi) == 1
+            and cur_dur < 0.22
+            and cur.onset_sec - prev.offset_sec <= 0.06
+            and nxt.onset_sec - cur.offset_sec <= 0.06
+        ):
+            not_accented = cur.velocity < max(prev.velocity, nxt.velocity) + 10
+            cur_conf = cur.confidence if cur.confidence is not None else 0.6
+            adj_conf = max(
+                prev.confidence if prev.confidence is not None else 0.6,
+                nxt.confidence if nxt.confidence is not None else 0.6,
+            )
+            off_key_wobble = (
+                diatonic_pcs is not None
+                and (prev.pitch_midi % 12) in diatonic_pcs
+                and (cur.pitch_midi % 12) not in diatonic_pcs
+            )
+            if not_accented and (cur_dur < 0.14 or off_key_wobble or cur_conf <= adj_conf + 0.05):
+                cur.pitch_midi = prev.pitch_midi
+                vibrato_smoothed += 1
+
+    # 2. Merge consecutive same-pitch notes separated by <= 90ms unless supported by genuine re-attack evidence
+    merged: list[DetectedNote] = [working[0]]
+    same_pitch_merges = 0
+    for cur in working[1:]:
+        prev = merged[-1]
+        gap = cur.onset_sec - prev.offset_sec
+        if cur.pitch_midi == prev.pitch_midi and gap <= 0.090:
+            prev_dur = max(0.0, prev.offset_sec - prev.onset_sec)
+            cur_dur = max(0.0, cur.offset_sec - cur.onset_sec)
+            prev_conf = prev.confidence if prev.confidence is not None else 0.65
+            cur_conf = cur.confidence if cur.confidence is not None else 0.65
+
+            strong_reattack = (
+                cur.velocity >= prev.velocity + 12
+                or (
+                    cur.confidence is not None
+                    and prev.confidence is not None
+                    and cur_conf >= prev_conf * 1.18
+                    and cur.velocity >= prev.velocity + 4
+                )
+            )
+            clear_articulated_repeat = (
+                gap >= 0.055
+                and prev_dur >= 0.20
+                and cur_dur >= 0.20
+                and cur.velocity >= prev.velocity - 2
+                and cur_conf >= 0.75
+            )
+            if not (strong_reattack or clear_articulated_repeat):
+                prev.offset_sec = max(prev.offset_sec, cur.offset_sec)
+                prev.velocity = max(prev.velocity, cur.velocity)
+                if prev.confidence is not None and cur.confidence is not None:
+                    prev.confidence = max(prev.confidence, cur.confidence)
+                same_pitch_merges += 1
+                continue
+        merged.append(cur)
+
+    return merged, vibrato_smoothed, same_pitch_merges
+
+
 def _unary_score(
     note: DetectedNote,
     cluster: list[DetectedNote],
     anchor_pitch: float,
     vocal_range: tuple[int, int] | None = None,
+    diatonic_pcs: frozenset[int] | None = None,
 ) -> float:
     """Score a candidate note's melodic salience within its onset cluster."""
     dur = max(0.0, note.offset_sec - note.onset_sec)
@@ -239,7 +352,10 @@ def _unary_score(
     # Reject weak harmonic overtones over a strong fundamental.
     overtone_penalty = 2.2 if _is_likely_harmonic_overtone(note, cluster) else 0.0
 
-    return vel_score + conf_score + dur_score + rel_height_score - register_penalty - overtone_penalty
+    # Gentle contextual key preference (never an absolute pitch constraint)
+    key_bonus = 0.18 if (diatonic_pcs is not None and (note.pitch_midi % 12) in diatonic_pcs) else 0.0
+
+    return vel_score + conf_score + dur_score + rel_height_score + key_bonus - register_penalty - overtone_penalty
 
 
 def _transition_score(prev_note: DetectedNote, cur_note: DetectedNote) -> float:
@@ -320,6 +436,7 @@ def extract_lead_melody(
     tempo_bpm: float = 120.0,
     timing_map: Any = None,
     vocal_range: tuple[int, int] | None = None,
+    key_signature: str | None = None,
 ) -> MelodyExtractionResult:
     """Extract a single, coherent monophonic melody line from polyphonic notes.
 
@@ -344,6 +461,7 @@ def extract_lead_melody(
         )
 
     filtered_outlier_count = 0
+    diatonic_pcs = _key_diatonic_pcs(key_signature)
     if vocal_range is not None:
         valid_notes, filtered_outlier_count = _filter_vocal_outliers(valid_notes, vocal_range)
 
@@ -358,7 +476,10 @@ def extract_lead_melody(
     backpointers: list[list[int]] = []
     uncertain_segments: list[dict[str, Any]] = []
 
-    first_scores = [_unary_score(n, clusters[0], anchor_pitch, vocal_range=vocal_range) for n in clusters[0]]
+    first_scores = [
+        _unary_score(n, clusters[0], anchor_pitch, vocal_range=vocal_range, diatonic_pcs=diatonic_pcs)
+        for n in clusters[0]
+    ]
     dp_scores.append(first_scores)
     backpointers.append([-1] * len(clusters[0]))
 
@@ -370,7 +491,13 @@ def extract_lead_melody(
         cur_bp: list[int] = []
 
         for cur_note in cur_cluster:
-            unary = _unary_score(cur_note, cur_cluster, anchor_pitch, vocal_range=vocal_range)
+            unary = _unary_score(
+                cur_note,
+                cur_cluster,
+                anchor_pitch,
+                vocal_range=vocal_range,
+                diatonic_pcs=diatonic_pcs,
+            )
             best_total = float("-inf")
             best_prev = 0
             for prev_idx, prev_note in enumerate(prev_cluster):
@@ -422,6 +549,14 @@ def extract_lead_melody(
                 continue
         filtered_selected.append(note)
 
+    vibrato_smoothed = 0
+    same_pitch_merges = 0
+    if vocal_range is not None:
+        filtered_selected, vibrato_smoothed, same_pitch_merges = _smooth_vocal_vibrato_and_glitches(
+            filtered_selected,
+            diatonic_pcs=diatonic_pcs,
+        )
+
     monophonic_notes, trimmed_overlaps = _enforce_monophony(filtered_selected)
 
     avg_pitch = (
@@ -444,6 +579,8 @@ def extract_lead_melody(
             "uncertain_segment_count": len(uncertain_segments),
             "trimmed_overlaps": trimmed_overlaps,
             "filtered_outlier_count": filtered_outlier_count,
+            "vibrato_smoothed_count": vibrato_smoothed,
+            "same_pitch_merges": same_pitch_merges,
             "vocal_range": list(vocal_range) if vocal_range is not None else None,
         },
         uncertain_segments=uncertain_segments,

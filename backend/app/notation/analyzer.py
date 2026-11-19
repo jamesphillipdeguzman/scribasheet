@@ -1,6 +1,7 @@
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import librosa
 import music21
@@ -262,7 +263,30 @@ class ChordDetectionConfig:
     min_bass_weight_ratio: float = 0.24
     min_extension_weight_ratio: float = 0.30
     min_label_spacing_beats: float = 1.0
+    min_window_total_weight: float = 0.40
+    key_diatonic_weight_boost: float = 1.12
     allow_slash_chords: bool = True
+
+
+def select_chord_source_notes(
+    other_notes: list[Any] | None,
+    bass_notes: list[Any] | None,
+    fallback_notes: list[Any],
+) -> list[Any]:
+    """Prefer isolated accompaniment stems (other + bass) for chord detection when harmonically rich."""
+    other_list = list(other_notes or [])
+    bass_list = list(bass_notes or [])
+    other_pcs = {int(n.pitch_midi) % 12 for n in other_list}
+    if len(other_list) >= 4 and len(other_pcs) >= 2:
+        combined = sorted([*other_list, *bass_list], key=lambda n: (n.onset_sec, n.pitch_midi))
+        return combined
+
+    accomp = sorted([*other_list, *bass_list], key=lambda n: (n.onset_sec, n.pitch_midi))
+    accomp_pcs = {int(n.pitch_midi) % 12 for n in accomp}
+    if len(accomp) >= 4 and len(accomp_pcs) >= 3:
+        return accomp
+
+    return list(fallback_notes)
 
 
 def _safe_chord_symbol(chord_obj: music21.chord.Chord) -> music21.harmony.ChordSymbol | None:
@@ -460,6 +484,7 @@ def detect_chords(
 
     sec_per_beat = 60.0 / max(20.0, tempo_bpm)
     key_obj = _parse_key_signature_for_analysis(key_signature)
+    key_diatonic_pcs = {int(p.pitchClass) for p in key_obj.pitches}
 
     def _to_ql(sec: float) -> float:
         if timing_map is not None:
@@ -500,22 +525,27 @@ def detect_chords(
             conf_factor = float(n.confidence) if n.confidence is not None else 0.75
             bass_factor = 1.35 if n.pitch_midi < 60 else 1.0
             sustain_factor = 1.15 if ov >= 0.75 else 1.0
-            w = ov * (max(1, n.velocity) / 127.0) * max(0.25, conf_factor) * bass_factor * sustain_factor
             pc = n.pitch_midi % 12
+            key_factor = cfg.key_diatonic_weight_boost if pc in key_diatonic_pcs else 1.0
+            w = ov * (max(1, n.velocity) / 127.0) * max(0.25, conf_factor) * bass_factor * sustain_factor * key_factor
             pc_weights[pc] = pc_weights.get(pc, 0.0) + w
             if lowest_midi is None or n.pitch_midi < lowest_midi:
                 lowest_midi = n.pitch_midi
                 lowest_ov = ov
+        if sum(pc_weights.values()) < cfg.min_window_total_weight:
+            return {}, None, False
         return pc_weights, lowest_midi, lowest_ov >= 0.45
 
-    # Analyze beat-by-beat, falling back to 2-beat harmonic window for arpeggiated passages
+    # Analyze beat-by-beat, using 2-beat harmonic aggregation when a 1-beat window is ambiguous
     raw_snapshots: list[tuple[int, str, str, str, float]] = []
     for b_idx in range(total_beats):
         pc_w, low_midi, low_sustained = _collect_weights(float(b_idx), float(b_idx + 1))
         match = _analyze_window_chord(pc_w, low_midi, low_sustained, key_obj, cfg)
-        if match is None and b_idx % 2 == 0:
+        if match is None or match[3] < 0.68:
             pc_w2, low_midi2, low_sustained2 = _collect_weights(float(b_idx), float(min(total_beats, b_idx + 2)))
-            match = _analyze_window_chord(pc_w2, low_midi2, low_sustained2, key_obj, cfg)
+            match2 = _analyze_window_chord(pc_w2, low_midi2, low_sustained2, key_obj, cfg)
+            if match2 is not None and (match is None or match2[3] > match[3] + 0.03):
+                match = match2
         if match is not None:
             raw_snapshots.append((b_idx, *match))
 

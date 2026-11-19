@@ -165,16 +165,17 @@ def _melody_ceiling_at(
     start_sec: float,
     end_sec: float,
 ) -> int:
-    """Find a safe upper bound for accompaniment so it stays below active melody."""
+    """Find a balanced upper bound for Piano RH accompaniment in a 3-staff Piano + Vocal score."""
     overlapping = [
         n.pitch_midi
         for n in melody_notes
         if n.offset_sec > start_sec + 0.02 and n.onset_sec < end_sec - 0.02
     ]
     if not overlapping:
-        return 67
+        return 69
     lowest_melody = min(overlapping)
-    return max(55, min(69, lowest_melody - 2))
+    # Keep Piano RH in a natural treble accompaniment register (D4-B4) without squashing it into LH
+    return max(62, min(71, lowest_melody - 2 if lowest_melody >= 64 else 67))
 
 
 def _deduplicate_overlaps(notes: list[DetectedNote]) -> list[DetectedNote]:
@@ -252,7 +253,7 @@ def generate_piano_accompaniment(
 
     ordered_chords = sorted(chords, key=lambda c: c.onset_sec)
     generated: list[DetectedNote] = []
-    prev_center = 58.0
+    prev_center = 60.0
 
     # Expand long held-chord spans into <= 8-beat phrasing chunks so bass & accompaniment
     # continue smoothly across multi-measure sections instead of dropping out after 2 bars.
@@ -283,7 +284,7 @@ def generate_piano_accompaniment(
             span_end=span_end,
         )
         ceiling = _melody_ceiling_at(melody_notes, span_start, span_end)
-        voicing = _voice_lead_chord(chord_pcs, prev_center, max_upper_midi=ceiling, min_lower_midi=48)
+        voicing = _voice_lead_chord(chord_pcs, prev_center, max_upper_midi=ceiling, min_lower_midi=53)
         if voicing:
             prev_center = sum(voicing) / len(voicing)
 

@@ -36,6 +36,7 @@ from app.core.config import get_settings
 from app.notation.analyzer import (
     estimate_key_signature,
     get_instrument_program_and_clef,
+    select_chord_source_notes,
 )
 from app.notation.arrangement import simplify_arrangement
 from app.notation.beat_tracker import track_beats_and_downbeats
@@ -657,6 +658,7 @@ class RealTranscriptionHandler:
                     tempo_bpm=tempo_bpm,
                     timing_map=timing_map,
                     vocal_range=vocal_range,
+                    key_signature=key_sig,
                 )
                 arranged_notes = melody_result.notes or melody_source_notes
                 arrangement_detail_value = settings.arrangement_detail
@@ -735,10 +737,15 @@ class RealTranscriptionHandler:
                     "Generating Accompaniment",
                     "Generating playable piano accompaniment coordinated with melody and harmony.",
                 )
+                chord_source = select_chord_source_notes(
+                    other_refined_notes,
+                    bass_refined_notes,
+                    refined_notes,
+                )
                 score_data = build_piano_vocal_score_data(
                     title=clean_score_title(job.get("project_title") or safe_name),
                     melody_notes=arranged_notes,
-                    chord_source_notes=refined_notes,
+                    chord_source_notes=chord_source,
                     bass_notes=bass_refined_notes or None,
                     other_notes=other_refined_notes or None,
                     tempo_bpm=tempo_bpm,
@@ -769,7 +776,11 @@ class RealTranscriptionHandler:
                     timing_map=timing_map,
                     clef_override="treble" if lead_melody_active else None,
                     track_name_override="Lead Melody" if lead_melody_active else None,
-                    chord_source_notes=refined_notes if lead_melody_active else None,
+                    chord_source_notes=(
+                        select_chord_source_notes(other_refined_notes, bass_refined_notes, refined_notes)
+                        if lead_melody_active
+                        else None
+                    ),
                     monophonic=lead_melody_active,
                     analysis=score_analysis,
                 )

@@ -6,6 +6,7 @@ from app.api.deps import get_current_user, get_owned_project
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import Project, ProjectScore, User
+from app.notation.analyzer import select_chord_source_notes
 from app.notation.arrangement import simplify_arrangement
 from app.notation.generator import (
     build_piano_vocal_score_data,
@@ -196,6 +197,7 @@ def regenerate_project_arrangement(
             melody_source,
             tempo_bpm=existing.tempo_bpm,
             vocal_range=vocal_range,
+            key_signature=existing.key_signature,
         )
         arranged_notes = melody_result.notes or melody_source
         analysis["arrangement_detail"] = payload.arrangement_detail
@@ -237,11 +239,12 @@ def regenerate_project_arrangement(
             for n in raw_notes
         ]
 
+    chord_source = select_chord_source_notes(other_notes, bass_notes, refined_notes)
     if piano_vocal_active:
         new_score = build_piano_vocal_score_data(
             title=project.title,
             melody_notes=arranged_notes,
-            chord_source_notes=refined_notes,
+            chord_source_notes=chord_source,
             bass_notes=bass_notes or None,
             other_notes=other_notes or None,
             tempo_bpm=existing.tempo_bpm,
@@ -270,7 +273,7 @@ def regenerate_project_arrangement(
             quantization=quant,
             clef_override="treble" if lead_melody_active else None,
             track_name_override="Lead Melody" if lead_melody_active else None,
-            chord_source_notes=refined_notes if lead_melody_active else None,
+            chord_source_notes=chord_source if lead_melody_active else None,
             monophonic=lead_melody_active,
             analysis=analysis,
         )
