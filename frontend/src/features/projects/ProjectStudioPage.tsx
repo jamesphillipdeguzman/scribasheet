@@ -4,6 +4,7 @@ import { Link, useParams } from "react-router-dom";
 import {
   ArrowLeft,
   Check,
+  Clock,
   Download,
   FileMusic,
   FileText,
@@ -84,6 +85,7 @@ export function ProjectStudioPage() {
 
   // Job tracking
   const [activeJob, setActiveJob] = useState<TranscriptionJob | null>(null);
+  const [runtimeNowMs, setRuntimeNowMs] = useState<number>(() => Date.now());
   const [isStartingJob, setIsStartingJob] = useState(false);
   const [isRegeneratingArrangement, setIsRegeneratingArrangement] = useState(false);
 
@@ -673,43 +675,43 @@ export function ProjectStudioPage() {
                 })}
               </div>
 
-              {scoreData &&
-                (() => {
-                  const isGenuineSatb =
-                    project.transcription_mode === "satb_pdf" ||
-                    scoreData.analysis?.mode === "satb_pdf" ||
-                    Boolean(scoreData.analysis?.satb);
-                  const canShowMixer = isGenuineSatb || scoreData.tracks.length > 1;
-                  if (!canShowMixer) return null;
-                  const mixerOpen = showPartMixerOverride ?? isGenuineSatb;
-                  return (
-                    <div className="space-y-2">
-                      {!isGenuineSatb && (
-                        <div className="flex items-center justify-end">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => setShowPartMixerOverride(!mixerOpen)}
-                          >
-                            {mixerOpen ? "Hide SATB / Part Mixer" : "Show SATB / Part Mixer"}
-                          </Button>
-                        </div>
-                      )}
-                      {mixerOpen && (
-                        <SATBMixerPanel
-                          projectId={project.id}
-                          projectTitle={project.title}
-                          scoreData={scoreData}
-                          onScoreUpdated={(updatedScore, updatedVersion, updatedXml) => {
-                            setScoreData(updatedScore);
-                            setScoreVersion(updatedVersion);
-                            if (updatedXml !== null) setMusicxml(updatedXml);
-                          }}
-                        />
-                      )}
-                    </div>
-                  );
-                })()}
+              {(runtimeBadgeText || (canShowMixer && !isGenuineSatb)) && (
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center">
+                    {runtimeBadgeText && (
+                      <span
+                        data-testid="job-runtime-badge"
+                        className="inline-flex items-center gap-1.5 rounded-md border border-[#27273A] bg-[#181825] px-2.5 py-1 text-[11px] font-medium tabular-nums text-[#A1A1AA]"
+                      >
+                        <Clock className="h-3 w-3 shrink-0 text-[#8B5CF6]" />
+                        {runtimeBadgeText}
+                      </span>
+                    )}
+                  </div>
+                  {canShowMixer && !isGenuineSatb && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setShowPartMixerOverride(!mixerOpen)}
+                    >
+                      {mixerOpen ? "Hide SATB / Part Mixer" : "Show SATB / Part Mixer"}
+                    </Button>
+                  )}
+                </div>
+              )}
+
+              {canShowMixer && scoreData && mixerOpen && (
+                <SATBMixerPanel
+                  projectId={project.id}
+                  projectTitle={project.title}
+                  scoreData={scoreData}
+                  onScoreUpdated={(updatedScore, updatedVersion, updatedXml) => {
+                    setScoreData(updatedScore);
+                    setScoreVersion(updatedVersion);
+                    if (updatedXml !== null) setMusicxml(updatedXml);
+                  }}
+                />
+              )}
 
               {activeTab === "notation" &&
                 (activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status) ? (

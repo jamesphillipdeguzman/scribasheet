@@ -541,7 +541,7 @@ def detect_chords(
     for b_idx in range(total_beats):
         pc_w, low_midi, low_sustained = _collect_weights(float(b_idx), float(b_idx + 1))
         match = _analyze_window_chord(pc_w, low_midi, low_sustained, key_obj, cfg)
-        if match is None or match[3] < 0.68:
+        if (match is None or match[3] < 0.62) and b_idx % 2 == 0:
             pc_w2, low_midi2, low_sustained2 = _collect_weights(float(b_idx), float(min(total_beats, b_idx + 2)))
             match2 = _analyze_window_chord(pc_w2, low_midi2, low_sustained2, key_obj, cfg)
             if match2 is not None and (match is None or match2[3] > match[3] + 0.03):
