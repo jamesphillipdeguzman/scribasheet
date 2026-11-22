@@ -1,5 +1,18 @@
+import { Soundfont, SplendidGrandPiano } from "smplr";
 import { midiToFreq } from "@/lib/utils";
 import type { ScoreNote } from "@/types/api";
+
+export const GM_INSTRUMENT_PRESETS = [
+  { program: 0, label: "Acoustic Grand Piano", soundfontName: "acoustic_grand_piano" },
+  { program: 4, label: "Electric Piano", soundfontName: "electric_piano_1" },
+  { program: 48, label: "String Ensemble", soundfontName: "string_ensemble_1" },
+  { program: 52, label: "Choir Aahs", soundfontName: "choir_aahs" },
+] as const;
+
+function programToSoundfontName(program: number): string {
+  const match = GM_INSTRUMENT_PRESETS.find((p) => p.program === program);
+  return match ? match.soundfontName : "acoustic_grand_piano";
+}
 
 export interface PianoEnvelopeParams {
   peakGain: number;
@@ -43,6 +56,12 @@ export function computePianoEnvelopeParams(
 
 export class MidiSynthesizer {
   private ctx: AudioContext | null = null;
+  private dryGain: GainNode | null = null;
+  private wetGain: GainNode | null = null;
+  private convolver: ConvolverNode | null = null;
+  private pianoSampler: SplendidGrandPiano | null = null;
+  private pianoLoaded = false;
+  private sfSamplers = new Map<number, { inst: Soundfont; loaded: boolean }>();
   private activeOscs: Set<{ stop: () => void }> = new Set();
   private sustainedVoices: Map<number, { release: () => void }> = new Map();
   private rafId: number | null = null;
@@ -52,14 +71,96 @@ export class MidiSynthesizer {
   private scheduledNotes = new Set<string>();
   private lastBeatTick = -1;
 
+  private setupOutputBus(ctx: AudioContext) {
+    if (this.dryGain) return;
+    const dry = ctx.createGain();
+    dry.gain.value = 0.88;
+    dry.connect(ctx.destination);
+    this.dryGain = dry;
+
+    if (typeof ctx.createConvolver === "function" && typeof ctx.createBuffer === "function") {
+      try {
+        const len = Math.floor(ctx.sampleRate * 1.15);
+        const impulse = ctx.createBuffer(2, len, ctx.sampleRate);
+        for (let ch = 0; ch < 2; ch++) {
+          const data = impulse.getChannelData(ch);
+          for (let i = 0; i < len; i++) {
+            const decay = Math.pow(1 - i / len, 2.8);
+            data[i] = (Math.random() * 2 - 1) * decay * 0.28;
+          }
+        }
+        const conv = ctx.createConvolver();
+        conv.buffer = impulse;
+        const wet = ctx.createGain();
+        wet.gain.value = 0.16;
+        conv.connect(wet);
+        wet.connect(ctx.destination);
+        this.convolver = conv;
+        this.wetGain = wet;
+      } catch {
+        // Ignore convolver errors in restricted environments
+      }
+    }
+  }
+
+  private getOutputNode(ctx: AudioContext): AudioNode {
+    this.setupOutputBus(ctx);
+    return this.dryGain || ctx.destination;
+  }
+
+  private connectWithReverb(ctx: AudioContext, node: AudioNode) {
+    const out = this.getOutputNode(ctx);
+    node.connect(out);
+    if (this.convolver) {
+      node.connect(this.convolver);
+    }
+  }
+
+  private ensureSampler(ctx: AudioContext, program = 0) {
+    if (typeof fetch !== "function") return;
+    const dest = this.getOutputNode(ctx);
+    if (program === 0) {
+      if (!this.pianoSampler) {
+        try {
+          const piano = new SplendidGrandPiano(ctx, { destination: dest });
+          this.pianoSampler = piano;
+          void piano.load.then(() => {
+            this.pianoLoaded = true;
+          }).catch(() => {});
+        } catch {
+          // Fallback to WebAudio synth
+        }
+      }
+      return;
+    }
+
+    if (!this.sfSamplers.has(program)) {
+      try {
+        const sf = new Soundfont(ctx, {
+          instrument: programToSoundfontName(program),
+          destination: dest,
+        });
+        const entry = { inst: sf, loaded: false };
+        this.sfSamplers.set(program, entry);
+        void sf.load.then(() => {
+          entry.loaded = true;
+        }).catch(() => {});
+      } catch {
+        // Fallback to WebAudio synth
+      }
+    }
+  }
+
   private ensureContext(): AudioContext {
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       this.ctx = new AudioCtx();
     }
     if (this.ctx.state === "suspended") {
-      this.ctx.resume();
+      void this.ctx.resume();
     }
+    this.setupOutputBus(this.ctx);
+    this.ensureSampler(this.ctx, 0);
     return this.ctx;
   }
 
@@ -68,10 +169,43 @@ export class MidiSynthesizer {
     durationSec = 0.35,
     velocity = 85,
     volume = 0.7,
-    startDelaySec = 0
+    startDelaySec = 0,
+    program = 0
   ) {
     const ctx = this.ensureContext();
+    this.ensureSampler(ctx, program);
     const startAt = ctx.currentTime + Math.max(0, startDelaySec);
+    const clampedVel = Math.max(1, Math.min(127, Math.round(velocity)));
+    const scaledVel = Math.max(1, Math.min(127, Math.round(clampedVel * Math.max(0.1, Math.min(1.4, volume)))));
+    const holdSec = Math.max(0.06, durationSec);
+
+    if (program === 0 && this.pianoSampler && this.pianoLoaded) {
+      const stopFn = this.pianoSampler.start({
+        note: pitchMidi,
+        velocity: scaledVel,
+        time: startAt,
+        duration: holdSec,
+      });
+      const handle = { stop: () => { try { stopFn(); } catch { /* ignore */ } } };
+      this.activeOscs.add(handle);
+      window.setTimeout(() => this.activeOscs.delete(handle), Math.ceil((startDelaySec + holdSec + 0.5) * 1000));
+      return;
+    }
+
+    const sfEntry = this.sfSamplers.get(program);
+    if (sfEntry && sfEntry.loaded) {
+      const stopFn = sfEntry.inst.start({
+        note: pitchMidi,
+        velocity: scaledVel,
+        time: startAt,
+        duration: holdSec,
+      });
+      const handle = { stop: () => { try { stopFn(); } catch { /* ignore */ } } };
+      this.activeOscs.add(handle);
+      window.setTimeout(() => this.activeOscs.delete(handle), Math.ceil((startDelaySec + holdSec + 0.5) * 1000));
+      return;
+    }
+
     const freq = midiToFreq(pitchMidi);
     const env = computePianoEnvelopeParams(pitchMidi, durationSec, velocity, volume);
 
@@ -117,7 +251,7 @@ export class MidiSynthesizer {
     osc3.connect(harm3Gain);
     harm3Gain.connect(filter);
     filter.connect(masterGain);
-    masterGain.connect(ctx.destination);
+    this.connectWithReverb(ctx, masterGain);
 
     osc1.start(startAt);
     osc2.start(startAt);
@@ -141,10 +275,26 @@ export class MidiSynthesizer {
     osc1.onended = () => this.activeOscs.delete(handle);
   }
 
-  public startSustainedNote(pitchMidi: number, velocity = 85, volume = 0.7) {
+  public startSustainedNote(pitchMidi: number, velocity = 85, volume = 0.7, program = 0) {
     // Stop any previous voice on the same pitch cleanly to avoid stuck notes
     this.stopSustainedNote(pitchMidi);
     const ctx = this.ensureContext();
+    this.ensureSampler(ctx, program);
+    const clampedVel = Math.max(1, Math.min(127, Math.round(velocity * Math.max(0.1, Math.min(1.4, volume)))));
+
+    if (program === 0 && this.pianoSampler && this.pianoLoaded) {
+      const stopSampler = this.pianoSampler.start({ note: pitchMidi, velocity: clampedVel });
+      const handle = { stop: () => { try { stopSampler(); } catch { /* ignore */ } } };
+      this.activeOscs.add(handle);
+      this.sustainedVoices.set(pitchMidi, {
+        release: () => {
+          this.activeOscs.delete(handle);
+          handle.stop();
+        },
+      });
+      return;
+    }
+
     const startAt = ctx.currentTime;
     const freq = midiToFreq(pitchMidi);
     const env = computePianoEnvelopeParams(pitchMidi, 2.0, velocity, volume);
@@ -184,7 +334,7 @@ export class MidiSynthesizer {
     osc3.connect(harm3Gain);
     harm3Gain.connect(filter);
     filter.connect(masterGain);
-    masterGain.connect(ctx.destination);
+    this.connectWithReverb(ctx, masterGain);
 
     osc1.start(startAt);
     osc2.start(startAt);
@@ -267,6 +417,8 @@ export class MidiSynthesizer {
     volume: number;
     loop: boolean;
     metronome: boolean;
+    trackPrograms?: Record<number, number>;
+    trackVolumes?: Record<number, number>;
     onPosition: (sec: number) => void;
     onEnd: () => void;
   }) {
@@ -319,7 +471,9 @@ export class MidiSynthesizer {
           this.scheduledNotes.add(note.id);
           const dur = Math.max(0.05, (note.offset_sec - note.onset_sec) / options.playbackRate);
           const delay = Math.max(0, (note.onset_sec - currentSec) / options.playbackRate);
-          this.triggerNote(note.pitch_midi, dur, note.velocity, options.volume, delay);
+          const prog = options.trackPrograms?.[note.track_index] ?? 0;
+          const tVol = options.trackVolumes?.[note.track_index] ?? 1.0;
+          this.triggerNote(note.pitch_midi, dur, note.velocity, options.volume * tVol, delay, prog);
         }
       }
       prevSec = currentSec;

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, Download, Loader2, Play, Square, Volume2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
+import { GM_INSTRUMENT_PRESETS, midiSynth } from "@/features/editor/midiSynth";
 import { api, ApiError } from "@/services/api";
 import type { ScoreData } from "@/types/api";
 
@@ -95,10 +96,10 @@ export function SATBMixerPanel({
     bass: 1.0,
   });
   const [instruments, setInstruments] = useState<Record<string, number>>({
-    soprano: 52,
-    alto: 52,
-    tenor: 52,
-    bass: 52,
+    soprano: 0,
+    alto: 0,
+    tenor: 0,
+    bass: 0,
   });
   const [tempoBpm, setTempoBpm] = useState<number>(Math.round(scoreData.tempo_bpm || 100));
   const [startMeasure, setStartMeasure] = useState<number>(1);
@@ -106,9 +107,6 @@ export function SATBMixerPanel({
   const [exportingKey, setExportingKey] = useState<string | null>(null);
   const [savingAssignments, setSavingAssignments] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const stopTimerRef = useRef<number | null>(null);
 
   const satbMeta = (scoreData.analysis?.satb as {
     needs_review?: boolean;
@@ -136,10 +134,7 @@ export function SATBMixerPanel({
 
   useEffect(() => {
     return () => {
-      if (stopTimerRef.current) window.clearTimeout(stopTimerRef.current);
-      if (audioCtxRef.current) {
-        void audioCtxRef.current.close();
-      }
+      midiSynth.stop();
     };
   }, []);
 
@@ -149,14 +144,7 @@ export function SATBMixerPanel({
   };
 
   const stopPlayback = () => {
-    if (stopTimerRef.current) {
-      window.clearTimeout(stopTimerRef.current);
-      stopTimerRef.current = null;
-    }
-    if (audioCtxRef.current) {
-      void audioCtxRef.current.close();
-      audioCtxRef.current = null;
-    }
+    midiSynth.stop();
     setIsPlaying(false);
   };
 
@@ -167,54 +155,48 @@ export function SATBMixerPanel({
       setError("Web Audio playback is not supported in this browser.");
       return;
     }
-    const ctx = new AudioCtx();
-    audioCtxRef.current = ctx;
+
     const baseBpm = Math.max(20, scoreData.tempo_bpm || 100);
-    const scale = baseBpm / Math.max(20, tempoBpm);
+    const playbackRate = Math.max(20, tempoBpm) / baseBpm;
     const beatsPerBar = Math.max(1, parseInt((scoreData.time_signature || "4/4").split("/")[0] || "4", 10));
-    const secPerBar = (60 / Math.max(20, tempoBpm)) * beatsPerBar;
-    const offsetSec = Math.max(0, (startMeasure - 1) * secPerBar);
+    const secPerBarBase = (60 / baseBpm) * beatsPerBar;
+    const offsetSec = Math.max(0, (startMeasure - 1) * secPerBarBase);
 
     const trackVoiceMap: Record<number, string> = {};
+    const trackPrograms: Record<number, number> = {};
+    const trackVolumes: Record<number, number> = {};
     for (const t of scoreData.tracks || []) {
-      trackVoiceMap[t.index] = (assignments[t.index] || t.name || "Soprano").toLowerCase();
+      const vKey = (assignments[t.index] || t.name || "Soprano").toLowerCase();
+      trackVoiceMap[t.index] = vKey;
+      trackPrograms[t.index] = instruments[vKey] ?? 0;
+      trackVolumes[t.index] = volumes[vKey] ?? 1.0;
     }
 
-    const now = ctx.currentTime + 0.05;
-    let maxEnd = 0.2;
-
-    for (const n of scoreData.notes) {
+    const audibleNotes = scoreData.notes.filter((n) => {
       const vKey = trackVoiceMap[n.track_index] || "soprano";
-      if (!isVoiceAudible(vKey)) continue;
-      const s = n.onset_sec * scale - offsetSec;
-      const e = n.offset_sec * scale - offsetSec;
-      if (e <= 0) continue;
-      const startAt = now + Math.max(0, s);
-      const dur = Math.max(0.05, e - Math.max(0, s));
-      maxEnd = Math.max(maxEnd, Math.max(0, s) + dur);
+      return isVoiceAudible(vKey) && n.offset_sec > offsetSec;
+    });
 
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      const freq = 440 * Math.pow(2, (n.pitch_midi - 69) / 12);
-      const isChoir = (instruments[vKey] ?? 52) === 52;
-      osc.type = isChoir ? "triangle" : "sine";
-      osc.frequency.setValueAtTime(freq, startAt);
-
-      const vol = Math.max(0.01, (volumes[vKey] ?? 1.0) * (n.velocity / 127) * 0.18);
-      gain.gain.setValueAtTime(0.0001, startAt);
-      gain.gain.linearRampToValueAtTime(vol, startAt + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + dur);
-
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(startAt);
-      osc.stop(startAt + dur + 0.02);
-    }
+    const totalDur = Math.max(
+      offsetSec + 0.5,
+      audibleNotes.reduce((m, n) => Math.max(m, n.offset_sec), offsetSec),
+    );
 
     setIsPlaying(true);
-    stopTimerRef.current = window.setTimeout(() => {
-      stopPlayback();
-    }, Math.ceil((maxEnd + 0.2) * 1000));
+    midiSynth.start({
+      notes: audibleNotes,
+      fromSec: offsetSec,
+      durationSec: totalDur,
+      tempoBpm: baseBpm,
+      playbackRate,
+      volume: 0.85,
+      loop: false,
+      metronome: false,
+      trackPrograms,
+      trackVolumes,
+      onPosition: () => {},
+      onEnd: () => setIsPlaying(false),
+    });
   };
 
   const handleSaveAssignments = async () => {
@@ -224,7 +206,7 @@ export function SATBMixerPanel({
       const instByIdx: Record<number, number> = {};
       for (const t of scoreData.tracks || []) {
         const vKey = (assignments[t.index] || t.name || "soprano").toLowerCase();
-        instByIdx[t.index] = instruments[vKey] ?? 52;
+        instByIdx[t.index] = instruments[vKey] ?? 0;
       }
       const updated = await api.updateSatbAssignments(projectId, {
         assignments,
@@ -430,14 +412,17 @@ export function SATBMixerPanel({
                 <select
                   aria-label={`${voice} Sound`}
                   disabled={!isAssigned}
-                  value={instruments[vKey] ?? 52}
+                  value={instruments[vKey] ?? 0}
                   onChange={(e) =>
                     setInstruments((prev) => ({ ...prev, [vKey]: Number(e.target.value) }))
                   }
                   className="w-full h-8 rounded border border-[#27273A] bg-[#11111B] px-2 text-xs text-[#F5F3FF] disabled:opacity-40"
                 >
-                  <option value={52}>Choir Aahs</option>
-                  <option value={0}>Piano (Fallback)</option>
+                  {GM_INSTRUMENT_PRESETS.map((preset) => (
+                    <option key={preset.program} value={preset.program}>
+                      {preset.label}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div className="sm:col-span-2 flex items-center justify-end gap-1">

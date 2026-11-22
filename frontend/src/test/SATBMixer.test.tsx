@@ -46,6 +46,14 @@ describe("SATBMixerPanel", () => {
 
     render(<SATBMixerPanel projectId="proj-satb" projectTitle="Hymn SATB" scoreData={sampleSatbScore} />);
 
+    // Default sound preset is Acoustic Grand Piano (program 0) with all 4 presets available
+    const sopSound = screen.getByLabelText("Soprano Sound") as HTMLSelectElement;
+    expect(sopSound.value).toBe("0");
+    expect(screen.getAllByRole("option", { name: "Acoustic Grand Piano" }).length).toBeGreaterThanOrEqual(4);
+    expect(screen.getAllByRole("option", { name: "Electric Piano" }).length).toBeGreaterThanOrEqual(4);
+    expect(screen.getAllByRole("option", { name: "String Ensemble" }).length).toBeGreaterThanOrEqual(4);
+    expect(screen.getAllByRole("option", { name: "Choir Aahs" }).length).toBeGreaterThanOrEqual(4);
+
     // Solo & Mute toggles
     const soloButtons = screen.getAllByRole("button", { name: /^solo$/i });
     fireEvent.click(soloButtons[0]);

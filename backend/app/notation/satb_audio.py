@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import subprocess
 import tempfile
@@ -16,6 +17,7 @@ from app.schemas.score import ScoreData
 
 DEFAULT_SAMPLE_RATE = 22050
 VALID_SATB_VOICES = ("soprano", "alto", "tenor", "bass")
+DEFAULT_SATB_PROGRAM = 0  # Acoustic Grand Piano
 
 
 def _normalize_voice_label(label: str | None) -> str | None:
@@ -150,20 +152,158 @@ def _encode_wav_to_mp3(wav_bytes: bytes) -> bytes:
         return mp3_path.read_bytes()
 
 
+def _find_soundfont_path() -> Path | None:
+    """Locate a General MIDI .sf2 SoundFont if configured or installed."""
+    env_sf = os.environ.get("SOUNDFONT_PATH", "").strip()
+    if env_sf and Path(env_sf).exists():
+        return Path(env_sf)
+
+    repo_root = Path(__file__).resolve().parents[3]
+    candidates = [
+        *(sorted((repo_root / "assets" / "soundfonts").glob("*.sf2")) if (repo_root / "assets" / "soundfonts").exists() else []),
+        Path("/usr/share/sounds/sf2/FluidR3_GM.sf2"),
+        Path("/usr/share/soundfonts/FluidR3_GM.sf2"),
+        Path("/usr/share/sounds/sf2/default-GM.sf2"),
+    ]
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return None
+
+
+def _resample_mono(samples: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+    if src_sr == dst_sr or samples.size == 0:
+        return samples.astype(np.float32)
+    duration = len(samples) / float(src_sr)
+    target_len = max(1, int(round(duration * dst_sr)))
+    x_old = np.linspace(0.0, 1.0, num=len(samples), endpoint=False)
+    x_new = np.linspace(0.0, 1.0, num=target_len, endpoint=False)
+    return np.interp(x_new, x_old, samples).astype(np.float32)
+
+
+def _render_pm_via_soundfont(pm: pretty_midi.PrettyMIDI, sample_rate: int) -> np.ndarray | None:
+    """Render PrettyMIDI using FluidSynth (.sf2) or MuseScore 4 (MS Basic.sf3) when available."""
+    if os.environ.get("DISABLE_SOUNDFONT_RENDER", "").lower() in ("1", "true", "yes"):
+        return None
+
+    fluidsynth_bin = shutil.which("fluidsynth")
+    sf2_path = _find_soundfont_path()
+
+    with tempfile.TemporaryDirectory(prefix="scriba_sf_") as tmpdir:
+        tmp = Path(tmpdir)
+        mid_path = tmp / "score.mid"
+        wav_path = tmp / "rendered.wav"
+        pm.write(str(mid_path))
+
+        if fluidsynth_bin and sf2_path is not None:
+            res = subprocess.run(
+                [
+                    fluidsynth_bin,
+                    "-ni",
+                    "-g",
+                    "0.8",
+                    "-F",
+                    str(wav_path),
+                    "-r",
+                    str(sample_rate),
+                    str(sf2_path),
+                    str(mid_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=90,
+                check=False,
+            )
+            if res.returncode == 0 and wav_path.exists() and wav_path.stat().st_size > 44:
+                data, sr = sf.read(str(wav_path), dtype="float32")
+                mono = np.mean(data, axis=1) if data.ndim > 1 else data
+                return _resample_mono(mono, sr, sample_rate)
+
+        from app.notation.generator import _find_musescore_binary
+
+        mscore_bin = _find_musescore_binary()
+        if mscore_bin:
+            res = subprocess.run(
+                [mscore_bin, str(mid_path), "-o", str(wav_path)],
+                capture_output=True,
+                text=True,
+                timeout=90,
+                check=False,
+            )
+            if res.returncode == 0 and wav_path.exists() and wav_path.stat().st_size > 44:
+                data, sr = sf.read(str(wav_path), dtype="float32")
+                mono = np.mean(data, axis=1) if data.ndim > 1 else data
+                return _resample_mono(mono, sr, sample_rate)
+
+    return None
+
+
+def _render_notes_fallback_piano(
+    notes_list: list[tuple[int, float, float, int]],
+    *,
+    n_samples: int,
+    sample_rate: int,
+    program: int,
+) -> np.ndarray:
+    """Velocity-sensitive acoustic piano / ensemble fallback when SoundFont CLI is unavailable."""
+    mix = np.zeros(n_samples, dtype=np.float32)
+    is_choir_or_strings = program in (48, 49, 52, 53)
+    for pitch, start, end, vel in notes_list:
+        s_idx = max(0, int(start * sample_rate))
+        off_idx = min(n_samples, int(max(start + 0.04, end) * sample_rate))
+        hold_len = off_idx - s_idx
+        if hold_len <= 8:
+            continue
+        release_sec = 0.28 if not is_choir_or_strings else 0.22
+        end_idx = min(n_samples, off_idx + int(release_sec * sample_rate))
+        length = end_idx - s_idx
+        t = np.arange(length, dtype=np.float32) / sample_rate
+        freq = 440.0 * (2.0 ** ((pitch - 69) / 12.0))
+        vel_norm = max(0.05, min(1.0, vel / 127.0))
+
+        if is_choir_or_strings:
+            wave = (
+                0.70 * np.sin(2.0 * np.pi * freq * t)
+                + 0.20 * np.sin(2.0 * np.pi * 2.0 * freq * t)
+                + 0.10 * np.sin(2.0 * np.pi * 3.0 * freq * t)
+            )
+            attack = min(int(0.045 * sample_rate), max(1, hold_len // 3))
+            env = np.ones(length, dtype=np.float32)
+        else:
+            # Acoustic Grand Piano harmonic profile with hammer attack & string decay
+            brightness = 0.22 + 0.28 * vel_norm
+            wave = (
+                0.62 * np.sin(2.0 * np.pi * freq * t)
+                + brightness * np.sin(2.0 * np.pi * 2.0 * freq * t)
+                + (brightness * 0.45) * np.sin(2.0 * np.pi * 3.0 * freq * t)
+                + (brightness * 0.18) * np.sin(2.0 * np.pi * 4.0 * freq * t)
+            )
+            attack = min(int(0.006 * sample_rate), max(1, hold_len // 4))
+            decay_rate = 0.55 + max(0.0, (pitch - 60) * 0.015)
+            env = np.exp(-t * decay_rate).astype(np.float32)
+
+        if attack > 0:
+            env[:attack] *= np.linspace(0.0, 1.0, attack, dtype=np.float32)
+        tail_len = end_idx - off_idx
+        if tail_len > 0:
+            env[hold_len:] *= np.linspace(1.0, 0.0, tail_len, dtype=np.float32)
+        mix[s_idx:end_idx] += wave * env * (vel_norm * 0.26)
+    return mix
+
+
 def _render_notes_to_waveform(
     notes_list: list[tuple[int, float, float, int]],
     *,
     total_duration_sec: float,
     sample_rate: int,
-    program: int = 52,
+    program: int = DEFAULT_SATB_PROGRAM,
 ) -> np.ndarray:
-    """Render synchronized MIDI note events into a fixed-length float32 waveform."""
+    """Render synchronized MIDI note events into a fixed-length float32 waveform using GM SoundFont."""
     n_samples = max(1, int(np.ceil(total_duration_sec * sample_rate)))
     if not notes_list:
         return np.zeros(n_samples, dtype=np.float32)
 
     pm = pretty_midi.PrettyMIDI(initial_tempo=120.0)
-    # Use requested GM program (e.g. 52 Choir Aahs, 0 Piano); pretty_midi harmonic synth handles all programs
     inst = pretty_midi.Instrument(program=max(0, min(127, program)))
     for pitch, start, end, vel in notes_list:
         inst.notes.append(
@@ -175,13 +315,20 @@ def _render_notes_to_waveform(
             )
         )
     pm.instruments.append(inst)
-    audio = pm.synthesize(fs=sample_rate).astype(np.float32)
 
-    # Pad or trim so all 4 parts share exact synchronized length
-    out = np.zeros(n_samples, dtype=np.float32)
-    copy_len = min(n_samples, len(audio))
-    out[:copy_len] = audio[:copy_len]
-    return out
+    sf_audio = _render_pm_via_soundfont(pm, sample_rate)
+    if sf_audio is not None and sf_audio.size > 0:
+        out = np.zeros(n_samples, dtype=np.float32)
+        copy_len = min(n_samples, len(sf_audio))
+        out[:copy_len] = sf_audio[:copy_len]
+        return out
+
+    return _render_notes_fallback_piano(
+        notes_list,
+        n_samples=n_samples,
+        sample_rate=sample_rate,
+        program=program,
+    )
 
 
 def _waveform_to_bytes(waveform: np.ndarray, sample_rate: int, output_format: str) -> bytes:
@@ -264,7 +411,7 @@ def render_satb_audio_tracks(
 
     for voice_key, evs in voice_notes.items():
         vol = vols.get(voice_key, 1.0)
-        prog = insts.get(voice_key, 52)  # 52 = Choir Aahs, 0 = Acoustic Grand Piano fallback
+        prog = insts.get(voice_key, DEFAULT_SATB_PROGRAM)  # Default: 0 = Acoustic Grand Piano
         wf = _render_notes_to_waveform(
             evs,
             total_duration_sec=total_dur,

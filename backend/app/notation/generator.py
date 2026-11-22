@@ -1314,12 +1314,47 @@ def render_score_pdf(score: ScoreData, *, include_chords: bool = True) -> bytes:
 
 
 def render_score_wav(score: ScoreData, sample_rate: int = 22050) -> bytes:
-    """Synthesize genuine polyphonic audio from the score's notes into a WAV file."""
+    """Synthesize polyphonic audio from the score's notes using GM SoundFont (Acoustic Grand Piano) or harmonic fallback."""
+    from app.notation.satb_audio import _render_pm_via_soundfont
+
     total_dur = max(
         1.0,
         max((n.offset_sec for n in score.notes), default=1.0) + 0.5,
     )
     num_samples = int(total_dur * sample_rate)
+
+    if score.notes:
+        pm = pretty_midi.PrettyMIDI(initial_tempo=max(20.0, float(score.tempo_bpm or 120.0)))
+        tracks = score.tracks or [ScoreTrack()]
+        track_progs = {t.index: max(0, min(127, t.program)) for t in tracks}
+        by_prog: dict[int, pretty_midi.Instrument] = {}
+        for n in score.notes:
+            prog = track_progs.get(n.track_index, 0)
+            if prog not in by_prog:
+                by_prog[prog] = pretty_midi.Instrument(program=prog)
+            by_prog[prog].notes.append(
+                pretty_midi.Note(
+                    velocity=max(1, min(127, n.velocity)),
+                    pitch=max(0, min(127, n.pitch_midi)),
+                    start=max(0.0, float(n.onset_sec)),
+                    end=max(float(n.onset_sec) + 0.04, float(n.offset_sec)),
+                )
+            )
+        for inst in by_prog.values():
+            pm.instruments.append(inst)
+
+        sf_audio = _render_pm_via_soundfont(pm, sample_rate)
+        if sf_audio is not None and sf_audio.size > 0:
+            mix = np.zeros(num_samples, dtype=np.float32)
+            copy_len = min(num_samples, len(sf_audio))
+            mix[:copy_len] = sf_audio[:copy_len]
+            peak = float(np.max(np.abs(mix))) if len(mix) > 0 else 0.0
+            if peak > 0.95:
+                mix = (mix / peak) * 0.95
+            buf = io.BytesIO()
+            sf.write(buf, mix, sample_rate, format="WAV", subtype="PCM_16")
+            return buf.getvalue()
+
     mix = np.zeros(num_samples, dtype=np.float32)
 
     for n in score.notes:
