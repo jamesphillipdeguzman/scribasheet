@@ -1157,6 +1157,7 @@ def _render_pdf_from_musicxml_via_musescore(xml_str: str) -> bytes | None:
     mscore_bin = _find_musescore_binary()
     if not mscore_bin or not xml_str:
         return None
+    xml_str = apply_scribasheet_musicxml_branding(xml_str)
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

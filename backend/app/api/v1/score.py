@@ -9,8 +9,10 @@ from app.models import Project, ProjectScore, User
 from app.notation.analyzer import select_chord_source_notes
 from app.notation.arrangement import simplify_arrangement
 from app.notation.generator import (
+    apply_scribasheet_musicxml_branding,
     build_piano_vocal_score_data,
     build_score_data,
+    clean_score_title,
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
@@ -44,15 +46,21 @@ def get_project_score(
             detail="No transcription score exists yet for this project.",
         )
 
+    clean_title = clean_score_title(project.title)
     musicxml_str = None
     if score.musicxml_path and storage_service.exists(score.musicxml_path):
-        musicxml_str = storage_service.read_bytes(score.musicxml_path).decode("utf-8")
+        raw_xml = storage_service.read_bytes(score.musicxml_path).decode("utf-8")
+        musicxml_str = apply_scribasheet_musicxml_branding(raw_xml, title=clean_title)
+
+    score_json_out = dict(score.score_json or {})
+    if "title" in score_json_out:
+        score_json_out["title"] = clean_score_title(score_json_out.get("title") or project.title)
 
     return ProjectScoreResponse(
         id=score.id,
         project_id=score.project_id,
         version=score.version,
-        score_json=score.score_json,
+        score_json=score_json_out,
         musicxml=musicxml_str,
         updated_at=score.updated_at,
     )

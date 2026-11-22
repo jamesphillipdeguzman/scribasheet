@@ -380,6 +380,7 @@ class RealTranscriptionHandler:
                         "tempo_bpm": score_data.tempo_bpm,
                         "key_signature": score_data.key_signature,
                         "time_signature": score_data.time_signature,
+                        "branding_version": "scribasheet_v2",
                     },
                 )
 

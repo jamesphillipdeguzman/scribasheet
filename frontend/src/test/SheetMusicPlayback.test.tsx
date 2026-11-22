@@ -1,24 +1,58 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("opensheetmusicdisplay", () => ({
-  OpenSheetMusicDisplay: vi.fn().mockImplementation(() => ({
-    load: vi.fn().mockResolvedValue(undefined),
-    render: vi.fn(),
-    Dispose: vi.fn(),
+const { mockCursorEl, mockSvgGroup, mockOsmdInstance } = vi.hoisted(() => {
+  const cursorEl = document.createElement("img");
+  Object.defineProperty(cursorEl, "offsetLeft", { value: 120, configurable: true });
+  Object.defineProperty(cursorEl, "offsetTop", { value: 40, configurable: true });
+  Object.defineProperty(cursorEl, "offsetHeight", { value: 180, configurable: true });
+
+  const pathEl = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  pathEl.setAttribute("fill", "#000000");
+  const svgGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  svgGroup.appendChild(pathEl);
+
+  const inst = {
+    load: async () => undefined,
+    render: () => undefined,
+    Dispose: () => undefined,
     Zoom: 1,
     EngravingRules: { RenderChordSymbols: true },
     cursor: {
-      show: vi.fn(),
-      hide: vi.fn(),
-      reset: vi.fn(),
-      next: vi.fn(),
-      update: vi.fn(),
-      GNotesUnderCursor: vi.fn().mockReturnValue([]),
-      iterator: { EndReached: false, currentTimeStamp: { RealValue: 0 } },
+      cursorElement: cursorEl,
+      show: () => undefined,
+      hide: () => undefined,
+      reset: () => undefined,
+      next: () => undefined,
+      update: () => undefined,
+      GNotesUnderCursor: () => [
+        {
+          getSVGGElement: () => svgGroup,
+          sourceNote: { ParentStaffEntry: { ParentStaff: { idInMusicSheet: 0 } } },
+        },
+      ],
+      iterator: { EndReached: false, CurrentMeasureIndex: 0, currentTimeStamp: { RealValue: 0 } },
     },
-    GraphicSheet: { MeasureList: [] },
-  })),
+    GraphicSheet: {
+      MeasureList: [
+        [
+          {
+            ParentMusicSystem: {
+              Id: 2,
+              PositionAndShape: { AbsolutePosition: { y: 10 }, Size: { height: 22 } },
+            },
+          },
+        ],
+      ],
+    },
+  };
+  return { mockCursorEl: cursorEl, mockSvgGroup: svgGroup, mockOsmdInstance: inst };
+});
+
+vi.mock("opensheetmusicdisplay", () => ({
+  OpenSheetMusicDisplay: function MockOpenSheetMusicDisplay() {
+    return mockOsmdInstance;
+  },
 }));
 
 import {
@@ -28,6 +62,11 @@ import {
 } from "@/features/editor/musicXmlTimeline";
 import { midiSynth } from "@/features/editor/midiSynth";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
+import {
+  cleanDisplayScoreTitle,
+  prepareDisplayMusicXml,
+  SheetMusicViewer,
+} from "@/features/editor/SheetMusicViewer";
 import type { ScoreNote, ScoreTrack } from "@/types/api";
 
 const sampleXml = `<?xml version="1.0" encoding="utf-8"?>
@@ -62,10 +101,10 @@ const notes: ScoreNote[] = [
 describe("Synchronized Sheet Music Playback View & Timeline", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    vi.spyOn(midiSynth, "startSustainedNote").mockImplementation(() => {});
-    vi.spyOn(midiSynth, "stopSustainedNote").mockImplementation(() => {});
-    vi.spyOn(midiSynth, "stopAllSustainedNotes").mockImplementation(() => {});
-    vi.spyOn(midiSynth, "triggerNote").mockImplementation(() => {});
+    vi.spyOn(midiSynth, "startSustainedNote").mockImplementation(() => { });
+    vi.spyOn(midiSynth, "stopSustainedNote").mockImplementation(() => { });
+    vi.spyOn(midiSynth, "stopAllSustainedNotes").mockImplementation(() => { });
+    vi.spyOn(midiSynth, "triggerNote").mockImplementation(() => { });
   });
 
   it("maps MusicXML pickups and tempo changes accurately between seconds and whole notes", () => {
@@ -126,5 +165,60 @@ describe("Synchronized Sheet Music Playback View & Timeline", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Exit Focus" }));
     expect(screen.getByTestId("piano-roll-workspace")).toHaveAttribute("data-focus-mode", "false");
+  });
+
+  it("renders vertical blue playhead spanning SATB system, highlights noteheads, strips title extensions, and pauses auto-scroll on manual wheel", async () => {
+    expect(cleanDisplayScoreTitle("Go Tell It On The Mountain.Pdf")).toBe("Go Tell It On The Mountain");
+    expect(cleanDisplayScoreTitle("Hymn.mxl")).toBe("Hymn");
+    expect(cleanDisplayScoreTitle("Choir.musicxml")).toBe("Choir");
+    expect(cleanDisplayScoreTitle("Demo.mid")).toBe("Demo");
+    expect(cleanDisplayScoreTitle("Track.mp3")).toBe("Track");
+
+    const brandedXml = prepareDisplayMusicXml(
+      `<score-partwise version="3.1"><work><work-title>Go Tell It.Pdf</work-title></work><part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list><part id="P1"><measure number="1"/></part></score-partwise>`,
+      true,
+    );
+    expect(brandedXml).toContain("<work-title>Go Tell It</work-title>");
+
+    const { rerender } = render(
+      <SheetMusicViewer
+        musicxml={sampleXml}
+        playheadSec={0.25}
+        isPlaying={true}
+        tempoBpm={120}
+        tracks={tracks}
+      />,
+    );
+
+    const playhead = await screen.findByTestId("sheet-music-playhead");
+    expect(playhead.style.width).toBe("3px");
+    expect(playhead.style.backgroundColor).toBe("rgb(59, 130, 246)");
+    expect(playhead.style.pointerEvents).toBe("none");
+    // System height: 22 * 10 * 0.9 = 198px
+    expect(playhead.style.height).toBe("198px");
+    expect(mockCursorEl.style.opacity).toBe("0");
+
+    // Soprano notehead highlighted in blue (#3b82f6)
+    const pathEl = mockSvgGroup.querySelector("path")!;
+    expect(pathEl.getAttribute("fill")).toBe("#3b82f6");
+
+    // Manual wheel event pauses auto-scroll without throwing
+    const scroller = screen.getByTestId("sheet-music-scroll-container");
+    const scrollToSpy = vi.fn();
+    scroller.scrollTo = scrollToSpy;
+    fireEvent.wheel(scroller, { deltaY: 120 });
+    expect(scrollToSpy).not.toHaveBeenCalled();
+
+    // Stop at 0 restores original notehead fill
+    rerender(
+      <SheetMusicViewer
+        musicxml={sampleXml}
+        playheadSec={0}
+        isPlaying={false}
+        tempoBpm={120}
+        tracks={tracks}
+      />,
+    );
+    expect(pathEl.getAttribute("fill")).toBe("#000000");
   });
 });

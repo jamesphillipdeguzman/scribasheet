@@ -19,6 +19,7 @@ from app.models import (
 )
 from app.notation.generator import (
     _render_pdf_via_musescore,
+    clean_score_title,
     count_pdf_pages,
     render_score_pdf,
     render_score_wav,
@@ -69,7 +70,13 @@ def _resolve_pdf_export_bytes(
         pdf_asset_id = meta.get("pdf_asset_id")
         pdf_ver = meta.get("pdf_score_version")
         pdf_include_chords = meta.get("pdf_include_chords", True)
-        if pdf_asset_id and pdf_ver == score_version and bool(pdf_include_chords) == bool(include_chords):
+        is_stale_satb_pdf = meta.get("handler") == "real_omr_homr" and meta.get("branding_version") != "scribasheet_v2"
+        if (
+            pdf_asset_id
+            and pdf_ver == score_version
+            and bool(pdf_include_chords) == bool(include_chords)
+            and not is_stale_satb_pdf
+        ):
             asset = db.query(MediaAsset).filter(MediaAsset.id == pdf_asset_id).first()
             if asset:
                 try:
@@ -139,7 +146,7 @@ def create_export(
 
     try:
         score = ScoreData(**score_row.score_json)
-        score.title = project.title
+        score.title = clean_score_title(project.title)
         mime_type, ext = EXPORT_MIME_TYPES[payload.format]
 
         if payload.format == "midi":
@@ -248,7 +255,7 @@ def download_export(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Export is not ready for download.")
 
     project = db.query(Project).filter(Project.id == export.project_id).first()
-    base_name = sanitize_filename(project.title if project else "scribasheet_score")
+    base_name = sanitize_filename(clean_score_title(project.title if project else "scribasheet_score"))
     mime_type, ext = EXPORT_MIME_TYPES.get(export.format, ("application/octet-stream", "bin"))
     if export.format in ("soprano_mp3", "alto_mp3", "tenor_mp3", "bass_mp3"):
         voice_label = export.format.split("_", 1)[0].capitalize()
@@ -293,7 +300,7 @@ def export_satb_audio(
         )
 
     score = ScoreData(**score_row.score_json)
-    score.title = project.title
+    score.title = clean_score_title(project.title)
     from app.notation.satb_audio import infer_satb_voice_assignments, render_satb_audio_tracks
 
     if payload.part != "combined":

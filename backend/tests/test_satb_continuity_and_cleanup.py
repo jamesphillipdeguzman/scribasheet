@@ -325,3 +325,100 @@ def test_scribasheet_attribution_and_clean_titles(tmp_path: Path) -> None:
     gen_root = ET.fromstring(gen_xml)
     assert gen_root.findtext("./work/work-title") == "Amazing Grace"
     assert gen_root.findtext("./identification/creator[@type='composer']") == "ScribaSheet"
+
+    # Cached score title extensions (.mid, .midi, .mp3, .wav, .Pdf) are stripped
+    assert clean_score_title("Go Tell It On The Mountain.Pdf") == "Go Tell It On The Mountain"
+    assert clean_score_title("Track_01.mid") == "Track 01"
+    assert clean_score_title("Choir.mp3") == "Choir"
+    assert clean_score_title("Audio.wav") == "Audio"
+
+
+def test_cached_musicxml_and_stale_satb_pdf_are_rebranded_on_read_and_export(client, db_session, monkeypatch) -> None:
+    from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob, TranscriptionResult
+    from app.storage.service import storage_service
+
+    monkeypatch.setenv("DISABLE_MUSESCORE_PDF", "1")
+    client.post(
+        "/api/v1/auth/register",
+        json={"email": "cached_brand@example.com", "password": "Password123!", "display_name": "Tester"},
+    )
+    login = client.post("/api/v1/auth/login", json={"email": "cached_brand@example.com", "password": "Password123!"})
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    proj = client.post(
+        "/api/v1/projects",
+        headers=headers,
+        json={"title": "Go Tell It On The Mountain.Pdf", "instrument": "vocals", "transcription_mode": "satb_pdf"},
+    ).json()
+    project_id = proj["id"]
+    user_id = proj["user_id"]
+
+    stale_xml = """<?xml version="1.0" encoding="utf-8"?>
+<score-partwise version="3.1">
+  <work><work-title>Go Tell It On The Mountain.Pdf</work-title></work>
+  <identification><creator type="composer">Music21</creator></identification>
+  <part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list>
+  <part id="P1"><measure number="1"><note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>whole</type></note></measure></part>
+</score-partwise>"""
+    xml_key = storage_service.build_key(user_id, project_id, "musicxml", "cached.musicxml")
+    storage_service.save_bytes(xml_key, stale_xml.encode("utf-8"), content_type="application/vnd.recordare.musicxml+xml")
+
+    stale_pdf_key = storage_service.build_key(user_id, project_id, "exports", "stale_worker.pdf")
+    storage_service.save_bytes(stale_pdf_key, b"%PDF-1.4\n%STALE_MUSIC21_PDF\n%%EOF", content_type="application/pdf")
+
+    db_session.add(
+        ProjectScore(
+            project_id=project_id,
+            version=1,
+            score_json={
+                "title": "Go Tell It On The Mountain.Pdf",
+                "tempo_bpm": 100,
+                "time_signature": "4/4",
+                "key_signature": "C major",
+                "duration_seconds": 2.0,
+                "tracks": [{"index": 0, "name": "Soprano", "instrument": "piano", "clef": "treble", "program": 0, "muted": False}],
+                "notes": [{"id": "n1", "pitch_midi": 72, "onset_sec": 0.0, "offset_sec": 1.0, "velocity": 80, "track_index": 0}],
+                "chords": [],
+                "analysis": {"mode": "satb_pdf"},
+            },
+            musicxml_path=xml_key,
+        )
+    )
+    job = TranscriptionJob(project_id=project_id, user_id=user_id, status="completed")
+    db_session.add(job)
+    db_session.flush()
+    stale_asset = MediaAsset(
+        project_id=project_id,
+        user_id=user_id,
+        asset_type="export_pdf",
+        original_filename="stale.pdf",
+        storage_path=stale_pdf_key,
+        mime_type="application/pdf",
+        size_bytes=32,
+    )
+    db_session.add(stale_asset)
+    db_session.flush()
+    db_session.add(
+        TranscriptionResult(
+            job_id=job.id,
+            metadata_json={"handler": "real_omr_homr", "pdf_asset_id": stale_asset.id, "pdf_score_version": 1},
+        )
+    )
+    db_session.commit()
+
+    # GET /score returns sanitized MusicXML & clean title
+    score_res = client.get(f"/api/v1/projects/{project_id}/score", headers=headers)
+    assert score_res.status_code == 200
+    body = score_res.json()
+    assert body["score_json"]["title"] == "Go Tell It On The Mountain"
+    out_root = ET.fromstring(body["musicxml"])
+    assert out_root.findtext("./work/work-title") == "Go Tell It On The Mountain"
+    assert out_root.findtext("./identification/creator[@type='composer']") == "ScribaSheet"
+
+    # PDF export skips stale worker PDF without branding_version and regenerates cleanly
+    pdf_exp = client.post(f"/api/v1/projects/{project_id}/exports", headers=headers, json={"format": "pdf"})
+    assert pdf_exp.status_code == 201
+    pdf_dl = client.get(pdf_exp.json()["download_url"], headers=headers)
+    assert pdf_dl.status_code == 200
+    assert b"STALE_MUSIC21_PDF" not in pdf_dl.content
+    assert pdf_dl.content.startswith(b"%PDF-")

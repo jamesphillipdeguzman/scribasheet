@@ -2,10 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Maximize2, Minimize2, Pause, Play, Square, ZoomIn, ZoomOut } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import {
-  getCascadeTrackPalette,
-  resolveTrackVoiceRole,
-} from "@/features/editor/cascadeUtils";
+import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
 import { midiSynth } from "@/features/editor/midiSynth";
 import {
   buildMusicXmlTimeline,
@@ -13,6 +10,58 @@ import {
   wholeNotesToTimeSec,
 } from "@/features/editor/musicXmlTimeline";
 import type { ScoreTrack } from "@/types/api";
+
+const SATB_SHEET_COLORS: Record<string, string> = {
+  soprano: "#3b82f6", // Blue
+  alto: "#10b981", // Emerald
+  tenor: "#f59e0b", // Gold
+  bass: "#8b5cf6", // Purple
+  other: "#3b82f6",
+};
+
+const TITLE_EXT_RE = /\.(?:pdf|mxl|musicxml|xml|mid|midi|mp3|wav)$/i;
+
+export function cleanDisplayScoreTitle(rawTitle: string): string {
+  return rawTitle.trim().replace(TITLE_EXT_RE, "").trim();
+}
+
+export function prepareDisplayMusicXml(xml: string, showChords: boolean): string {
+  if (typeof DOMParser !== "undefined" && typeof XMLSerializer !== "undefined") {
+    try {
+      const doc = new DOMParser().parseFromString(xml, "application/xml");
+      if (!doc.querySelector("parsererror")) {
+        if (!showChords) {
+          const harmonies = Array.from(doc.getElementsByTagName("harmony"));
+          for (const el of harmonies) {
+            el.parentNode?.removeChild(el);
+          }
+        }
+        for (const tag of ["work-title", "movement-title"]) {
+          const el = doc.getElementsByTagName(tag)[0];
+          if (el?.textContent) {
+            el.textContent = cleanDisplayScoreTitle(el.textContent);
+          }
+        }
+        return new XMLSerializer().serializeToString(doc);
+      }
+    } catch {
+      // Fall back to regex removal below
+    }
+  }
+  return showChords ? xml : xml.replace(/<harmony\b[^>]*>[\s\S]*?<\/harmony>/gi, "");
+}
+
+export function stripHarmonyFromMusicXml(xml: string): string {
+  return prepareDisplayMusicXml(xml, false);
+}
+
+interface PlayheadRect {
+  visible: boolean;
+  left: number;
+  top: number;
+  height: number;
+  systemIndex: number;
+}
 
 interface SheetMusicViewerProps {
   musicxml: string | null;
@@ -31,24 +80,6 @@ interface SheetMusicViewerProps {
   onToggleFocusMode?: () => void;
 }
 
-export function stripHarmonyFromMusicXml(xml: string): string {
-  if (typeof DOMParser !== "undefined" && typeof XMLSerializer !== "undefined") {
-    try {
-      const doc = new DOMParser().parseFromString(xml, "application/xml");
-      if (!doc.querySelector("parsererror")) {
-        const harmonies = Array.from(doc.getElementsByTagName("harmony"));
-        for (const el of harmonies) {
-          el.parentNode?.removeChild(el);
-        }
-        return new XMLSerializer().serializeToString(doc);
-      }
-    } catch {
-      // Fall back to regex removal below
-    }
-  }
-  return xml.replace(/<harmony\b[^>]*>[\s\S]*?<\/harmony>/gi, "");
-}
-
 export function SheetMusicViewer({
   musicxml,
   showChordSymbols = true,
@@ -65,15 +96,27 @@ export function SheetMusicViewer({
   isFocusMode = false,
   onToggleFocusMode,
 }: SheetMusicViewerProps) {
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
   const highlightedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
   const lastCursorWholeRef = useRef<number>(-1);
+  const lastFollowedSystemRef = useRef<number>(-1);
+  const manualScrollPauseUntilRef = useRef<number>(0);
+  const programmaticScrollAtRef = useRef<number>(0);
+
   const [zoom, setZoom] = useState(0.9);
   const [localShowChords, setLocalShowChords] = useState(true);
   const [followCursor, setFollowCursor] = useState(true);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
+  const [playheadRect, setPlayheadRect] = useState<PlayheadRect>({
+    visible: false,
+    left: 0,
+    top: 0,
+    height: 80,
+    systemIndex: 0,
+  });
 
   const effectiveShowChords = onToggleChordSymbols ? showChordSymbols : localShowChords;
   const handleToggleChords = () => {
@@ -101,7 +144,74 @@ export function SheetMusicViewer({
     highlightedSvgRef.current = [];
   };
 
-  const syncCursorToSeconds = (sec: number, shouldScroll: boolean) => {
+  const computePlayheadGeometry = (osmd: OpenSheetMusicDisplay): PlayheadRect => {
+    const cursorEl = osmd.cursor?.cursorElement;
+    const containerEl = containerRef.current;
+    if (!cursorEl || !containerEl) {
+      return { visible: false, left: 0, top: 0, height: 80, systemIndex: 0 };
+    }
+
+    const cRect = containerEl.getBoundingClientRect();
+    const kRect = cursorEl.getBoundingClientRect();
+    const left =
+      cRect.width > 0 && kRect.width >= 0 && kRect.left >= cRect.left - 2
+        ? kRect.left - cRect.left
+        : cursorEl.offsetLeft || 0;
+
+    let top = cursorEl.offsetTop || 0;
+    let height = cursorEl.offsetHeight || 96;
+    let systemIndex = 0;
+
+    try {
+      const mIdx = (osmd.cursor.iterator as unknown as { CurrentMeasureIndex?: number })?.CurrentMeasureIndex ?? 0;
+      const measureList = osmd.GraphicSheet?.MeasureList;
+      const gm = measureList?.[mIdx]?.[0];
+      const sys = (gm as unknown as {
+        ParentMusicSystem?: {
+          Id?: number;
+          PositionAndShape?: { AbsolutePosition?: { y: number }; Size?: { height: number } };
+        };
+      })?.ParentMusicSystem;
+      const scale = 10 * zoom;
+      if (sys?.PositionAndShape?.AbsolutePosition && sys?.PositionAndShape?.Size) {
+        top = sys.PositionAndShape.AbsolutePosition.y * scale;
+        height = Math.max(40, sys.PositionAndShape.Size.height * scale);
+        systemIndex = typeof sys.Id === "number" ? sys.Id : mIdx;
+      } else {
+        systemIndex = Math.floor(top / 160);
+      }
+    } catch {
+      // Fallback to cursor element dimensions
+    }
+
+    return { visible: true, left, top, height, systemIndex };
+  };
+
+  const maybeAutoScroll = (geom: PlayheadRect) => {
+    const scroller = scrollContainerRef.current;
+    if (!scroller || !followCursor || !isPlaying || !geom.visible) return;
+    if (performance.now() < manualScrollPauseUntilRef.current) return;
+
+    const viewTop = scroller.scrollTop;
+    const viewBottom = viewTop + scroller.clientHeight;
+    const sysTop = geom.top;
+    const sysBottom = geom.top + geom.height;
+    const enteredNewSystem = geom.systemIndex !== lastFollowedSystemRef.current;
+    const outsideComfortZone = sysTop < viewTop + 16 || sysBottom > viewBottom - 16;
+
+    if ((enteredNewSystem || outsideComfortZone) && scroller.clientHeight > 0) {
+      lastFollowedSystemRef.current = geom.systemIndex;
+      programmaticScrollAtRef.current = performance.now();
+      const targetTop = Math.max(0, sysTop - 36);
+      if (typeof scroller.scrollTo === "function") {
+        scroller.scrollTo({ top: targetTop, behavior: "smooth" });
+      } else {
+        scroller.scrollTop = targetTop;
+      }
+    }
+  };
+
+  const syncCursorToSeconds = (sec: number, allowAutoScroll: boolean) => {
     const osmd = osmdRef.current;
     if (!osmd || !osmd.cursor) return;
     const cursor = osmd.cursor;
@@ -114,10 +224,18 @@ export function SheetMusicViewer({
     try {
       if (!cursor.iterator) return;
       cursor.show();
+      // Hide OSMD's built-in green cursor while retaining its DOM coordinates for tracking
+      if (cursor.cursorElement) {
+        cursor.cursorElement.style.opacity = "0";
+        cursor.cursorElement.style.pointerEvents = "none";
+      }
 
       const curReal = cursor.iterator.currentTimeStamp?.RealValue ?? 0;
       if (sec <= 0.01 || targetWhole < curReal - 0.001) {
         cursor.reset();
+        if (sec <= 0.01) {
+          lastFollowedSystemRef.current = -1;
+        }
       }
 
       let guard = 0;
@@ -151,21 +269,19 @@ export function SheetMusicViewer({
         if (isMuted) continue;
         if (satbSoloVoice && role !== satbSoloVoice) continue;
 
-        const palette = getCascadeTrackPalette(track, staffIdx);
+        const fillHex = SATB_SHEET_COLORS[role] || SATB_SHEET_COLORS.other;
         const noteheadTargets = svgEl.querySelectorAll("path, ellipse");
         const els = noteheadTargets.length > 0 ? Array.from(noteheadTargets) : [svgEl];
         for (const el of els) {
           highlightedSvgRef.current.push({ el, origFill: el.getAttribute("fill") });
-          el.setAttribute("fill", palette.fill);
+          el.setAttribute("fill", fillHex);
         }
       }
 
-      if (shouldScroll && followCursor && cursor.cursorElement && typeof cursor.cursorElement.scrollIntoView === "function") {
-        cursor.cursorElement.scrollIntoView({
-          block: "nearest",
-          inline: "nearest",
-          behavior: "smooth",
-        });
+      const geom = computePlayheadGeometry(osmd);
+      setPlayheadRect(geom);
+      if (allowAutoScroll) {
+        maybeAutoScroll(geom);
       }
     } catch {
       // Ignore OSMD cursor boundary exceptions during re-render
@@ -193,7 +309,7 @@ export function SheetMusicViewer({
             measureNumberInterval: 4,
             drawingParameters: "default",
             pageBackgroundColor: "#F8FAFC",
-            followCursor: true,
+            followCursor: false, // Controlled manually to prevent scroll shivering
           });
         }
         const osmd = osmdRef.current;
@@ -202,19 +318,19 @@ export function SheetMusicViewer({
         if (rules && "RenderChordSymbols" in rules) {
           rules.RenderChordSymbols = effectiveShowChords;
         }
-        const displayXml = effectiveShowChords ? musicxml : stripHarmonyFromMusicXml(musicxml);
+        const displayXml = prepareDisplayMusicXml(musicxml, effectiveShowChords);
         await osmd.load(displayXml);
         if (cancelled) return;
         osmd.Zoom = zoom;
         osmd.render();
         lastCursorWholeRef.current = -1;
+        lastFollowedSystemRef.current = -1;
         osmd.cursor?.reset();
-        if (playheadSec > 0 || isPlaying) {
-          syncCursorToSeconds(playheadSec, false);
-        } else {
-          osmd.cursor?.show();
-          osmd.cursor?.update();
+        if (osmd.cursor?.cursorElement) {
+          osmd.cursor.cursorElement.style.opacity = "0";
+          osmd.cursor.cursorElement.style.pointerEvents = "none";
         }
+        syncCursorToSeconds(playheadSec, false);
       } catch (err) {
         if (!cancelled) {
           setRenderError(err instanceof Error ? err.message : "Could not render MusicXML notation.");
@@ -231,7 +347,7 @@ export function SheetMusicViewer({
     };
   }, [musicxml, zoom, effectiveShowChords]);
 
-  // Clean up OSMD instance and autoResize listeners on unmount
+  // Clean up OSMD instance and listeners on unmount
   useEffect(() => {
     return () => {
       clearNoteheadHighlights();
@@ -244,11 +360,14 @@ export function SheetMusicViewer({
     };
   }, []);
 
-  // Keep cursor synced to playheadSec when paused/seeking
+  // Keep cursor synced to playheadSec when paused/seeking/stopped
   useEffect(() => {
     if (isRendering) return;
     if (!isPlaying) {
       syncCursorToSeconds(playheadSec, false);
+      if (playheadSec === 0) {
+        clearNoteheadHighlights();
+      }
     }
   }, [playheadSec, isPlaying, isRendering, satbSoloVoice, satbMutedVoices, timeline]);
 
@@ -268,6 +387,12 @@ export function SheetMusicViewer({
     };
   }, [isPlaying, isRendering, followCursor, satbSoloVoice, satbMutedVoices, timeline, playheadSec]);
 
+  const handleManualScrollSignal = () => {
+    // Ignore scroll events triggered by our own smooth scrollTo within 350ms
+    if (performance.now() - programmaticScrollAtRef.current < 350) return;
+    manualScrollPauseUntilRef.current = performance.now() + 3000;
+  };
+
   const handleScoreClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!onSeek || !osmdRef.current || !containerRef.current) return;
     const measureList = osmdRef.current.GraphicSheet?.MeasureList;
@@ -277,7 +402,6 @@ export function SheetMusicViewer({
     const clickX = e.clientX - containerRect.left;
     const clickY = e.clientY - containerRect.top;
 
-    // OSMD coordinates are in 10px units * zoom
     const scale = 10 * zoom;
     const osmdX = clickX / scale;
     const osmdY = clickY / scale;
@@ -358,10 +482,11 @@ export function SheetMusicViewer({
             aria-label="Follow cursor"
             aria-pressed={followCursor}
             onClick={() => setFollowCursor((v) => !v)}
-            className={`h-8 rounded-lg border px-2.5 text-xs font-medium transition-colors ${followCursor
-              ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200"
-              : "border-[#27273A] bg-[#11111B] text-[#A1A1AA] hover:text-[#F5F3FF]"
-              }`}
+            className={`h-8 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+              followCursor
+                ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200"
+                : "border-[#27273A] bg-[#11111B] text-[#A1A1AA] hover:text-[#F5F3FF]"
+            }`}
           >
             Follow Cursor
           </button>
@@ -370,10 +495,11 @@ export function SheetMusicViewer({
             aria-label="Show chord symbols"
             aria-pressed={effectiveShowChords}
             onClick={handleToggleChords}
-            className={`h-8 rounded-lg border px-2.5 text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${effectiveShowChords
-              ? "border-[#A78BFA]/60 bg-[#7C3AED]/20 text-[#F5F3FF]"
-              : "border-[#27273A] bg-[#11111B] text-[#A1A1AA] hover:text-[#F5F3FF]"
-              }`}
+            className={`h-8 rounded-lg border px-2.5 text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${
+              effectiveShowChords
+                ? "border-[#A78BFA]/60 bg-[#7C3AED]/20 text-[#F5F3FF]"
+                : "border-[#27273A] bg-[#11111B] text-[#A1A1AA] hover:text-[#F5F3FF]"
+            }`}
           >
             Chords
           </button>
@@ -416,16 +542,40 @@ export function SheetMusicViewer({
       )}
 
       <div
+        ref={scrollContainerRef}
+        data-testid="sheet-music-scroll-container"
         onClick={handleScoreClick}
-        className={`relative w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 touch-pan-x touch-pan-y ${isFocusMode ? "flex-1 min-h-0" : "min-h-[280px]"
-          } ${onSeek ? "cursor-pointer" : ""}`}
+        onWheel={handleManualScrollSignal}
+        onTouchMove={handleManualScrollSignal}
+        onScroll={handleManualScrollSignal}
+        className={`relative w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 touch-pan-x touch-pan-y ${
+          isFocusMode ? "flex-1 min-h-0" : "min-h-[280px] max-h-[560px]"
+        } ${onSeek ? "cursor-pointer" : ""}`}
       >
         {isRendering && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/20 text-xs text-zinc-700">
+          <div className="absolute inset-0 flex items-center justify-center bg-black/20 text-xs text-zinc-700 z-30">
             Rendering notation...
           </div>
         )}
-        <div ref={containerRef} className="min-w-[560px]" />
+        <div className="relative min-w-[560px]">
+          <div ref={containerRef} />
+          {playheadRect.visible && (
+            <div
+              data-testid="sheet-music-playhead"
+              style={{
+                position: "absolute",
+                left: `${playheadRect.left}px`,
+                top: `${playheadRect.top}px`,
+                height: `${playheadRect.height}px`,
+                width: "3px",
+                backgroundColor: "#3b82f6",
+                boxShadow: "0 0 8px rgba(59, 130, 246, 0.75)",
+                zIndex: 20,
+                pointerEvents: "none",
+              }}
+            />
+          )}
+        </div>
       </div>
     </div>
   );
