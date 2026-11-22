@@ -12,6 +12,16 @@ export function formatDuration(seconds: number | null | undefined): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+export function isScoreMediaAsset(
+  asset?: { original_filename?: string | null; mime_type?: string | null } | null,
+): boolean {
+  if (!asset) return false;
+  const mime = (asset.mime_type || "").toLowerCase();
+  if (mime.includes("pdf") || mime.includes("musicxml")) return true;
+  const name = (asset.original_filename || "").toLowerCase();
+  return /\.(pdf|mxl|musicxml)$/i.test(name);
+}
+
 export const DEFAULT_APP_TIMEZONE = "Asia/Manila";
 
 export function getAppTimeZone(): string {

@@ -1,7 +1,7 @@
 import React, { useRef, useState } from "react";
-import { AlertCircle, CheckCircle2, FileAudio, Link2, Loader2, Mic, Square, Upload, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, FileAudio, FileText, Link2, Loader2, Mic, Square, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import { formatBytes, formatDuration } from "@/lib/utils";
+import { formatBytes, formatDuration, isScoreMediaAsset } from "@/lib/utils";
 import { api, ApiError } from "@/services/api";
 import type { MediaAsset } from "@/types/api";
 
@@ -172,6 +172,11 @@ export function MediaUploader({
   };
 
   const originalAssets = existingAssets.filter((a) => a.asset_type === "original");
+  const hasScoreAsset = originalAssets.some((a) => isScoreMediaAsset(a));
+  const selectedIsScore = Boolean(
+    selectedFile && isScoreMediaAsset({ original_filename: selectedFile.name, mime_type: selectedFile.type }),
+  );
+  const isScoreMode = acceptPdf || hasScoreAsset || selectedIsScore;
 
   return (
     <div className="space-y-4">
@@ -208,17 +213,18 @@ export function MediaUploader({
           <Button size="sm" variant="secondary" onClick={() => fileInputRef.current?.click()}>
             Choose File
           </Button>
-          {!isRecording ? (
-            <Button size="sm" variant="outline" onClick={startRecording}>
-              <Mic className="h-3.5 w-3.5 text-red-400" />
-              Record Microphone
-            </Button>
-          ) : (
-            <Button size="sm" variant="danger" onClick={stopRecording}>
-              <Square className="h-3.5 w-3.5" />
-              Stop Recording ({formatDuration(recordingSec)})
-            </Button>
-          )}
+          {!isScoreMode &&
+            (!isRecording ? (
+              <Button size="sm" variant="outline" onClick={startRecording}>
+                <Mic className="h-3.5 w-3.5 text-red-400" />
+                Record Microphone
+              </Button>
+            ) : (
+              <Button size="sm" variant="danger" onClick={stopRecording}>
+                <Square className="h-3.5 w-3.5" />
+                Stop Recording ({formatDuration(recordingSec)})
+              </Button>
+            ))}
         </div>
       </div>
 
@@ -264,19 +270,29 @@ export function MediaUploader({
 
       {originalAssets.length > 0 && (
         <div className="space-y-2">
-          <div className="text-xs font-medium text-[#A1A1AA]">Uploaded Media</div>
+          <div className="text-xs font-medium text-[#A1A1AA]">
+            {hasScoreAsset ? "Uploaded Score" : "Uploaded Media"}
+          </div>
           {originalAssets.map((a) => {
             const isDeleting = deletingAssetId === a.id;
             const removeDisabled = isProcessing || uploadProgress !== null || deletingAssetId !== null;
+            const assetIsScore = isScoreMediaAsset(a);
             return (
               <div key={a.id} className="space-y-2">
                 <div className="flex items-center justify-between gap-2 rounded-lg border border-[#27273A] bg-[#11111B] px-3 py-2 text-xs">
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <FileAudio className="h-4 w-4 text-[#A78BFA] shrink-0" />
+                    {assetIsScore ? (
+                      <FileText className="h-4 w-4 text-[#A78BFA] shrink-0" />
+                    ) : (
+                      <FileAudio className="h-4 w-4 text-[#A78BFA] shrink-0" />
+                    )}
                     <div className="truncate">
                       <div className="font-medium text-[#F5F3FF] truncate">{a.original_filename}</div>
                       <div className="text-[#A1A1AA]">
-                        {formatBytes(a.size_bytes)} • {formatDuration(a.duration_seconds)} • {a.sample_rate ? `${a.sample_rate} Hz` : a.mime_type}
+                        {formatBytes(a.size_bytes)}
+                        {!assetIsScore && a.duration_seconds != null ? ` • ${formatDuration(a.duration_seconds)}` : ""}
+                        {" • "}
+                        {a.sample_rate ? `${a.sample_rate} Hz` : a.mime_type}
                       </div>
                     </div>
                   </div>
@@ -332,27 +348,29 @@ export function MediaUploader({
       )}
 
       {/* External Video URL Check */}
-      <form onSubmit={handleUrlCheck} className="pt-2 border-t border-[#27273A] space-y-2">
-        <label className="block text-xs font-medium text-[#A1A1AA]">External Media URL (Optional Check)</label>
-        <div className="flex gap-2">
-          <input
-            type="url"
-            placeholder="https://..."
-            value={externalUrl}
-            onChange={(e) => setExternalUrl(e.target.value)}
-            className="flex-1 h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF] placeholder:text-[#52526B]"
-          />
-          <Button type="submit" size="sm" variant="outline">
-            <Link2 className="h-3.5 w-3.5" />
-            Check
-          </Button>
-        </div>
-        {urlNotice && (
-          <p className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg p-2.5">
-            {urlNotice}
-          </p>
-        )}
-      </form>
+      {!isScoreMode && (
+        <form onSubmit={handleUrlCheck} className="pt-2 border-t border-[#27273A] space-y-2">
+          <label className="block text-xs font-medium text-[#A1A1AA]">External Media URL (Optional Check)</label>
+          <div className="flex gap-2">
+            <input
+              type="url"
+              placeholder="https://..."
+              value={externalUrl}
+              onChange={(e) => setExternalUrl(e.target.value)}
+              className="flex-1 h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF] placeholder:text-[#52526B]"
+            />
+            <Button type="submit" size="sm" variant="outline">
+              <Link2 className="h-3.5 w-3.5" />
+              Check
+            </Button>
+          </div>
+          {urlNotice && (
+            <p className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg p-2.5">
+              {urlNotice}
+            </p>
+          )}
+        </form>
+      )}
     </div>
   );
 }

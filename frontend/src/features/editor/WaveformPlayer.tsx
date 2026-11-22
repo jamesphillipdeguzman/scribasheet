@@ -9,6 +9,7 @@ import type { ScoreNote } from "@/types/api";
 
 interface WaveformPlayerProps {
   mediaAssetId: string | null;
+  isScoreOnly?: boolean;
   notes: ScoreNote[];
   durationSeconds: number;
   tempoBpm: number;
@@ -19,6 +20,7 @@ interface WaveformPlayerProps {
 
 export function WaveformPlayer({
   mediaAssetId,
+  isScoreOnly = false,
   notes,
   durationSeconds,
   tempoBpm,
@@ -29,7 +31,9 @@ export function WaveformPlayer({
   const waveContainerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
 
-  const [sourceMode, setSourceMode] = useState<"midi" | "original">(mediaAssetId ? "original" : "midi");
+  const [sourceMode, setSourceMode] = useState<"midi" | "original">(
+    !isScoreOnly && mediaAssetId ? "original" : "midi",
+  );
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1.0);
   const [volume, setVolume] = useState(0.8);
@@ -38,7 +42,8 @@ export function WaveformPlayer({
   const [signedAudioUrl, setSignedAudioUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!mediaAssetId) {
+    if (isScoreOnly || !mediaAssetId) {
+      if (isScoreOnly) setSourceMode("midi");
       setSignedAudioUrl(null);
       if (wsRef.current) {
         if (wsRef.current.isPlaying()) wsRef.current.pause();
@@ -194,19 +199,21 @@ export function WaveformPlayer({
 
         {/* A/B Switch */}
         <div className="inline-flex rounded-lg border border-[#27273A] bg-[#09090F] p-0.5 text-xs">
-          <button
-            type="button"
-            disabled={!signedAudioUrl}
-            onClick={() => {
-              stopAll();
-              setSourceMode("original");
-            }}
-            className={`rounded-md px-3 py-1 transition-colors disabled:opacity-40 ${
-              sourceMode === "original" ? "bg-[#8B5CF6] text-[#F5F3FF]" : "text-[#A1A1AA]"
-            }`}
-          >
-            Original Audio
-          </button>
+          {!isScoreOnly && (
+            <button
+              type="button"
+              disabled={!signedAudioUrl}
+              onClick={() => {
+                stopAll();
+                setSourceMode("original");
+              }}
+              className={`rounded-md px-3 py-1 transition-colors disabled:opacity-40 ${
+                sourceMode === "original" ? "bg-[#8B5CF6] text-[#F5F3FF]" : "text-[#A1A1AA]"
+              }`}
+            >
+              Original Audio
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -217,7 +224,7 @@ export function WaveformPlayer({
               sourceMode === "midi" ? "bg-[#8B5CF6] text-[#F5F3FF]" : "text-[#A1A1AA]"
             }`}
           >
-            Transcribed MIDI
+            {isScoreOnly ? "Synthesized Score Playback" : "Transcribed MIDI"}
           </button>
         </div>
 

@@ -33,6 +33,7 @@ import { WaveformPlayer } from "@/features/editor/WaveformPlayer";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { MediaUploader } from "@/features/uploads/MediaUploader";
 import { api, ApiError, WS_BASE_URL, getStoredTokens } from "@/services/api";
+import { isScoreMediaAsset } from "@/lib/utils";
 import type { ScoreData, ScoreNote, TranscriptionJob, TranscriptionSettings } from "@/types/api";
 
 type StudioTab = "notation" | "pianoroll" | "chords" | "lyrics" | "exports";
@@ -455,6 +456,11 @@ export function ProjectStudioPage() {
   }
 
   const originalAsset = project.media_assets.find((a) => a.asset_type === "original") || null;
+  const isScoreAsset = isScoreMediaAsset(originalAsset);
+  const isScoreProject =
+    isScoreAsset ||
+    (!originalAsset &&
+      (project?.transcription_mode === "satb_pdf" || scoreData?.analysis?.mode === "satb_pdf"));
 
   return (
     <AppShell>
@@ -598,7 +604,7 @@ export function ProjectStudioPage() {
           {sidebarOpen && (
             <aside className="lg:col-span-4 xl:col-span-3 space-y-4 min-w-0">
               <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-4 space-y-4 min-w-0">
-                <h2 className="text-sm font-semibold">1. Audio / Video Input</h2>
+                <h2 className="text-sm font-semibold">1. Media or Score Input</h2>
                 <MediaUploader
                   projectId={project.id}
                   existingAssets={project.media_assets}
@@ -614,12 +620,12 @@ export function ProjectStudioPage() {
               </div>
 
               <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-4 space-y-4 min-w-0">
-                <h2 className="text-sm font-semibold">2. Transcription Settings</h2>
+                <h2 className="text-sm font-semibold">
+                  {isScoreAsset ? "2. Score & Voice Settings" : "2. Transcription Settings"}
+                </h2>
                 <TranscriptionConfigPanel
                   hasMedia={Boolean(originalAsset)}
-                  isScoreFile={Boolean(
-                    originalAsset && /\.(pdf|mxl|musicxml)$/i.test(originalAsset.original_filename),
-                  )}
+                  isScoreFile={isScoreAsset}
                   hasScore={Boolean(scoreData)}
                   activeJob={activeJob}
                   workerOnline={workerStatus?.worker_online ?? null}
@@ -682,7 +688,8 @@ export function ProjectStudioPage() {
           <section className={`${sidebarOpen ? "lg:col-span-8 xl:col-span-9" : ""} space-y-4 min-w-0`}>
             {/* Playback Bar */}
             <WaveformPlayer
-              mediaAssetId={originalAsset?.id || null}
+              mediaAssetId={isScoreProject ? null : originalAsset?.id || null}
+              isScoreOnly={isScoreProject}
               notes={scoreData?.notes || []}
               durationSeconds={scoreData?.duration_seconds || project.duration_seconds || 0}
               tempoBpm={scoreData?.tempo_bpm || 120}
@@ -776,7 +783,10 @@ export function ProjectStudioPage() {
                       <>
                         <Loader2 className="h-6 w-6 animate-spin text-[#A78BFA]" />
                         <div className="text-sm font-medium text-[#F5F3FF]">
-                          Transcription in progress: {activeJob.current_stage} ({activeJob.progress}%)
+                          {isScoreProject || activeJob.settings_json?.mode === "satb_pdf"
+                            ? "Score Processing in Progress"
+                            : "Transcription in progress"}
+                          : {activeJob.current_stage} ({activeJob.progress}%)
                         </div>
                         <p className="text-xs text-[#A1A1AA]">
                           Sheet music will appear here automatically once a valid score is generated.

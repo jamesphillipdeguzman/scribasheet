@@ -78,7 +78,24 @@ export function TranscriptionConfigPanel({
     satb_mode: activeJob?.settings_json?.satb_mode || "auto_satb",
   });
 
-  const isScoreImport = Boolean(isScoreFile || normalizeModeId(settings.mode) === "satb_pdf");
+  const isScoreImport = Boolean(
+    isScoreFile || (!hasMedia && normalizeModeId(settings.mode) === "satb_pdf"),
+  );
+
+  useEffect(() => {
+    if (isScoreFile && normalizeModeId(settings.mode) !== "satb_pdf") {
+      setSettings((prev) => ({
+        ...prev,
+        mode: "satb_pdf",
+        enable_source_separation: false,
+      }));
+    } else if (!isScoreFile && hasMedia && normalizeModeId(settings.mode) === "satb_pdf") {
+      setSettings((prev) => ({
+        ...prev,
+        mode: normalizeModeId(defaultMode) === "satb_pdf" ? "single_instrument" : normalizeModeId(defaultMode),
+      }));
+    }
+  }, [isScoreFile, hasMedia, defaultMode, settings.mode]);
 
   useEffect(() => {
     const restoredMode = initialMode || activeJob?.settings_json?.mode;
@@ -138,46 +155,48 @@ export function TranscriptionConfigPanel({
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <label htmlFor="transcription-mode-select" className="block text-xs font-medium text-[#A1A1AA]">
-            Output Arrangement
-          </label>
-          <select
-            id="transcription-mode-select"
-            value={settings.mode}
-            onChange={(e) => setSettings({ ...settings, mode: e.target.value })}
-            className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
-          >
-            {TRANSCRIPTION_MODES.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </select>
-          <p className="text-[11px] text-[#71717A]">
-            {TRANSCRIPTION_MODES.find((m) => m.id === settings.mode)?.description}
-          </p>
-        </div>
+      {!isScoreImport && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <label htmlFor="transcription-mode-select" className="block text-xs font-medium text-[#A1A1AA]">
+              Output Arrangement
+            </label>
+            <select
+              id="transcription-mode-select"
+              value={settings.mode}
+              onChange={(e) => setSettings({ ...settings, mode: e.target.value })}
+              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
+            >
+              {TRANSCRIPTION_MODES.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] text-[#71717A]">
+              {TRANSCRIPTION_MODES.find((m) => m.id === settings.mode)?.description}
+            </p>
+          </div>
 
-        <div className="space-y-1.5">
-          <label htmlFor="instrument-select" className="block text-xs font-medium text-[#A1A1AA]">
-            Instrument
-          </label>
-          <select
-            id="instrument-select"
-            value={settings.instrument}
-            onChange={(e) => setSettings({ ...settings, instrument: e.target.value })}
-            className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
-          >
-            {SUPPORTED_INSTRUMENTS.map((inst) => (
-              <option key={inst.id} value={inst.id}>
-                {inst.label}
-              </option>
-            ))}
-          </select>
+          <div className="space-y-1.5">
+            <label htmlFor="instrument-select" className="block text-xs font-medium text-[#A1A1AA]">
+              Instrument
+            </label>
+            <select
+              id="instrument-select"
+              value={settings.instrument}
+              onChange={(e) => setSettings({ ...settings, instrument: e.target.value })}
+              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
+            >
+              {SUPPORTED_INSTRUMENTS.map((inst) => (
+                <option key={inst.id} value={inst.id}>
+                  {inst.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Score Import Mode vs Audio Source & Demucs Stem Separation */}
       {isScoreImport ? (
@@ -266,119 +285,123 @@ export function TranscriptionConfigPanel({
         </div>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-3">
-        <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[#A1A1AA]">Tempo</label>
-          <select
-            value={settings.tempo_mode}
-            onChange={(e) => setSettings({ ...settings, tempo_mode: e.target.value as "auto" | "manual" })}
-            className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
-          >
-            <option value="auto">Auto-detect</option>
-            <option value="manual">Manual BPM</option>
-          </select>
-        </div>
+      {!isScoreImport && (
+        <>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-[#A1A1AA]">Tempo</label>
+              <select
+                value={settings.tempo_mode}
+                onChange={(e) => setSettings({ ...settings, tempo_mode: e.target.value as "auto" | "manual" })}
+                className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
+              >
+                <option value="auto">Auto-detect</option>
+                <option value="manual">Manual BPM</option>
+              </select>
+            </div>
 
-        {settings.tempo_mode === "manual" && (
-          <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-[#A1A1AA]">BPM</label>
-            <input
-              type="number"
-              min={30}
-              max={300}
-              value={settings.manual_tempo_bpm || 120}
-              onChange={(e) => setSettings({ ...settings, manual_tempo_bpm: Number(e.target.value) })}
-              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
-            />
+            {settings.tempo_mode === "manual" && (
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-[#A1A1AA]">BPM</label>
+                <input
+                  type="number"
+                  min={30}
+                  max={300}
+                  value={settings.manual_tempo_bpm || 120}
+                  onChange={(e) => setSettings({ ...settings, manual_tempo_bpm: Number(e.target.value) })}
+                  className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
+                />
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <label htmlFor="quantization-select" className="block text-xs font-medium text-[#A1A1AA]">
+                Quantization
+              </label>
+              <select
+                id="quantization-select"
+                value={settings.quantization}
+                onChange={(e) => {
+                  setQuantizationManuallySet(true);
+                  setSettings({ ...settings, quantization: e.target.value as TranscriptionSettings["quantization"] });
+                }}
+                className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
+              >
+                <option value="none">None (Raw timing)</option>
+                <option value="quarter">1/4 Note</option>
+                <option value="eighth">1/8 Note</option>
+                <option value="eighth_triplet">1/8 Triplet</option>
+                <option value="sixteenth">1/16 Note</option>
+                <option value="thirtysecond">1/32 Note</option>
+              </select>
+            </div>
           </div>
-        )}
 
-        <div className="space-y-1.5">
-          <label htmlFor="quantization-select" className="block text-xs font-medium text-[#A1A1AA]">
-            Quantization
-          </label>
-          <select
-            id="quantization-select"
-            value={settings.quantization}
-            onChange={(e) => {
-              setQuantizationManuallySet(true);
-              setSettings({ ...settings, quantization: e.target.value as TranscriptionSettings["quantization"] });
-            }}
-            className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
-          >
-            <option value="none">None (Raw timing)</option>
-            <option value="quarter">1/4 Note</option>
-            <option value="eighth">1/8 Note</option>
-            <option value="eighth_triplet">1/8 Triplet</option>
-            <option value="sixteenth">1/16 Note</option>
-            <option value="thirtysecond">1/32 Note</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Arrangement Detail */}
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between gap-2">
-          <label htmlFor="arrangement-detail-select" className="block text-xs font-medium text-[#A1A1AA]">
-            Arrangement Detail
-          </label>
-          {hasScore && onRegenerateArrangement && (
-            <button
-              type="button"
-              disabled={isRegeneratingArrangement || modeChangedSinceScore}
-              title={
-                modeChangedSinceScore
-                  ? "Transcription mode changed — click Re-Transcribe below to regenerate."
-                  : undefined
-              }
-              onClick={() =>
-                onRegenerateArrangement(
-                  settings.arrangement_detail || "balanced",
-                  settings.quantization,
-                  settings.mode,
-                )
-              }
-              className="text-xs font-medium text-[#A78BFA] hover:underline disabled:opacity-50"
+          {/* Arrangement Detail */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="arrangement-detail-select" className="block text-xs font-medium text-[#A1A1AA]">
+                Arrangement Detail
+              </label>
+              {hasScore && onRegenerateArrangement && (
+                <button
+                  type="button"
+                  disabled={isRegeneratingArrangement || modeChangedSinceScore}
+                  title={
+                    modeChangedSinceScore
+                      ? "Transcription mode changed — click Re-Transcribe below to regenerate."
+                      : undefined
+                  }
+                  onClick={() =>
+                    onRegenerateArrangement(
+                      settings.arrangement_detail || "balanced",
+                      settings.quantization,
+                      settings.mode,
+                    )
+                  }
+                  className="text-xs font-medium text-[#A78BFA] hover:underline disabled:opacity-50"
+                >
+                  {isRegeneratingArrangement ? "Updating..." : "Apply Arrangement"}
+                </button>
+              )}
+            </div>
+            <select
+              id="arrangement-detail-select"
+              value={settings.arrangement_detail || "balanced"}
+              onChange={(e) => {
+                const nextDetail = e.target.value as "simple" | "balanced" | "detailed";
+                setSettings((prev) => ({
+                  ...prev,
+                  arrangement_detail: nextDetail,
+                  ...(!quantizationManuallySet
+                    ? { quantization: nextDetail === "simple" ? "eighth" : "sixteenth" }
+                    : {}),
+                }));
+              }}
+              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
             >
-              {isRegeneratingArrangement ? "Updating..." : "Apply Arrangement"}
-            </button>
-          )}
-        </div>
-        <select
-          id="arrangement-detail-select"
-          value={settings.arrangement_detail || "balanced"}
-          onChange={(e) => {
-            const nextDetail = e.target.value as "simple" | "balanced" | "detailed";
-            setSettings((prev) => ({
-              ...prev,
-              arrangement_detail: nextDetail,
-              ...(!quantizationManuallySet
-                ? { quantization: nextDetail === "simple" ? "eighth" : "sixteenth" }
-                : {}),
-            }));
-          }}
-          className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
-        >
-          <option value="simple">Simple / Syllabic</option>
-          <option value="balanced">Balanced (Recommended)</option>
-          <option value="detailed">Detailed / Solo</option>
-        </select>
-        <p className="text-[11px] text-[#71717A]">
-          Controls note density, LH/RH complexity, and phrase continuity without changing the original audio.
-        </p>
-      </div>
+              <option value="simple">Simple / Syllabic</option>
+              <option value="balanced">Balanced (Recommended)</option>
+              <option value="detailed">Detailed / Solo</option>
+            </select>
+            <p className="text-[11px] text-[#71717A]">
+              Controls note density, LH/RH complexity, and phrase continuity without changing the original audio.
+            </p>
+          </div>
 
-      {/* Advanced Musical Settings Toggle */}
-      <button
-        type="button"
-        onClick={() => setShowAdvanced(!showAdvanced)}
-        className="flex items-center gap-1.5 text-xs text-[#A78BFA] hover:underline"
-      >
-        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showAdvanced ? "rotate-180" : ""}`} />
-        Advanced Pitch &amp; Sensitivity Settings
-      </button>
+          {/* Advanced Musical Settings Toggle */}
+          <button
+            type="button"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            className="flex items-center gap-1.5 text-xs text-[#A78BFA] hover:underline"
+          >
+            <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showAdvanced ? "rotate-180" : ""}`} />
+            Advanced Pitch &amp; Sensitivity Settings
+          </button>
+        </>
+      )}
 
-      {showAdvanced && (
+      {!isScoreImport && showAdvanced && (
         <div className="grid gap-3 sm:grid-cols-2 rounded-lg border border-[#27273A] bg-[#09090F] p-3 text-xs">
           <div className="space-y-1">
             <label className="text-[#A1A1AA]">Key Signature</label>
@@ -555,13 +578,17 @@ export function TranscriptionConfigPanel({
               <Play className="h-4 w-4" />
               {isStarting
                 ? "Starting..."
-                : modeChangedSinceScore && normalizeModeId(settings.mode) === "melody"
-                  ? "Re-Transcribe in Lead Melody Mode"
-                  : modeChangedSinceScore && normalizeModeId(settings.mode) === "piano_vocal"
-                    ? "Re-Transcribe in Piano + Vocal Mode"
-                    : activeJob?.status === "completed"
-                      ? "Re-Transcribe Audio"
-                      : "Start AI Transcription"}
+                : isScoreImport
+                  ? activeJob?.status === "completed"
+                    ? "Re-Process Score"
+                    : "Process Score & Separate Voices"
+                  : modeChangedSinceScore && normalizeModeId(settings.mode) === "melody"
+                    ? "Re-Transcribe in Lead Melody Mode"
+                    : modeChangedSinceScore && normalizeModeId(settings.mode) === "piano_vocal"
+                      ? "Re-Transcribe in Piano + Vocal Mode"
+                      : activeJob?.status === "completed"
+                        ? "Re-Transcribe Audio"
+                        : "Start AI Transcription"}
             </Button>
           )}
         </div>
