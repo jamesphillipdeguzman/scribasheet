@@ -14,6 +14,12 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
+import { MetronomeControl } from "@/features/editor/MetronomeControl";
+import {
+  loadMetronomeSettings,
+  type MetronomeSettings,
+  saveMetronomeSettings,
+} from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
 import { PracticeCascade } from "@/features/editor/PracticeCascade";
 import {
@@ -54,6 +60,10 @@ interface PianoRollEditorProps {
   onSatbSoloChange?: (voice: string | null) => void;
   loop?: boolean;
   onToggleLoop?: () => void;
+  metronomeSettings?: MetronomeSettings;
+  onMetronomeSettingsChange?: (next: MetronomeSettings) => void;
+  activeBeat?: number | null;
+  onActiveBeatChange?: (beat: number | null) => void;
 }
 
 const MIN_PITCH = 36; // C2
@@ -105,10 +115,29 @@ export function PianoRollEditor({
   onSatbSoloChange,
   loop,
   onToggleLoop,
+  metronomeSettings: controlledMetronome,
+  onMetronomeSettingsChange,
+  activeBeat: controlledBeat,
+  onActiveBeatChange,
 }: PianoRollEditorProps) {
   const [viewMode, setViewMode] = useState<"grid" | "cascade">("grid");
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [autoSwitchToCascade, setAutoSwitchToCascade] = useState(false);
+  const [internalMetronome, setInternalMetronome] = useState<MetronomeSettings>(() =>
+    loadMetronomeSettings(),
+  );
+  const [internalBeat, setInternalBeat] = useState<number | null>(null);
+  const metronomeSettings = controlledMetronome ?? internalMetronome;
+  const activeBeat = controlledBeat !== undefined ? controlledBeat : internalBeat;
+  const setMetronomeSettings = (next: MetronomeSettings) => {
+    setInternalMetronome(next);
+    saveMetronomeSettings(next);
+    onMetronomeSettingsChange?.(next);
+  };
+  const setActiveBeat = (beat: number | null) => {
+    setInternalBeat(beat);
+    onActiveBeatChange?.(beat);
+  };
   const [pxPerSec, setPxPerSec] = useState(140);
   const [snapMode, setSnapMode] = useState<SnapGridMode>("1/16");
   const [selectedNoteIds, setSelectedNoteIds] = useState<Set<string>>(() =>
@@ -635,7 +664,18 @@ export function PianoRollEditor({
           </div>
         )}
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5">
+          {isFocusMode && (
+            <MetronomeControl
+              settings={metronomeSettings}
+              onChangeSettings={setMetronomeSettings}
+              scoreTimeSignature={timeSignature}
+              tempoBpm={tempoBpm * playbackRate}
+              activeBeat={activeBeat}
+              isPlaybackActive={isPlaying}
+              onBeatChange={setActiveBeat}
+            />
+          )}
           {viewMode === "grid" && (
             <>
               <Button

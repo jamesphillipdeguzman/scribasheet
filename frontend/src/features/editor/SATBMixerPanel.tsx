@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, Download, Loader2, Play, Square, Volume2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
+import { loadMetronomeSettings, metronomeEngine, type MetronomeSettings } from "@/features/editor/metronome";
 import { GM_INSTRUMENT_PRESETS, midiSynth } from "@/features/editor/midiSynth";
 import { api, ApiError } from "@/services/api";
 import type { ScoreData } from "@/types/api";
@@ -14,6 +15,8 @@ interface SATBMixerPanelProps {
   onSoloVoiceChange?: (voice: string | null) => void;
   mutedVoices?: Record<string, boolean>;
   onMutedVoicesChange?: (muted: Record<string, boolean>) => void;
+  metronomeSettings?: MetronomeSettings;
+  onActiveBeatChange?: (beat: number | null) => void;
 }
 
 const SATB_VOICES = ["Soprano", "Alto", "Tenor", "Bass"] as const;
@@ -94,6 +97,8 @@ export function SATBMixerPanel({
   onSoloVoiceChange,
   mutedVoices: controlledMutedVoices,
   onMutedVoicesChange,
+  metronomeSettings: controlledMetronome,
+  onActiveBeatChange,
 }: SATBMixerPanelProps) {
   const [internalSoloVoice, setInternalSoloVoice] = useState<string | null>(null);
   const [internalMutedVoices, setInternalMutedVoices] = useState<Record<string, boolean>>({});
@@ -164,6 +169,9 @@ export function SATBMixerPanel({
 
   const stopPlayback = () => {
     midiSynth.stop();
+    if (metronomeEngine.getMode() !== "standalone") {
+      metronomeEngine.stop();
+    }
     setIsPlaying(false);
   };
 
@@ -201,21 +209,54 @@ export function SATBMixerPanel({
       audibleNotes.reduce((m, n) => Math.max(m, n.offset_sec), offsetSec),
     );
 
-    setIsPlaying(true);
-    midiSynth.start({
-      notes: audibleNotes,
-      fromSec: offsetSec,
-      durationSec: totalDur,
-      tempoBpm: baseBpm,
-      playbackRate,
-      volume: 0.85,
-      loop: false,
-      metronome: false,
-      trackPrograms,
-      trackVolumes,
-      onPosition: () => {},
-      onEnd: () => setIsPlaying(false),
-    });
+    const effMetronome = controlledMetronome ?? loadMetronomeSettings();
+    const beginSatb = () => {
+      setIsPlaying(true);
+      midiSynth.start({
+        notes: audibleNotes,
+        fromSec: offsetSec,
+        durationSec: totalDur,
+        tempoBpm: baseBpm,
+        playbackRate,
+        volume: 0.85,
+        loop: false,
+        metronome: false,
+        trackPrograms,
+        trackVolumes,
+        onPosition: () => {},
+        onEnd: () => {
+          setIsPlaying(false);
+          metronomeEngine.stop();
+        },
+      });
+      if (effMetronome.enabled) {
+        metronomeEngine.startSynced({
+          getSongSec: () => {
+            const clock = midiSynth.getPlaybackClock();
+            return clock.isPlaying ? clock.currentSec : offsetSec;
+          },
+          bpm: baseBpm,
+          playbackRate,
+          scoreTimeSignature: scoreData.time_signature || "4/4",
+          settings: effMetronome,
+          onBeatChange: onActiveBeatChange,
+        });
+      }
+    };
+
+    if (effMetronome.enabled && (effMetronome.countInBars === 1 || effMetronome.countInBars === 2)) {
+      setIsPlaying(true);
+      metronomeEngine.startCountIn({
+        bars: effMetronome.countInBars,
+        bpm: tempoBpm,
+        scoreTimeSignature: scoreData.time_signature || "4/4",
+        settings: effMetronome,
+        onBeatChange: onActiveBeatChange,
+        onComplete: beginSatb,
+      });
+    } else {
+      beginSatb();
+    }
   };
 
   const handleSaveAssignments = async () => {

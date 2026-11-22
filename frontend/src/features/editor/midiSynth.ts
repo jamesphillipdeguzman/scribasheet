@@ -1,4 +1,5 @@
 import { Soundfont, SplendidGrandPiano } from "smplr";
+import { metronomeEngine } from "@/features/editor/metronome";
 import { midiToFreq } from "@/lib/utils";
 import type { ScoreNote } from "@/types/api";
 
@@ -399,22 +400,7 @@ export class MidiSynthesizer {
   }
 
   public playMetronomeClick(accent = false, volume = 0.7) {
-    this.triggerMetronomeClick(accent, volume);
-  }
-
-  private triggerMetronomeClick(accent: boolean, volume: number) {
-    const ctx = this.ensureContext();
-    const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(accent ? 1200 : 850, now);
-    gain.gain.setValueAtTime(0.15 * volume, now);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.04);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.05);
+    metronomeEngine.playSingleClick(accent, volume);
   }
 
   public start(options: {
@@ -487,14 +473,6 @@ export class MidiSynthesizer {
         }
       }
       prevSec = currentSec;
-
-      if (options.metronome) {
-        const beatIdx = Math.floor(currentSec / secPerBeat);
-        if (beatIdx !== this.lastBeatTick) {
-          this.lastBeatTick = beatIdx;
-          this.triggerMetronomeClick(beatIdx % 4 === 0, options.volume);
-        }
-      }
 
       this.rafId = requestAnimationFrame(tick);
     };

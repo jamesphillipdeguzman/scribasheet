@@ -3,6 +3,13 @@ import WaveSurfer from "wavesurfer.js";
 import { Pause, Play, Repeat, Square, Volume2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { formatDuration } from "@/lib/utils";
+import { MetronomeControl } from "@/features/editor/MetronomeControl";
+import {
+  loadMetronomeSettings,
+  metronomeEngine,
+  type MetronomeSettings,
+  saveMetronomeSettings,
+} from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
 import { API_BASE_URL, api } from "@/services/api";
 import type { ScoreNote } from "@/types/api";
@@ -23,6 +30,11 @@ interface WaveformPlayerProps {
   onPlaybackRateChange?: (rate: number) => void;
   externalLoop?: boolean;
   onLoopChange?: (loop: boolean) => void;
+  timeSignature?: string;
+  metronomeSettings?: MetronomeSettings;
+  onMetronomeSettingsChange?: (next: MetronomeSettings) => void;
+  activeBeat?: number | null;
+  onActiveBeatChange?: (beat: number | null) => void;
 }
 
 export function WaveformPlayer({
@@ -41,6 +53,11 @@ export function WaveformPlayer({
   onPlaybackRateChange,
   externalLoop,
   onLoopChange,
+  timeSignature = "4/4",
+  metronomeSettings: controlledMetronome,
+  onMetronomeSettingsChange,
+  activeBeat: controlledBeat,
+  onActiveBeatChange,
 }: WaveformPlayerProps) {
   const waveContainerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
@@ -52,7 +69,21 @@ export function WaveformPlayer({
   const [playbackRate, setPlaybackRate] = useState(1.0);
   const [volume, setVolume] = useState(0.8);
   const [loop, setLoop] = useState(false);
-  const [metronome, setMetronome] = useState(false);
+  const [internalMetronome, setInternalMetronome] = useState<MetronomeSettings>(() =>
+    loadMetronomeSettings(),
+  );
+  const [internalBeat, setInternalBeat] = useState<number | null>(null);
+  const metronomeSettings = controlledMetronome ?? internalMetronome;
+  const activeBeat = controlledBeat !== undefined ? controlledBeat : internalBeat;
+  const setMetronomeSettings = (next: MetronomeSettings) => {
+    setInternalMetronome(next);
+    saveMetronomeSettings(next);
+    onMetronomeSettingsChange?.(next);
+  };
+  const setActiveBeat = (beat: number | null) => {
+    setInternalBeat(beat);
+    onActiveBeatChange?.(beat);
+  };
   const [signedAudioUrl, setSignedAudioUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -123,8 +154,97 @@ export function WaveformPlayer({
   useEffect(() => {
     return () => {
       midiSynth.stop();
+      if (metronomeEngine.getMode() !== "standalone") {
+        metronomeEngine.stop();
+      }
     };
   }, []);
+
+  // Synchronize Web Audio metronome with active playback (Original Audio OR MIDI)
+  useEffect(() => {
+    if (!isPlaying) {
+      if (metronomeEngine.getMode() === "synced") {
+        metronomeEngine.stop();
+      }
+      return;
+    }
+    if (!metronomeSettings.enabled) {
+      if (metronomeEngine.getMode() === "synced") {
+        metronomeEngine.stop();
+      }
+      return;
+    }
+    if (metronomeEngine.getMode() === "count_in") {
+      return;
+    }
+
+    const getSongSec = () => {
+      if (sourceMode === "original" && wsRef.current) {
+        return wsRef.current.getCurrentTime();
+      }
+      const clock = midiSynth.getPlaybackClock();
+      return clock.isPlaying ? clock.currentSec : playheadSec;
+    };
+
+    if (metronomeEngine.getMode() === "synced") {
+      metronomeEngine.updateSynced({
+        getSongSec,
+        bpm: tempoBpm,
+        playbackRate,
+        scoreTimeSignature: timeSignature,
+        settings: metronomeSettings,
+        onBeatChange: setActiveBeat,
+      });
+    } else {
+      metronomeEngine.startSynced({
+        getSongSec,
+        bpm: tempoBpm,
+        playbackRate,
+        scoreTimeSignature: timeSignature,
+        settings: metronomeSettings,
+        onBeatChange: setActiveBeat,
+      });
+    }
+  }, [isPlaying, sourceMode, metronomeSettings, tempoBpm, playbackRate, timeSignature]);
+
+  const startMidiPlayback = (fromSec: number) => {
+    if (wsRef.current?.isPlaying()) wsRef.current.pause();
+    const beginSynth = () => {
+      setIsPlaying(true);
+      midiSynth.start({
+        notes,
+        fromSec,
+        durationSec: durationSeconds,
+        tempoBpm,
+        playbackRate,
+        volume,
+        loop,
+        metronome: false,
+        onPosition: onPlayheadChange,
+        onEnd: () => {
+          setIsPlaying(false);
+          metronomeEngine.stop();
+        },
+      });
+    };
+
+    if (
+      metronomeSettings.enabled &&
+      (metronomeSettings.countInBars === 1 || metronomeSettings.countInBars === 2)
+    ) {
+      setIsPlaying(true);
+      metronomeEngine.startCountIn({
+        bars: metronomeSettings.countInBars,
+        bpm: tempoBpm,
+        scoreTimeSignature: timeSignature,
+        settings: metronomeSettings,
+        onBeatChange: setActiveBeat,
+        onComplete: beginSynth,
+      });
+    } else {
+      beginSynth();
+    }
+  };
 
   useEffect(() => {
     if (!seekRequest) return;
@@ -139,25 +259,15 @@ export function WaveformPlayer({
         setIsPlaying(true);
       }
     } else if (seekRequest.autoplay) {
-      if (wsRef.current?.isPlaying()) wsRef.current.pause();
-      setIsPlaying(true);
-      midiSynth.start({
-        notes,
-        fromSec: target,
-        durationSec: durationSeconds,
-        tempoBpm,
-        playbackRate,
-        volume,
-        loop,
-        metronome,
-        onPosition: onPlayheadChange,
-        onEnd: () => setIsPlaying(false),
-      });
+      startMidiPlayback(target);
     }
   }, [seekRequest?.nonce]);
 
   const stopAll = () => {
     midiSynth.stop();
+    if (metronomeEngine.getMode() !== "standalone") {
+      metronomeEngine.stop();
+    }
     if (wsRef.current?.isPlaying()) wsRef.current.pause();
     setIsPlaying(false);
   };
@@ -172,20 +282,7 @@ export function WaveformPlayer({
       wsRef.current.play();
       setIsPlaying(true);
     } else {
-      if (wsRef.current?.isPlaying()) wsRef.current.pause();
-      setIsPlaying(true);
-      midiSynth.start({
-        notes,
-        fromSec: playheadSec,
-        durationSec: durationSeconds,
-        tempoBpm,
-        playbackRate,
-        volume,
-        loop,
-        metronome,
-        onPosition: onPlayheadChange,
-        onEnd: () => setIsPlaying(false),
-      });
+      startMidiPlayback(playheadSec);
     }
   };
 
@@ -236,7 +333,7 @@ export function WaveformPlayer({
   }, [externalStopSignal]);
 
   return (
-    <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-3 sm:p-4 space-y-3 w-full min-w-0 overflow-hidden">
+    <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-3 sm:p-4 space-y-3 w-full min-w-0 overflow-visible">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Button size="sm" onClick={togglePlay} aria-label={isPlaying ? "Pause playback" : "Play"}>
@@ -293,15 +390,15 @@ export function WaveformPlayer({
             <Repeat className="h-3.5 w-3.5" />
             Loop
           </button>
-          <button
-            type="button"
-            onClick={() => setMetronome(!metronome)}
-            className={`rounded px-2 py-1 border ${
-              metronome ? "border-[#A78BFA] text-[#A78BFA] bg-[#181825]" : "border-[#27273A]"
-            }`}
-          >
-            Metronome
-          </button>
+          <MetronomeControl
+            settings={metronomeSettings}
+            onChangeSettings={setMetronomeSettings}
+            scoreTimeSignature={timeSignature}
+            tempoBpm={tempoBpm * playbackRate}
+            activeBeat={activeBeat}
+            isPlaybackActive={isPlaying}
+            onBeatChange={setActiveBeat}
+          />
           <select
             aria-label="Playback speed"
             value={playbackRate}

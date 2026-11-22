@@ -27,6 +27,11 @@ import { ChordAndTabPanel } from "@/features/editor/ChordAndTabPanel";
 import { ExportCenter } from "@/features/editor/ExportCenter";
 import { LyricsPanel } from "@/features/editor/LyricsPanel";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
+import {
+  loadMetronomeSettings,
+  type MetronomeSettings,
+  saveMetronomeSettings,
+} from "@/features/editor/metronome";
 import { SATBMixerPanel } from "@/features/editor/SATBMixerPanel";
 import { SheetMusicViewer } from "@/features/editor/SheetMusicViewer";
 import { WaveformPlayer } from "@/features/editor/WaveformPlayer";
@@ -53,6 +58,14 @@ export function ProjectStudioPage() {
   const [stopPlaySignal, setStopPlaySignal] = useState(0);
   const [satbSoloVoice, setSatbSoloVoice] = useState<string | null>(null);
   const [satbMutedVoices, setSatbMutedVoices] = useState<Record<string, boolean>>({});
+  const [metronomeSettings, setMetronomeSettings] = useState<MetronomeSettings>(() =>
+    loadMetronomeSettings(),
+  );
+  const [activeMetronomeBeat, setActiveMetronomeBeat] = useState<number | null>(null);
+  const handleMetronomeSettingsChange = (next: MetronomeSettings) => {
+    setMetronomeSettings(next);
+    saveMetronomeSettings(next);
+  };
   const [seekRequest, setSeekRequest] = useState<{ sec: number; autoplay?: boolean; nonce: number } | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
 
@@ -710,6 +723,11 @@ export function ProjectStudioPage() {
               onPlaybackRateChange={setPlaybackRate}
               externalLoop={loopPlayback}
               onLoopChange={setLoopPlayback}
+              timeSignature={scoreData?.time_signature || "4/4"}
+              metronomeSettings={metronomeSettings}
+              onMetronomeSettingsChange={handleMetronomeSettingsChange}
+              activeBeat={activeMetronomeBeat}
+              onActiveBeatChange={setActiveMetronomeBeat}
             />
 
             {/* Workspace Tabs */}
@@ -777,6 +795,8 @@ export function ProjectStudioPage() {
                   onSoloVoiceChange={setSatbSoloVoice}
                   mutedVoices={satbMutedVoices}
                   onMutedVoicesChange={setSatbMutedVoices}
+                  metronomeSettings={metronomeSettings}
+                  onActiveBeatChange={setActiveMetronomeBeat}
                   onScoreUpdated={(updatedScore, updatedVersion, updatedXml) => {
                     setScoreData(updatedScore);
                     setScoreVersion(updatedVersion);
@@ -871,6 +891,10 @@ export function ProjectStudioPage() {
                     onSatbSoloChange={setSatbSoloVoice}
                     loop={loopPlayback}
                     onToggleLoop={() => setLoopPlayback((v) => !v)}
+                    metronomeSettings={metronomeSettings}
+                    onMetronomeSettingsChange={handleMetronomeSettingsChange}
+                    activeBeat={activeMetronomeBeat}
+                    onActiveBeatChange={setActiveMetronomeBeat}
                   />
                 ) : (
                   <div className="py-12 text-center text-sm text-[#A1A1AA]">
