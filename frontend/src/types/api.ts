@@ -82,6 +82,7 @@ export interface TranscriptionSettings {
   enable_source_separation: boolean;
   audio_source_type?: "auto" | "full_song" | "solo_piano";
   demucs_model?: string;
+  satb_mode?: "auto_satb" | "keep_original";
   show_chord_symbols?: boolean;
 }
 
@@ -183,7 +184,7 @@ export interface ProjectScoreResponse {
 export interface ExportRecord {
   id: string;
   project_id: string;
-  format: "midi" | "musicxml" | "pdf" | "wav";
+  format: "midi" | "musicxml" | "pdf" | "wav" | "soprano_mp3" | "alto_mp3" | "tenor_mp3" | "bass_mp3";
   status: string;
   error_message: string | null;
   download_url: string | null;

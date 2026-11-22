@@ -617,6 +617,9 @@ export function ProjectStudioPage() {
                 <h2 className="text-sm font-semibold">2. Transcription Settings</h2>
                 <TranscriptionConfigPanel
                   hasMedia={Boolean(originalAsset)}
+                  isScoreFile={Boolean(
+                    originalAsset && /\.(pdf|mxl|musicxml)$/i.test(originalAsset.original_filename),
+                  )}
                   hasScore={Boolean(scoreData)}
                   activeJob={activeJob}
                   workerOnline={workerStatus?.worker_online ?? null}
@@ -868,6 +871,7 @@ export function ProjectStudioPage() {
                   projectId={project.id}
                   projectTitle={project.title}
                   hasScore={Boolean(scoreData)}
+                  isSatbScore={isGenuineSatb}
                   showChordSymbols={showChordSymbols}
                   onToggleChordSymbols={handleToggleChordSymbols}
                 />

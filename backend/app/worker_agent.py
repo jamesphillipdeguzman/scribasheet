@@ -53,7 +53,7 @@ from app.notation.melody import (
     is_lead_melody_mode,
     normalize_transcription_mode,
 )
-from app.notation.omr import OMRError, process_satb_pdf
+from app.notation.omr import OMRError, process_satb_musicxml, process_satb_pdf
 from app.notation.timing_map import build_timing_map
 from app.schemas.transcription import TranscriptionSettings
 from app.storage.service import sanitize_filename
@@ -294,16 +294,35 @@ class RealTranscriptionHandler:
             if not local_source.exists() or local_source.stat().st_size == 0:
                 raise TranscriptionInferenceError("EMPTY_AUDIO_FILE", "Downloaded source file is empty.")
 
-            # Reverse Transcription: SATB Sheet Music PDF -> OMR -> MusicXML + MIDI
-            if settings.mode == "satb_pdf" or safe_name.lower().endswith(".pdf"):
+            # Reverse Transcription: SATB Sheet Music (MXL/MusicXML direct or PDF -> OMR) -> SATB ScoreData + MIDI
+            lower_name = safe_name.lower()
+            is_score_import = settings.mode == "satb_pdf" or lower_name.endswith((".pdf", ".mxl", ".musicxml"))
+            if is_score_import:
                 self._check_cancelled(job_id, cancel_event)
-                report_progress("transcribing", 25, "Validating PDF Score", "Inspecting sheet music PDF pages.")
+                is_direct_xml = lower_name.endswith((".mxl", ".musicxml"))
+                satb_mode = getattr(settings, "satb_mode", "auto_satb") or "auto_satb"
+                report_progress(
+                    "transcribing",
+                    25,
+                    "Parsing MusicXML Score" if is_direct_xml else "Validating PDF Score",
+                    "Reading MusicXML/MXL score directly."
+                    if is_direct_xml
+                    else "Inspecting sheet music PDF pages.",
+                )
                 try:
-                    omr_res = process_satb_pdf(
-                        local_source,
-                        title=clean_score_title(job.get("project_title") or safe_name),
-                        work_dir=tmp_path / "omr",
-                    )
+                    if is_direct_xml:
+                        omr_res = process_satb_musicxml(
+                            local_source,
+                            title=clean_score_title(job.get("project_title") or safe_name),
+                            satb_mode=satb_mode,
+                        )
+                    else:
+                        omr_res = process_satb_pdf(
+                            local_source,
+                            title=clean_score_title(job.get("project_title") or safe_name),
+                            work_dir=tmp_path / "omr",
+                            satb_mode=satb_mode,
+                        )
                 except OMRError as exc:
                     raise TranscriptionInferenceError(exc.code, exc.message) from exc
 

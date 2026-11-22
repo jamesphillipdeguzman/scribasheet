@@ -88,13 +88,17 @@ def presign_upload(
         )
 
     safe_name = sanitize_filename(payload.filename)
-    is_pdf = safe_name.lower().endswith(".pdf")
+    lower_name = safe_name.lower()
+    is_pdf = lower_name.endswith(".pdf")
+    is_musicxml = lower_name.endswith((".mxl", ".musicxml"))
     if is_pdf:
         if payload.content_type and "pdf" not in payload.content_type.lower():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unsupported MIME type '{payload.content_type}' for PDF upload.",
             )
+    elif is_musicxml:
+        pass
     else:
         try:
             validate_upload_extension_and_mime(safe_name, payload.content_type)
@@ -190,13 +194,17 @@ async def upload_media(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this project.")
 
     safe_name = sanitize_filename(file.filename or "recording.wav")
-    is_pdf = safe_name.lower().endswith(".pdf")
+    lower_name = safe_name.lower()
+    is_pdf = lower_name.endswith(".pdf")
+    is_musicxml = lower_name.endswith((".mxl", ".musicxml"))
     if is_pdf:
         if file.content_type and "pdf" not in file.content_type.lower():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unsupported MIME type '{file.content_type}' for PDF upload.",
             )
+    elif is_musicxml:
+        pass
     else:
         try:
             validate_upload_extension_and_mime(safe_name, file.content_type)
@@ -228,6 +236,16 @@ async def upload_media(
         _enforce_storage_quota(db, current_user, total_bytes)
         if is_pdf:
             validate_pdf_bytes(tmp_path.read_bytes())
+            duration_sec = None
+            sample_rate = None
+            channels = None
+        elif is_musicxml:
+            from app.notation.omr import validate_musicxml_bytes
+
+            try:
+                validate_musicxml_bytes(tmp_path.read_bytes(), safe_name)
+            except OMRError as exc:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message) from exc
             duration_sec = None
             sample_rate = None
             channels = None

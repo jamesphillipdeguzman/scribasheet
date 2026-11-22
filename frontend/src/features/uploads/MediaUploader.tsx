@@ -5,7 +5,9 @@ import { formatBytes, formatDuration } from "@/lib/utils";
 import { api, ApiError } from "@/services/api";
 import type { MediaAsset } from "@/types/api";
 
-const ACCEPTED_EXTENSIONS = [".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".mp4", ".mov", ".webm"];
+const ACCEPTED_AUDIO_EXTENSIONS = [".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".mp4", ".mov", ".webm"];
+const SCORE_EXTENSIONS = [".pdf", ".mxl", ".musicxml"];
+const ACCEPTED_EXTENSIONS = [...ACCEPTED_AUDIO_EXTENSIONS, ...SCORE_EXTENSIONS];
 const MAX_SIZE_BYTES = 100 * 1024 * 1024;
 
 interface MediaUploaderProps {
@@ -79,12 +81,12 @@ export function MediaUploader({
   const validateAndUpload = async (file: File) => {
     setError(null);
     const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
-    const allowed = acceptPdf ? [".pdf"] : ACCEPTED_EXTENSIONS;
+    const allowed = acceptPdf ? SCORE_EXTENSIONS : ACCEPTED_EXTENSIONS;
     if (!allowed.includes(ext)) {
       setError(
         acceptPdf
-          ? `Unsupported file type (${ext}). Please upload a valid .pdf sheet music file.`
-          : `Unsupported file type (${ext}). Supported: MP3, WAV, FLAC, M4A, AAC, MP4, MOV, WEBM.`,
+          ? `Unsupported file type (${ext}). Supported score formats: .pdf, .mxl, .musicxml.`
+          : `Unsupported file type (${ext}). Supported: MP3, WAV, FLAC, M4A, AAC, MP4, MOV, WEBM, PDF, MXL, MUSICXML.`,
       );
       return;
     }
@@ -187,7 +189,7 @@ export function MediaUploader({
         <input
           ref={fileInputRef}
           type="file"
-          accept={acceptPdf ? ".pdf,application/pdf" : ACCEPTED_EXTENSIONS.join(",")}
+          accept={acceptPdf ? ".pdf,.mxl,.musicxml,application/pdf,application/vnd.recordare.musicxml+xml" : ACCEPTED_EXTENSIONS.join(",")}
           className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
@@ -197,10 +199,10 @@ export function MediaUploader({
         />
         <Upload className="mx-auto h-8 w-8 text-[#A78BFA]" />
         <h3 className="mt-3 text-sm font-semibold text-[#F5F3FF]">
-          {acceptPdf ? "Drag & drop SATB sheet music PDF, or browse" : "Drag & drop audio or video, or browse"}
+          {acceptPdf ? "Drag & drop SATB score (PDF, MXL, MusicXML), or browse" : "Drag & drop audio, video, or sheet music, or browse"}
         </h3>
         <p className="mt-1 text-xs text-[#A1A1AA]">
-          {acceptPdf ? "PDF Sheet Music • Up to 100 MB" : "MP3, WAV, FLAC, M4A, AAC, MP4, MOV, WEBM • Up to 100 MB"}
+          {acceptPdf ? "PDF, MXL, MusicXML • Up to 100 MB" : "MP3, WAV, FLAC, M4A, MP4, PDF, MXL, MusicXML • Up to 100 MB"}
         </p>
         <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
           <Button size="sm" variant="secondary" onClick={() => fileInputRef.current?.click()}>

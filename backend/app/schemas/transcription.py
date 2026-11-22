@@ -29,6 +29,7 @@ class TranscriptionSettings(BaseModel):
     show_chord_symbols: bool = Field(default=True)
     whisper_model: str = Field(default="auto")
     language: str | None = Field(default=None)
+    satb_mode: Literal["auto_satb", "keep_original"] = Field(default="auto_satb")
     force_overwrite: bool = Field(default=False)
 
 

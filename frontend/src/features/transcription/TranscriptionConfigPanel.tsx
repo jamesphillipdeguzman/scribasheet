@@ -7,6 +7,7 @@ import type { TranscriptionJob, TranscriptionSettings } from "@/types/api";
 
 interface Props {
   hasMedia: boolean;
+  isScoreFile?: boolean;
   hasScore?: boolean;
   activeJob: TranscriptionJob | null;
   workerOnline?: boolean | null;
@@ -36,6 +37,7 @@ function normalizeModeId(mode?: string | null): string {
 
 export function TranscriptionConfigPanel({
   hasMedia,
+  isScoreFile = false,
   hasScore = false,
   activeJob,
   workerOnline = null,
@@ -73,7 +75,10 @@ export function TranscriptionConfigPanel({
     max_midi_pitch: 108,
     enable_source_separation: activeJob?.settings_json?.enable_source_separation ?? false,
     audio_source_type: activeJob?.settings_json?.audio_source_type || "auto",
+    satb_mode: activeJob?.settings_json?.satb_mode || "auto_satb",
   });
+
+  const isScoreImport = Boolean(isScoreFile || normalizeModeId(settings.mode) === "satb_pdf");
 
   useEffect(() => {
     const restoredMode = initialMode || activeJob?.settings_json?.mode;
@@ -174,56 +179,83 @@ export function TranscriptionConfigPanel({
         </div>
       </div>
 
-      {/* Audio Source & Demucs Stem Separation */}
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <label htmlFor="audio-source-select" className="block text-xs font-medium text-[#A1A1AA]">
-            Audio Source
+      {/* Score Import Mode vs Audio Source & Demucs Stem Separation */}
+      {isScoreImport ? (
+        <div className="space-y-1.5 rounded-lg border border-[#27273A] bg-[#09090F] p-3">
+          <label htmlFor="satb-mode-select" className="block text-xs font-medium text-[#A1A1AA]">
+            Score Processing Mode
           </label>
           <select
-            id="audio-source-select"
-            value={settings.audio_source_type || "auto"}
+            id="satb-mode-select"
+            value={settings.satb_mode || "auto_satb"}
             onChange={(e) =>
               setSettings({
                 ...settings,
-                audio_source_type: e.target.value as TranscriptionSettings["audio_source_type"],
+                mode: "satb_pdf",
+                satb_mode: e.target.value as "auto_satb" | "keep_original",
+                enable_source_separation: false,
               })
             }
-            className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
+            className="w-full h-9 rounded-lg border border-[#27273A] bg-[#11111B] px-3 text-xs text-[#F5F3FF]"
           >
-            {AUDIO_SOURCE_TYPES.map((src) => (
-              <option key={src.id} value={src.id}>
-                {src.label}
-              </option>
-            ))}
+            <option value="auto_satb">Auto-Detect SATB (Separate Voices)</option>
+            <option value="keep_original">Keep Original Staves</option>
           </select>
           <p className="text-[11px] text-[#71717A]">
-            {AUDIO_SOURCE_TYPES.find((src) => src.id === (settings.audio_source_type || "auto"))?.description}
+            MXL/MusicXML files parse directly without OMR; PDF files run OMR. Audio-only options like Demucs are hidden for score files.
           </p>
         </div>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <label htmlFor="audio-source-select" className="block text-xs font-medium text-[#A1A1AA]">
+              Audio Source
+            </label>
+            <select
+              id="audio-source-select"
+              value={settings.audio_source_type || "auto"}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  audio_source_type: e.target.value as TranscriptionSettings["audio_source_type"],
+                })
+              }
+              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
+            >
+              {AUDIO_SOURCE_TYPES.map((src) => (
+                <option key={src.id} value={src.id}>
+                  {src.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] text-[#71717A]">
+              {AUDIO_SOURCE_TYPES.find((src) => src.id === (settings.audio_source_type || "auto"))?.description}
+            </p>
+          </div>
 
-        <div className="space-y-1.5">
-          <label htmlFor="demucs-separation-toggle" className="block text-xs font-medium text-[#A1A1AA]">
-            Separate Audio Stems (Demucs)
-          </label>
-          <label
-            htmlFor="demucs-separation-toggle"
-            className="flex h-9 items-center gap-2 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF] cursor-pointer"
-          >
-            <input
-              id="demucs-separation-toggle"
-              type="checkbox"
-              checked={settings.enable_source_separation}
-              onChange={(e) => setSettings({ ...settings, enable_source_separation: e.target.checked })}
-              className="accent-[#A78BFA]"
-            />
-            <span>{settings.enable_source_separation ? "On — Separate Vocals & Accompaniment" : "Off"}</span>
-          </label>
-          <p className="text-[11px] text-[#71717A]">
-            Separates vocals, bass, drums, and other instruments before transcription. Recommended for full songs with vocals and accompaniment.
-          </p>
+          <div className="space-y-1.5">
+            <label htmlFor="demucs-separation-toggle" className="block text-xs font-medium text-[#A1A1AA]">
+              Separate Audio Stems (Demucs)
+            </label>
+            <label
+              htmlFor="demucs-separation-toggle"
+              className="flex h-9 items-center gap-2 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF] cursor-pointer"
+            >
+              <input
+                id="demucs-separation-toggle"
+                type="checkbox"
+                checked={settings.enable_source_separation}
+                onChange={(e) => setSettings({ ...settings, enable_source_separation: e.target.checked })}
+                className="accent-[#A78BFA]"
+              />
+              <span>{settings.enable_source_separation ? "On — Separate Vocals & Accompaniment" : "Off"}</span>
+            </label>
+            <p className="text-[11px] text-[#71717A]">
+              Separates vocals, bass, drums, and other instruments before transcription. Recommended for full songs with vocals and accompaniment.
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
       {settings.mode === "multi_instrument" && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-200">

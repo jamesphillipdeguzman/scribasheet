@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -88,6 +89,39 @@ def validate_pdf_bytes(pdf_bytes: bytes) -> int:
     return page_count
 
 
+def validate_musicxml_bytes(data: bytes, filename: str) -> None:
+    """Validate uncompressed .musicxml/.xml or compressed .mxl score payload."""
+    if not data or len(data) < 16:
+        raise OMRError("EMPTY_SCORE", "Uploaded score file is empty.")
+
+    lower = (filename or "").strip().lower()
+    if lower.endswith(".mxl"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+                names = zf.namelist()
+                has_xml = any(
+                    n.lower().endswith((".xml", ".musicxml")) and "meta-inf" not in n.lower()
+                    for n in names
+                )
+                if not has_xml:
+                    raise OMRError("INVALID_MXL", "MXL archive does not contain a MusicXML score.")
+        except OMRError:
+            raise
+        except Exception as exc:
+            raise OMRError("INVALID_MXL", f"File is not a valid compressed MXL archive: {exc}") from exc
+        return
+
+    try:
+        text = data.decode("utf-8-sig", errors="strict")
+    except UnicodeDecodeError:
+        text = data.decode("latin-1", errors="ignore")
+    if "<score-partwise" not in text and "<score-timewise" not in text:
+        raise OMRError(
+            "INVALID_MUSICXML",
+            "File does not appear to be a valid MusicXML score (<score-partwise> or <score-timewise>).",
+        )
+
+
 def render_pdf_pages_to_images(pdf_path: Path, out_dir: Path, *, dpi: int = 250) -> list[Path]:
     """Render all PDF pages to high-resolution grayscale/RGB PNGs via PyMuPDF."""
     try:
@@ -137,6 +171,50 @@ def find_homr_executable() -> Path | None:
 
     which_bin = shutil.which("homr")
     return Path(which_bin) if which_bin else None
+
+
+def find_audiveris_executable() -> Path | None:
+    """Locate the Audiveris CLI executable if installed via env, PATH, or standard Windows path."""
+    env_bin = os.environ.get("AUDIVERIS_EXECUTABLE", "").strip()
+    if env_bin and Path(env_bin).exists():
+        return Path(env_bin)
+
+    which_bin = shutil.which("audiveris") or shutil.which("Audiveris")
+    if which_bin:
+        return Path(which_bin)
+
+    win_default = Path(r"C:\Program Files\Audiveris\Audiveris.exe")
+    return win_default if win_default.exists() else None
+
+
+def run_audiveris_on_pdf(pdf_path: Path, out_dir: Path, *, timeout: int = 300) -> tuple[str, list[str]]:
+    """Run Audiveris CLI batch OMR on a PDF and return MusicXML string + warnings."""
+    import music21
+
+    aud_bin = find_audiveris_executable()
+    if aud_bin is None:
+        raise OMRError("OMR_DEPENDENCY_MISSING", "Audiveris CLI is not installed.")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [str(aud_bin), "-batch", "-export", "-output", str(out_dir), str(pdf_path)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise OMRError("OMR_TIMEOUT", f"Audiveris timed out after {timeout}s.") from exc
+
+    if proc.returncode != 0:
+        err_tail = (proc.stderr or proc.stdout or "").strip()[-400:]
+        raise OMRError("OMR_FAILED", f"Audiveris failed: {err_tail or 'non-zero exit'}")
+
+    mxl_files = sorted(out_dir.rglob("*.mxl"))
+    xml_files = sorted(out_dir.rglob("*.musicxml")) or sorted(out_dir.rglob("*.xml"))
+    target = mxl_files[0] if mxl_files else (xml_files[0] if xml_files else None)
+    if target is None:
+        raise OMRError("OMR_EMPTY_OUTPUT", "Audiveris did not produce a MusicXML or MXL output file.")
+
+    parsed = music21.converter.parse(str(target))
+    xml_str = music21.musicxml.m21ToXml.GeneralObjectExporter(parsed).parse().decode("utf-8")
+    return xml_str, []
 
 
 def _merge_multipage_scores(page_xml_paths: list[Path]) -> tuple[music21.stream.Score, list[str]]:
@@ -225,17 +303,84 @@ def run_homr_on_images(image_paths: list[Path], *, timeout_per_page: int = 180) 
     return xml_str, warnings
 
 
-def _extract_part_streams(m21_score: music21.stream.Score) -> list[tuple[int, str, str, str | None, list[music21.note.NotRest]]]:
-    """Extract logical voice streams from 4-staff or shared-staff SATB MusicXML."""
+_ACCOMP_KEYWORDS = ("piano", "accompaniment", "accomp", "keyboard", "organ", "pno", "harpsichord")
+
+
+def _is_accompaniment_label(label: str) -> bool:
+    low = (label or "").strip().lower()
+    return any(kw in low for kw in _ACCOMP_KEYWORDS)
+
+
+def _split_homophonic_chord_notes(notes: list[music21.note.NotRest]) -> tuple[list[music21.note.NotRest], list[music21.note.NotRest]] | None:
+    """Split a chordal staff (e.g., S+A or T+B stacked on one staff) into upper & lower voices."""
     import music21
 
-    extracted: list[tuple[int, str, str, str | None, list[music21.note.NotRest]]] = []
+    if not notes:
+        return None
+    chord_count = sum(1 for el in notes if isinstance(el, music21.chord.Chord) and len(el.pitches) >= 2)
+    if chord_count < max(1, int(len(notes) * 0.2)):
+        return None
+
+    upper: list[music21.note.NotRest] = []
+    lower: list[music21.note.NotRest] = []
+    upper_pitches: list[int] = []
+    lower_pitches: list[int] = []
+
+    for el in notes:
+        offset = el.offset
+        if isinstance(el, music21.chord.Chord) and len(el.pitches) >= 2:
+            sorted_p = sorted(el.pitches, key=lambda p: p.midi)
+            n_hi = music21.note.Note(sorted_p[-1], quarterLength=el.quarterLength)
+            n_hi.offset = offset
+            n_lo = music21.note.Note(sorted_p[0], quarterLength=el.quarterLength)
+            n_lo.offset = offset
+            if el.lyrics:
+                n_hi.lyrics = list(el.lyrics)
+            upper.append(n_hi)
+            lower.append(n_lo)
+            upper_pitches.append(int(sorted_p[-1].midi))
+            lower_pitches.append(int(sorted_p[0].midi))
+        elif isinstance(el, music21.note.Note):
+            # Route solo note by proximity to running upper/lower centers
+            u_center = (sum(upper_pitches[-4:]) / len(upper_pitches[-4:])) if upper_pitches else 69.0
+            l_center = (sum(lower_pitches[-4:]) / len(lower_pitches[-4:])) if lower_pitches else 60.0
+            if abs(el.pitch.midi - u_center) <= abs(el.pitch.midi - l_center):
+                upper.append(el)
+                upper_pitches.append(int(el.pitch.midi))
+            else:
+                lower.append(el)
+                lower_pitches.append(int(el.pitch.midi))
+
+    if not upper or not lower:
+        return None
+    return upper, lower
+
+
+def _extract_part_streams(
+    m21_score: music21.stream.Score,
+    *,
+    satb_mode: str = "auto_satb",
+) -> list[tuple[int, str, str, str | None, list[music21.note.NotRest], bool]]:
+    """Extract logical voice streams from 4-staff, 2-staff, or piano-accompanied choral MusicXML."""
+    import music21
+
+    extracted: list[tuple[int, str, str, str | None, list[music21.note.NotRest], bool]] = []
     parts = list(m21_score.parts)
+    vocal_part_count = sum(
+        1 for p_i, p in enumerate(parts)
+        if not _is_accompaniment_label((p.partName or p.id or f"Staff {p_i + 1}").strip())
+    )
 
     for p_idx, part in enumerate(parts):
         label = (part.partName or part.id or f"Staff {p_idx + 1}").strip()
         clef_obj = next(iter(part.recurse().getElementsByClass(music21.clef.Clef)), None)
         clef_name = type(clef_obj).__name__ if clef_obj is not None else "Unknown"
+        is_accomp = _is_accompaniment_label(label)
+
+        if satb_mode == "keep_original" or is_accomp:
+            all_notes = list(part.recurse().notes)
+            extracted.append((p_idx, label, clef_name, None, all_notes, is_accomp))
+            continue
 
         # Check if this staff contains multiple distinct Voice objects
         voice_buckets: dict[str, list[music21.note.NotRest]] = {}
@@ -249,26 +394,59 @@ def _extract_part_streams(m21_score: music21.stream.Score) -> list[tuple[int, st
             else:
                 flat_notes.extend(list(m.recurse().notes))
 
-        if len(voice_buckets) >= 2 and len(parts) <= 2:
+        if len(voice_buckets) >= 2 and vocal_part_count <= 2:
             for vid, v_notes in sorted(voice_buckets.items()):
-                extracted.append((p_idx, label, clef_name, vid, v_notes))
+                extracted.append((p_idx, label, clef_name, vid, v_notes, False))
         else:
             all_notes = flat_notes or list(part.recurse().notes)
-            extracted.append((p_idx, label, clef_name, None, all_notes))
+            if vocal_part_count == 2:
+                split_voices = _split_homophonic_chord_notes(all_notes)
+                if split_voices is not None:
+                    upper, lower = split_voices
+                    extracted.append((p_idx, label, clef_name, "1", upper, False))
+                    extracted.append((p_idx, label, clef_name, "2", lower, False))
+                    continue
+            extracted.append((p_idx, label, clef_name, None, all_notes, False))
 
     return extracted
 
 
-def identify_satb_parts(m21_score: music21.stream.Score) -> tuple[list[SATBPartAssignment], list[str], bool]:
-    """Identify Soprano, Alto, Tenor, Bass parts using labels, staff order, clefs, and pitch range."""
+def identify_satb_parts(
+    m21_score: music21.stream.Score,
+    *,
+    satb_mode: str = "auto_satb",
+) -> tuple[list[SATBPartAssignment], list[str], bool]:
+    """Identify Soprano, Alto, Tenor, Bass parts (and optional Piano Accompaniment) from MusicXML."""
     import music21
 
-    raw_streams = _extract_part_streams(m21_score)
+    raw_streams = _extract_part_streams(m21_score, satb_mode=satb_mode)
     warnings: list[str] = []
     assignments: list[SATBPartAssignment] = []
     used_voices: set[str] = set()
 
-    # Label keyword matching first
+    if satb_mode == "keep_original":
+        for stream_idx, (p_idx, label, clef_name, voice_id, notes, _) in enumerate(raw_streams):
+            pitches = [
+                int(p.midi)
+                for el in notes
+                for p in (el.pitches if isinstance(el, music21.chord.Chord) else [el.pitch])
+            ]
+            mean_pitch = round(sum(pitches) / len(pitches), 1) if pitches else None
+            assignments.append(
+                SATBPartAssignment(
+                    part_index=stream_idx,
+                    source_label=label,
+                    clef=clef_name,
+                    voice_id=voice_id,
+                    assigned_voice=label or f"Staff {p_idx + 1}",
+                    confidence=1.0,
+                    uncertain=False,
+                    note_count=len(notes),
+                    mean_pitch=mean_pitch,
+                )
+            )
+        return assignments, warnings, False
+
     label_map = {
         "soprano": "Soprano",
         "sop": "Soprano",
@@ -278,15 +456,33 @@ def identify_satb_parts(m21_score: music21.stream.Score) -> tuple[list[SATBPartA
         "bass": "Bass",
     }
 
-    for stream_idx, (p_idx, label, clef_name, voice_id, notes) in enumerate(raw_streams):
+    vocal_streams = [s for s in raw_streams if not s[5]]
+
+    for stream_idx, (p_idx, label, clef_name, voice_id, notes, is_accomp) in enumerate(raw_streams):
         pitches = [
             int(p.midi)
             for el in notes
             for p in (el.pitches if isinstance(el, music21.chord.Chord) else [el.pitch])
         ]
         mean_pitch = round(sum(pitches) / len(pitches), 1) if pitches else None
-        lbl_lower = label.lower()
 
+        if is_accomp:
+            assignments.append(
+                SATBPartAssignment(
+                    part_index=stream_idx,
+                    source_label=label,
+                    clef=clef_name,
+                    voice_id=voice_id,
+                    assigned_voice="Piano Accompaniment",
+                    confidence=0.95,
+                    uncertain=False,
+                    note_count=len(notes),
+                    mean_pitch=mean_pitch,
+                )
+            )
+            continue
+
+        lbl_lower = label.lower()
         matched_voice: str | None = None
         conf = 0.5
         for kw, v_name in label_map.items():
@@ -296,9 +492,9 @@ def identify_satb_parts(m21_score: music21.stream.Score) -> tuple[list[SATBPartA
                 break
 
         if matched_voice is None:
-            # Use staff ordering + clef + pitch range as supporting evidence
-            if len(raw_streams) == 4:
-                ordered = SATB_VOICES[stream_idx]
+            vocal_pos = sum(1 for s in raw_streams[:stream_idx] if not s[5])
+            if len(vocal_streams) == 4:
+                ordered = SATB_VOICES[vocal_pos]
                 clef_ok = (
                     (ordered in ("Soprano", "Alto") and "Treble" in clef_name)
                     or (ordered == "Tenor" and ("Bass" in clef_name or "Treble" in clef_name))
@@ -307,7 +503,6 @@ def identify_satb_parts(m21_score: music21.stream.Score) -> tuple[list[SATBPartA
                 matched_voice = ordered
                 conf = 0.85 if clef_ok else 0.60
             else:
-                # Fallback by clef & pitch range
                 if "Bass" in clef_name:
                     cand = "Bass" if (mean_pitch is not None and mean_pitch < 55) else "Tenor"
                 else:
@@ -339,9 +534,9 @@ def identify_satb_parts(m21_score: music21.stream.Score) -> tuple[list[SATBPartA
             )
         )
 
-    if len(raw_streams) != 4:
+    if len(vocal_streams) != 4:
         warnings.append(
-            f"Detected {len(raw_streams)} voice stream(s) instead of 4 SATB parts; verify voice assignments before export."
+            f"Detected {len(vocal_streams)} vocal stream(s) instead of 4 SATB parts; verify voice assignments before export."
         )
     needs_review = bool(warnings) or any(a.uncertain for a in assignments)
     return assignments, warnings, needs_review
@@ -354,12 +549,13 @@ def musicxml_to_satb_score_data(
     tempo_bpm: float | None = None,
     override_assignments: dict[int, str] | None = None,
     extra_warnings: list[str] | None = None,
+    satb_mode: str = "auto_satb",
 ) -> tuple[ScoreData, list[SATBPartAssignment], list[str], bool]:
     """Convert MusicXML into a multi-track SATB ScoreData."""
     import music21
 
     m21_score = music21.converter.parseData(xml_str, format="musicxml")
-    assignments, warnings, needs_review = identify_satb_parts(m21_score)
+    assignments, warnings, needs_review = identify_satb_parts(m21_score, satb_mode=satb_mode)
     if extra_warnings:
         warnings = [*extra_warnings, *warnings]
 
@@ -385,27 +581,32 @@ def musicxml_to_satb_score_data(
     except Exception:
         key_sig = "C major"
 
-    raw_streams = _extract_part_streams(m21_score)
+    raw_streams = _extract_part_streams(m21_score, satb_mode=satb_mode)
     tracks: list[ScoreTrack] = []
     notes: list[ScoreNote] = []
     max_offset_sec = 0.0
 
     for a in assignments:
-        clef_type = "bass" if a.assigned_voice in ("Tenor", "Bass") and "Bass" in a.clef else "treble"
+        is_accomp = _is_accompaniment_label(a.assigned_voice) or _is_accompaniment_label(a.source_label)
+        clef_type = (
+            "grand"
+            if is_accomp
+            else ("bass" if a.assigned_voice in ("Tenor", "Bass") and "Bass" in a.clef else "treble")
+        )
         tracks.append(
             ScoreTrack(
                 index=a.part_index,
                 name=a.assigned_voice,
-                instrument="choir_aahs",
+                instrument="piano" if is_accomp else "choir_aahs",
                 clef=clef_type,
-                program=52,  # GM Choir Aahs (piano fallback handled in audio renderer)
+                program=0 if is_accomp else 52,  # GM Choir Aahs (piano fallback handled in audio renderer)
             )
         )
-        _, _, _, _, part_notes = raw_streams[a.part_index]
+        src_p_idx, _, _, _, part_notes, _ = raw_streams[a.part_index]
         # Compute absolute quarterLength offsets relative to the containing Part
         for el in part_notes:
             try:
-                part_ref = m21_score.parts[min(a.part_index, len(m21_score.parts) - 1)]
+                part_ref = m21_score.parts[min(src_p_idx, len(m21_score.parts) - 1)]
                 abs_ql = float(el.getOffsetInHierarchy(part_ref))
             except Exception:
                 abs_ql = float(el.offset)
@@ -472,21 +673,70 @@ def musicxml_to_satb_score_data(
     return score_data, assignments, warnings, needs_review
 
 
+def process_satb_musicxml(
+    score_path: Path,
+    *,
+    title: str = "SATB Score",
+    satb_mode: str = "auto_satb",
+) -> OMRRecognitionResult:
+    """Direct MusicXML/MXL SATB parsing pipeline (skips OMR completely)."""
+    import music21
+
+    validate_musicxml_bytes(score_path.read_bytes(), score_path.name)
+    try:
+        m21_score = music21.converter.parse(str(score_path))
+        xml_str = music21.musicxml.m21ToXml.GeneralObjectExporter(m21_score).parse().decode("utf-8")
+    except Exception as exc:
+        raise OMRError("INVALID_MUSICXML", f"Failed to parse MusicXML/MXL score: {exc}") from exc
+
+    score_data, assignments, warnings, needs_review = musicxml_to_satb_score_data(
+        xml_str,
+        title=title,
+        satb_mode=satb_mode,
+    )
+    # Regenerate cleanly labeled SATB MusicXML when auto-separating 2-staff or unlabeled scores
+    if satb_mode == "auto_satb" and len(score_data.tracks) > 0:
+        from app.notation.generator import score_data_to_musicxml
+
+        labeled_xml = score_data_to_musicxml(score_data, include_chords=False, include_lyrics=False)
+    else:
+        labeled_xml = xml_str
+
+    return OMRRecognitionResult(
+        musicxml=labeled_xml,
+        score_data=score_data,
+        page_count=1,
+        assignments=assignments,
+        warnings=warnings,
+        needs_review=needs_review,
+    )
+
+
 def process_satb_pdf(
     pdf_path: Path,
     *,
     title: str = "SATB Score",
     work_dir: Path,
     dpi: int = 250,
+    satb_mode: str = "auto_satb",
+    omr_engine: str = "auto",
 ) -> OMRRecognitionResult:
-    """Full Phase 1-3 OMR pipeline: validate PDF -> render pages -> homr -> SATB ScoreData."""
+    """Full OMR pipeline: validate PDF -> Audiveris CLI or render+homr -> SATB ScoreData."""
     page_count = validate_pdf_bytes(pdf_path.read_bytes())
-    image_paths = render_pdf_pages_to_images(pdf_path, work_dir / "pages", dpi=dpi)
-    xml_str, omr_warnings = run_homr_on_images(image_paths)
+    use_audiveris = omr_engine == "audiveris" or (
+        omr_engine == "auto" and find_audiveris_executable() is not None
+    )
+    if use_audiveris:
+        xml_str, omr_warnings = run_audiveris_on_pdf(pdf_path, work_dir / "audiveris")
+    else:
+        image_paths = render_pdf_pages_to_images(pdf_path, work_dir / "pages", dpi=dpi)
+        xml_str, omr_warnings = run_homr_on_images(image_paths)
+
     score_data, assignments, warnings, needs_review = musicxml_to_satb_score_data(
         xml_str,
         title=title,
         extra_warnings=omr_warnings,
+        satb_mode=satb_mode,
     )
     return OMRRecognitionResult(
         musicxml=xml_str,

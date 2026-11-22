@@ -36,6 +36,10 @@ EXPORT_MIME_TYPES = {
     "musicxml": ("application/vnd.recordare.musicxml+xml", "musicxml"),
     "pdf": ("application/pdf", "pdf"),
     "wav": ("audio/wav", "wav"),
+    "soprano_mp3": ("audio/mpeg", "mp3"),
+    "alto_mp3": ("audio/mpeg", "mp3"),
+    "tenor_mp3": ("audio/mpeg", "mp3"),
+    "bass_mp3": ("audio/mpeg", "mp3"),
 }
 
 
@@ -152,6 +156,26 @@ def create_export(
             )
         elif payload.format == "wav":
             content = render_score_wav(score)
+        elif payload.format in ("soprano_mp3", "alto_mp3", "tenor_mp3", "bass_mp3"):
+            from app.notation.satb_audio import (
+                infer_satb_voice_assignments,
+                render_satb_audio_tracks,
+            )
+
+            voice_name = payload.format.split("_", 1)[0]
+            resolved = infer_satb_voice_assignments(score)
+            if voice_name not in {v for v in resolved.values() if v}:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"SATB voice '{voice_name}' is not assigned to any part in this score.",
+                )
+            rendered = render_satb_audio_tracks(score, output_format="mp3")
+            if voice_name not in rendered:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"SATB voice '{voice_name}' could not be rendered.",
+                )
+            content = rendered[voice_name]
         else:
             raise ValueError(f"Unsupported export format: {payload.format}")
 
@@ -226,6 +250,11 @@ def download_export(
     project = db.query(Project).filter(Project.id == export.project_id).first()
     base_name = sanitize_filename(project.title if project else "scribasheet_score")
     mime_type, ext = EXPORT_MIME_TYPES.get(export.format, ("application/octet-stream", "bin"))
+    if export.format in ("soprano_mp3", "alto_mp3", "tenor_mp3", "bass_mp3"):
+        voice_label = export.format.split("_", 1)[0].capitalize()
+        download_filename = f"{voice_label}.mp3"
+    else:
+        download_filename = f"{base_name}.{ext}"
     try:
         data = storage_service.read_bytes(export.storage_path)
     except FileNotFoundError:
@@ -234,7 +263,7 @@ def download_export(
     return Response(
         content=data,
         media_type=mime_type,
-        headers={"Content-Disposition": f'attachment; filename="{base_name}.{ext}"'},
+        headers={"Content-Disposition": f'attachment; filename="{download_filename}"'},
     )
 
 

@@ -10,16 +10,18 @@ ScribaSheet is a full-stack AI-powered music transcription studio that transform
 
 ScribaSheet supports end-to-end music transcription and arrangement workflows:
 
-1. **Media Ingestion**: Upload MP3, WAV, FLAC, M4A, AAC, MP4, MOV, or WEBM files (or record via browser microphone) with server-side FFprobe/Librosa validation.
+1. **Media & Score Ingestion**: Upload MP3, WAV, FLAC, M4A, AAC, MP4, MOV, WEBM audio/video, or choral sheet music (`.pdf`, `.mxl`, `.musicxml`), or record via browser microphone with server-side validation.
 2. **AI Transcription & Stem Separation**: Offloads heavy ML inference to a dedicated local Windows worker running Spotify Basic Pitch (ONNX Runtime), optional Transkun, Demucs stem separation (`vocals`, `bass`, `other`), and `faster-whisper` lyrics recognition.
-3. **Arrangement & Music21 Engraving**: Builds single-instrument, Lead Melody, or 3-staff `Piano + Vocal` scores (`Vocal Melody` treble, `Piano Accompaniment (RH)` treble, `Piano Accompaniment (LH)` bass) with key-aware enharmonic spelling, beat/tempo tracking, and chord detection.
-4. **Lyrics Transcription & Alignment**: Transcribes vocal lyrics (including English and Tagalog/Filipino), supports inline review/editing with timestamp playback, and aligns syllables (including explicit hyphens and melisma `<extend/>`) directly beneath `Vocal Melody` notes in MusicXML and PDF exports.
-5. **Interactive Studio Workspace**:
+3. **PDF / MusicXML SATB Separation**: `.mxl` and `.musicxml` files parse directly via `music21` (skipping OMR); `.pdf` scores run OMR via Audiveris CLI (if installed) or `homr` (`backend/.venv_demucs` / `backend/.venv_omr`). Supports **Auto-Detect SATB** (4-staff, 2-staff multi-voice/homophonic, and piano-accompanied choral scores) and **Keep Original Staves**, flagging ambiguous voice assignments for review.
+4. **Arrangement & Music21 Engraving**: Builds single-instrument, Lead Melody, or 3-staff `Piano + Vocal` scores (`Vocal Melody` treble, `Piano Accompaniment (RH)` treble, `Piano Accompaniment (LH)` bass) with key-aware enharmonic spelling, beat/tempo tracking, and chord detection.
+5. **Lyrics Transcription & Alignment**: Transcribes vocal lyrics (including English and Tagalog/Filipino), supports inline review/editing with timestamp playback, and aligns syllables (including explicit hyphens and melisma `<extend/>`) directly beneath `Vocal Melody` notes in MusicXML and PDF exports.
+6. **Interactive Studio Workspace**:
    - **Sheet Music**: OpenSheetMusicDisplay MusicXML viewer with chord-symbol toggle and zoom controls.
+   - **SATB / Part Mixer**: Solo, Mute, Volume, Tempo, and voice assignment controls for SATB and multi-part scores.
    - **Piano Roll Editor**: Note editing, Snap quantization (`1/16`, `1/8`, `Off`), Undo/Redo, plus an integrated 88-key Synthesia-style Virtual Piano with Web MIDI keyboard input, pitch correction, and synchronized MIDI recording.
    - **Chords & Guitar Tab**: Editable chord symbols and standard-tuning guitar tablature.
    - **Lyrics**: Review filters (`All` / `Needs Review`), inline segment editing, timestamp auditioning, and `.txt`/`.srt`/`.lrc` export.
-   - **Export Center**: Export `.mid`, `.musicxml`, `.pdf` sheet music, and synthesized `.wav` audio.
+   - **Export Center**: Export `.mid`, `.musicxml`, `.pdf` sheet music, synthesized `.wav`, and individual SATB rehearsal MP3s (`Soprano.mp3`, `Alto.mp3`, `Tenor.mp3`, `Bass.mp3`) stored in R2/local storage.
 
 ---
 
@@ -113,12 +115,18 @@ pip install --no-deps basic-pitch==0.4.0
 .\.venv\Scripts\uvicorn.exe app.main:app --reload --port 8000
 ```
 
-### 3. Isolated Demucs + Whisper Environment (Local Windows Worker Only)
-Demucs and `faster-whisper` run in an isolated venv (`backend/.venv_demucs`) and must stay out of the Railway runtime:
+### 3. Isolated Demucs + Whisper & OMR Environments (Local Windows Worker Only)
+Demucs/`faster-whisper` (`backend/.venv_demucs`) and `homr` OMR (`backend/.venv_omr`) run in isolated venvs and must stay out of the Railway runtime:
 ```powershell
+# Demucs + faster-whisper
 python -m venv backend\.venv_demucs
 backend\.venv_demucs\Scripts\python.exe -m pip install demucs faster-whisper "av>=12.0.0,<16.0.0" torch torchaudio soundfile
+
+# Optional OMR for PDF sheet music import (homr, or install Audiveris CLI on PATH / AUDIVERIS_EXECUTABLE)
+python -m venv backend\.venv_omr
+backend\.venv_omr\Scripts\python.exe -m pip install homr onnxruntime
 ```
+*(Troubleshooting: Direct `.mxl` and `.musicxml` imports skip OMR completely. PDF OMR requires either Audiveris CLI or `homr` in `backend/.venv_omr`; individual SATB `.mp3` exports require `ffmpeg` on `PATH` and optional `fluidsynth` for SoundFont rendering.)*
 
 ### 4. Local Windows Worker Agent
 ```powershell

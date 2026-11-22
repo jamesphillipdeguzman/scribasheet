@@ -11,9 +11,31 @@ interface ExportCenterProps {
   projectId: string;
   projectTitle: string;
   hasScore: boolean;
+  isSatbScore?: boolean;
   showChordSymbols?: boolean;
   onToggleChordSymbols?: (value: boolean) => void;
 }
+
+type ExportFormatId =
+  | "midi"
+  | "musicxml"
+  | "pdf"
+  | "wav"
+  | "soprano_mp3"
+  | "alto_mp3"
+  | "tenor_mp3"
+  | "bass_mp3";
+
+const SATB_MP3_FORMATS: Array<{
+  id: "soprano_mp3" | "alto_mp3" | "tenor_mp3" | "bass_mp3";
+  label: string;
+  filename: string;
+}> = [
+  { id: "soprano_mp3", label: "Soprano", filename: "Soprano.mp3" },
+  { id: "alto_mp3", label: "Alto", filename: "Alto.mp3" },
+  { id: "tenor_mp3", label: "Tenor", filename: "Tenor.mp3" },
+  { id: "bass_mp3", label: "Bass", filename: "Bass.mp3" },
+];
 
 const FORMATS: Array<{
   id: "midi" | "musicxml" | "pdf" | "wav";
@@ -32,6 +54,7 @@ export function ExportCenter({
   projectId,
   projectTitle,
   hasScore,
+  isSatbScore = false,
   showChordSymbols,
   onToggleChordSymbols,
 }: ExportCenterProps) {
@@ -54,13 +77,16 @@ export function ExportCenter({
   });
 
   const exportMutation = useMutation({
-    mutationFn: async (fmt: "midi" | "musicxml" | "pdf" | "wav") => {
+    mutationFn: async (fmt: ExportFormatId) => {
       setError(null);
       setActiveFmt(fmt);
       const record = await api.createExport(projectId, fmt, { include_chords: includeChords });
       if (record.download_url) {
-        const ext = FORMATS.find((f) => f.id === fmt)?.ext || `.${fmt}`;
-        await api.downloadExportBlob(record.download_url, `${projectTitle || "score"}${ext}`);
+        const satbItem = SATB_MP3_FORMATS.find((s) => s.id === fmt);
+        const downloadName = satbItem
+          ? satbItem.filename
+          : `${projectTitle || "score"}${FORMATS.find((f) => f.id === fmt)?.ext || `.${fmt}`}`;
+        await api.downloadExportBlob(record.download_url, downloadName);
       }
       return record;
     },
@@ -140,6 +166,49 @@ export function ExportCenter({
           );
         })}
       </div>
+
+      {isSatbScore && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-medium uppercase tracking-wider text-[#A1A1AA]">
+              Individual SATB Rehearsal MP3s
+            </h3>
+            <span className="text-[11px] text-[#71717A]">
+              Each track isolates one vocal part with all other voices muted
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 min-w-0">
+            {SATB_MP3_FORMATS.map((s) => {
+              const loading = activeFmt === s.id;
+              return (
+                <div
+                  key={s.id}
+                  className="min-w-0 rounded-xl border border-[#27273A] bg-[#09090F] p-3 flex flex-col justify-between space-y-2.5"
+                >
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <FileAudio className="h-4 w-4 text-[#A78BFA]" />
+                      <span className="font-mono text-[11px] text-[#A1A1AA]">.mp3</span>
+                    </div>
+                    <div className="mt-1.5 font-semibold text-sm">{s.filename}</div>
+                    <div className="text-[11px] text-[#A1A1AA]">{s.label} solo track</div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={!hasScore || loading}
+                    onClick={() => exportMutation.mutate(s.id)}
+                    className="w-full"
+                  >
+                    {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                    {loading ? "Rendering..." : `Export ${s.label}`}
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Export History */}
       <div className="space-y-2">

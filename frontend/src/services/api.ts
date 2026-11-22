@@ -424,7 +424,7 @@ export const api = {
   listExports: (projectId: string) => request<ExportRecord[]>(`/projects/${projectId}/exports`),
   createExport: (
     projectId: string,
-    format: "midi" | "musicxml" | "pdf" | "wav",
+    format: "midi" | "musicxml" | "pdf" | "wav" | "soprano_mp3" | "alto_mp3" | "tenor_mp3" | "bass_mp3",
     options?: { include_chords?: boolean },
   ) =>
     request<ExportRecord>(`/projects/${projectId}/exports`, {
