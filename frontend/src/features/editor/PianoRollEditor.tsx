@@ -3,6 +3,8 @@ import {
   Cable,
   Circle,
   Disc,
+  Maximize2,
+  Minimize2,
   Plus,
   Square,
   Trash2,
@@ -50,6 +52,8 @@ interface PianoRollEditorProps {
   satbSoloVoice?: string | null;
   satbMutedVoices?: Record<string, boolean>;
   onSatbSoloChange?: (voice: string | null) => void;
+  loop?: boolean;
+  onToggleLoop?: () => void;
 }
 
 const MIN_PITCH = 36; // C2
@@ -99,8 +103,11 @@ export function PianoRollEditor({
   satbSoloVoice = null,
   satbMutedVoices = {},
   onSatbSoloChange,
+  loop,
+  onToggleLoop,
 }: PianoRollEditorProps) {
   const [viewMode, setViewMode] = useState<"grid" | "cascade">("grid");
+  const [isFocusMode, setIsFocusMode] = useState(false);
   const [autoSwitchToCascade, setAutoSwitchToCascade] = useState(false);
   const [pxPerSec, setPxPerSec] = useState(140);
   const [snapMode, setSnapMode] = useState<SnapGridMode>("1/16");
@@ -165,6 +172,23 @@ export function PianoRollEditor({
     }
     prevPlayingRef.current = isPlaying;
   }, [autoSwitchToCascade, isPlaying]);
+
+  // Focus Mode: Escape key to exit + lock background body scroll while active
+  useEffect(() => {
+    if (!isFocusMode) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setIsFocusMode(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [isFocusMode]);
 
   // Keep selectedNoteIds synchronized with external selectedNoteId prop
   useEffect(() => {
@@ -495,9 +519,17 @@ export function PianoRollEditor({
   const statusText = formatStatusLabel(webMidi.status, webMidi.selectedDeviceName);
 
   return (
-    <div className="space-y-3 w-full min-w-0 max-w-full overflow-hidden">
+    <div
+      data-testid="piano-roll-workspace"
+      data-focus-mode={isFocusMode ? "true" : "false"}
+      className={
+        isFocusMode
+          ? "fixed inset-0 z-50 flex flex-col gap-3 bg-[#09090F] p-3 sm:p-4 w-screen h-screen overflow-hidden"
+          : "space-y-3 w-full min-w-0 max-w-full overflow-hidden"
+      }
+    >
       {/* Main Piano Roll Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 shrink-0">
         <div className="flex flex-wrap items-center gap-2">
           {/* Segmented View Selector */}
           <div
@@ -603,32 +635,46 @@ export function PianoRollEditor({
           </div>
         )}
 
-        {viewMode === "grid" && (
-          <div className="flex items-center gap-1">
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => setPxPerSec((p) => Math.max(60, p - 30))}
-              aria-label="Zoom out piano roll"
-            >
-              <ZoomOut className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => setPxPerSec((p) => Math.min(320, p + 30))}
-              aria-label="Zoom in piano roll"
-            >
-              <ZoomIn className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-        )}
+        <div className="flex items-center gap-1">
+          {viewMode === "grid" && (
+            <>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => setPxPerSec((p) => Math.max(60, p - 30))}
+                aria-label="Zoom out piano roll"
+              >
+                <ZoomOut className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => setPxPerSec((p) => Math.min(320, p + 30))}
+                aria-label="Zoom in piano roll"
+              >
+                <ZoomIn className="h-3.5 w-3.5" />
+              </Button>
+            </>
+          )}
+          <Button
+            size="sm"
+            variant={isFocusMode ? "primary" : "secondary"}
+            onClick={() => setIsFocusMode((v) => !v)}
+            title={isFocusMode ? "Exit Focus" : "Maximize"}
+            aria-label={isFocusMode ? "Exit Focus" : "Maximize"}
+          >
+            {isFocusMode ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+            {isFocusMode && <span>Exit Focus</span>}
+          </Button>
+        </div>
       </div>
 
       {viewMode === "grid" ? (
         /* Piano Roll Grid Canvas */
         <div
-          className="relative flex w-full max-w-full max-h-[340px] overflow-auto rounded-xl border border-[#27273A] bg-[#09090F] select-none touch-pan-x touch-pan-y"
+          className={`relative flex w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#09090F] select-none touch-pan-x touch-pan-y ${
+            isFocusMode ? "flex-1 min-h-0" : "max-h-[340px]"
+          }`}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseUp}
@@ -790,6 +836,9 @@ export function PianoRollEditor({
           onPlayheadChange={onPlayheadChange}
           playbackRate={playbackRate}
           onPlaybackRateChange={onPlaybackRateChange}
+          isFocusMode={isFocusMode}
+          loop={loop}
+          onToggleLoop={onToggleLoop}
         />
       )}
 
@@ -980,6 +1029,7 @@ export function PianoRollEditor({
           activePlaybackNotes={activePlaybackNotes}
           activeMidiPitches={activeMidiPitches}
           rePitchArmed={rePitchArmed}
+          isFocusMode={isFocusMode}
           keyboardBodyRef={keyboardBodyRef}
           onKeyDown={handlePitchNoteOn}
           onKeyUp={handlePitchNoteOff}

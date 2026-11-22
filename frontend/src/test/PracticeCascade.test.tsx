@@ -205,4 +205,91 @@ describe("Practice Cascade – Falling-Notes MIDI Visualization", () => {
     });
     expect(c5Key.className).not.toContain("bg-[#A78BFA]");
   });
+
+  it("supports Fullscreen Focus Mode for both Practice Cascade and Grid Editor, locks body scroll, exits on Escape/Exit Focus, and preserves MIDI connection", async () => {
+    const alesisPort = {
+      id: "alesis-1",
+      name: "Alesis Concert",
+      manufacturer: "Alesis",
+      state: "connected" as const,
+      onmidimessage: null as ((ev: { data: Uint8Array }) => void) | null,
+    };
+    const requestMIDIAccess = vi.fn().mockResolvedValue({
+      inputs: new Map([[alesisPort.id, alesisPort]]),
+      onstatechange: null,
+    });
+    Object.defineProperty(navigator, "requestMIDIAccess", {
+      configurable: true,
+      writable: true,
+      value: requestMIDIAccess,
+    });
+
+    document.body.style.overflow = "auto";
+    const onChangeNotes = vi.fn();
+
+    const { unmount } = render(
+      <PianoRollEditor
+        notes={satbNotes}
+        tracks={satbTracks}
+        durationSeconds={8}
+        tempoBpm={120}
+        playheadSec={1.0}
+        selectedNoteId={null}
+        onSelectNote={vi.fn()}
+        onChangeNotes={onChangeNotes}
+      />,
+    );
+
+    // Connect Alesis Concert before entering Focus Mode
+    fireEvent.click(screen.getByRole("button", { name: /Connect MIDI Device/i }));
+    await waitFor(() => {
+      expect(screen.getByTestId("midi-connection-status")).toHaveTextContent("Connected: Alesis Concert");
+    });
+    expect(requestMIDIAccess).toHaveBeenCalledTimes(1);
+
+    const workspace = screen.getByTestId("piano-roll-workspace");
+    expect(workspace).toHaveAttribute("data-focus-mode", "false");
+    expect(document.body.style.overflow).toBe("auto");
+
+    // Enter Focus Mode in Grid Editor
+    fireEvent.click(screen.getByRole("button", { name: "Maximize" }));
+    expect(workspace).toHaveAttribute("data-focus-mode", "true");
+    expect(workspace.className).toContain("fixed");
+    expect(workspace.className).toContain("inset-0");
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(screen.getByRole("button", { name: /Add Note/i })).toBeInTheDocument();
+
+    // Switch to Practice Cascade inside Focus Mode -> MIDI connection preserved without duplicate requestMIDIAccess
+    fireEvent.click(screen.getByRole("button", { name: "Practice Cascade" }));
+    expect(screen.getByTestId("practice-cascade-view")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Loop cascade" })).toBeInTheDocument();
+    expect(screen.getByTestId("midi-connection-status")).toHaveTextContent("Connected: Alesis Concert");
+    expect(requestMIDIAccess).toHaveBeenCalledTimes(1);
+
+    // Live MIDI note still highlights in Focus Mode
+    act(() => {
+      alesisPort.onmidimessage?.({ data: new Uint8Array([0x90, 60, 100]) });
+    });
+    expect(screen.getByRole("button", { name: "Piano key C4" }).className).toContain("bg-[#A78BFA]");
+
+    // Escape exits Focus Mode and restores body scroll
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(workspace).toHaveAttribute("data-focus-mode", "false");
+    expect(document.body.style.overflow).toBe("auto");
+
+    // Re-enter Focus Mode and exit via Exit Focus button
+    fireEvent.click(screen.getByRole("button", { name: "Maximize" }));
+    expect(workspace).toHaveAttribute("data-focus-mode", "true");
+    expect(document.body.style.overflow).toBe("hidden");
+
+    fireEvent.click(screen.getByRole("button", { name: "Exit Focus" }));
+    expect(workspace).toHaveAttribute("data-focus-mode", "false");
+    expect(document.body.style.overflow).toBe("auto");
+
+    // Enter Focus Mode and unmount -> cleanup restores body scroll
+    fireEvent.click(screen.getByRole("button", { name: "Maximize" }));
+    expect(document.body.style.overflow).toBe("hidden");
+    unmount();
+    expect(document.body.style.overflow).toBe("auto");
+  });
 });

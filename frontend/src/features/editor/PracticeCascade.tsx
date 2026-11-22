@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Pause, Play, Square } from "lucide-react";
+import { Pause, Play, Repeat, Square } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import {
   computeCascadeNotePositions,
@@ -33,10 +33,12 @@ interface PracticeCascadeProps {
   onPlayheadChange?: (sec: number) => void;
   onPlaybackRateChange?: (rate: number) => void;
   playbackRate?: number;
+  isFocusMode?: boolean;
+  loop?: boolean;
+  onToggleLoop?: () => void;
 }
 
-const CANVAS_HEIGHT = 280;
-const HIT_LINE_Y = 262;
+const DEFAULT_CANVAS_HEIGHT = 280;
 
 function drawRoundedRect(
   ctx: CanvasRenderingContext2D,
@@ -76,6 +78,9 @@ export function PracticeCascade({
   onPlayheadChange,
   onPlaybackRateChange,
   playbackRate = 1.0,
+  isFocusMode = false,
+  loop: controlledLoop,
+  onToggleLoop,
 }: PracticeCascadeProps) {
   const [lookAheadSec, setLookAheadSec] = useState(3.0);
   const [showPitchLabels, setShowPitchLabels] = useState(true);
@@ -83,13 +88,17 @@ export function PracticeCascade({
   const [localPartFilter, setLocalPartFilter] = useState<string>("all");
   const [localRate, setLocalRate] = useState(playbackRate);
   const [localPlaying, setLocalPlaying] = useState(false);
+  const [localLoop, setLocalLoop] = useState(false);
   const [containerWidth, setContainerWidth] = useState(780);
+  const [canvasHeight, setCanvasHeight] = useState(DEFAULT_CANVAS_HEIGHT);
   const [keyLayout, setKeyLayout] = useState<Map<number, KeyRect>>(() =>
     computeKeyLayoutMap(minPitch, maxPitch, 780),
   );
 
+  const canvasWrapperRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
+  const effectiveLoop = controlledLoop !== undefined ? controlledLoop : localLoop;
 
   // Sync external playbackRate if controlled
   useEffect(() => {
@@ -113,6 +122,7 @@ export function PracticeCascade({
     satbSoloVoice,
     satbMutedVoices,
     localPartFilter,
+    canvasHeight,
   });
   stateRef.current = {
     notes,
@@ -130,9 +140,10 @@ export function PracticeCascade({
     satbSoloVoice,
     satbMutedVoices,
     localPartFilter,
+    canvasHeight,
   };
 
-  // Measure actual VirtualPianoKeyboard key elements & container width on mount and resize
+  // Measure actual VirtualPianoKeyboard key elements & container dimensions on mount and resize
   useEffect(() => {
     const measureKeyboard = () => {
       const el = keyboardBodyRef.current;
@@ -155,20 +166,28 @@ export function PracticeCascade({
 
       setContainerWidth(width);
       setKeyLayout(computeKeyLayoutMap(minPitch, maxPitch, width, measured));
+
+      if (isFocusMode && canvasWrapperRef.current) {
+        const wrapperH = canvasWrapperRef.current.clientHeight;
+        setCanvasHeight(wrapperH > 120 ? Math.floor(wrapperH - 12) : Math.max(360, Math.floor(window.innerHeight * 0.68)));
+      } else {
+        setCanvasHeight(DEFAULT_CANVAS_HEIGHT);
+      }
     };
 
     measureKeyboard();
     let observer: ResizeObserver | null = null;
-    if (typeof ResizeObserver === "function" && keyboardBodyRef.current) {
+    if (typeof ResizeObserver === "function") {
       observer = new ResizeObserver(measureKeyboard);
-      observer.observe(keyboardBodyRef.current);
+      if (keyboardBodyRef.current) observer.observe(keyboardBodyRef.current);
+      if (canvasWrapperRef.current) observer.observe(canvasWrapperRef.current);
     }
     window.addEventListener("resize", measureKeyboard);
     return () => {
       observer?.disconnect();
       window.removeEventListener("resize", measureKeyboard);
     };
-  }, [keyboardBodyRef, minPitch, maxPitch]);
+  }, [keyboardBodyRef, minPitch, maxPitch, isFocusMode]);
 
   // Cleanup fallback local playback on unmount
   useEffect(() => {
@@ -192,14 +211,14 @@ export function PracticeCascade({
       return;
     }
     setLocalPlaying(true);
-    midiSynth.start({
+      midiSynth.start({
       notes,
       fromSec: playheadSec,
       durationSec: Math.max(1, durationSeconds),
       tempoBpm,
       playbackRate: localRate,
       volume: 0.85,
-      loop: false,
+      loop: effectiveLoop,
       metronome: false,
       onPosition: (sec) => onPlayheadChange?.(sec),
       onEnd: () => setLocalPlaying(false),
@@ -238,9 +257,11 @@ export function PracticeCascade({
       if (canvas) {
         const ctx = canvas.getContext("2d");
         if (ctx) {
+          const curHeight = Math.max(200, s.canvasHeight);
+          const hitLineY = curHeight - 18;
           const dpr = window.devicePixelRatio || 1;
           const targetW = Math.max(1, Math.floor(containerWidth * dpr));
-          const targetH = Math.floor(CANVAS_HEIGHT * dpr);
+          const targetH = Math.floor(curHeight * dpr);
           if (canvas.width !== targetW || canvas.height !== targetH) {
             canvas.width = targetW;
             canvas.height = targetH;
@@ -257,29 +278,29 @@ export function PracticeCascade({
 
           // 1. Background
           ctx.fillStyle = "#09090F";
-          ctx.fillRect(0, 0, containerWidth, CANVAS_HEIGHT);
+          ctx.fillRect(0, 0, containerWidth, curHeight);
 
           // 2. Subtle octave vertical guides (C1..C8)
           for (const [pitch, rect] of s.keyLayout.entries()) {
             if (pitch % 12 === 0) {
               ctx.fillStyle = "rgba(167, 139, 250, 0.06)";
-              ctx.fillRect(rect.x, 0, 1, HIT_LINE_Y);
+              ctx.fillRect(rect.x, 0, 1, hitLineY);
             } else if (rect.isBlack) {
               ctx.fillStyle = "rgba(255, 255, 255, 0.015)";
-              ctx.fillRect(rect.x, 0, rect.width, HIT_LINE_Y);
+              ctx.fillRect(rect.x, 0, rect.width, hitLineY);
             }
           }
 
           // 3. Beat / measure horizontal time grid
           const secPerBeat = 60 / Math.max(20, s.tempoBpm || 120);
           const beatsPerBar = Math.max(1, Number.parseInt((s.timeSignature || "4/4").split("/")[0] || "4", 10) || 4);
-          const pxPerSec = HIT_LINE_Y / Math.max(0.5, s.lookAheadSec);
+          const pxPerSec = hitLineY / Math.max(0.5, s.lookAheadSec);
           const firstBeat = Math.floor(currentSec / secPerBeat);
           const lastBeat = Math.ceil((currentSec + s.lookAheadSec) / secPerBeat);
           for (let b = firstBeat; b <= lastBeat; b++) {
             const beatSec = b * secPerBeat;
-            const y = HIT_LINE_Y - (beatSec - currentSec) * pxPerSec;
-            if (y < 0 || y > HIT_LINE_Y) continue;
+            const y = hitLineY - (beatSec - currentSec) * pxPerSec;
+            if (y < 0 || y > hitLineY) continue;
             const isBar = b % beatsPerBar === 0;
             ctx.strokeStyle = isBar ? "rgba(167, 139, 250, 0.24)" : "rgba(39, 39, 58, 0.55)";
             ctx.lineWidth = isBar ? 1.2 : 0.75;
@@ -294,7 +315,7 @@ export function PracticeCascade({
             s.notes,
             currentSec,
             s.lookAheadSec,
-            HIT_LINE_Y,
+            hitLineY,
             s.activeMidiPitches,
           );
 
@@ -317,7 +338,7 @@ export function PracticeCascade({
             const barX = rect.x + pad;
             const barW = Math.max(4, rect.width - pad * 2);
             const clippedTop = Math.max(0, item.topY);
-            const clippedBottom = Math.min(HIT_LINE_Y, item.bottomY);
+            const clippedBottom = Math.min(hitLineY, item.bottomY);
             const barH = Math.max(3, clippedBottom - clippedTop);
 
             ctx.save();
@@ -368,8 +389,8 @@ export function PracticeCascade({
           ctx.strokeStyle = beatPulse > 0.2 ? "rgba(52, 211, 153, 0.9)" : "rgba(167, 139, 250, 0.65)";
           ctx.lineWidth = 2;
           ctx.beginPath();
-          ctx.moveTo(0, HIT_LINE_Y);
-          ctx.lineTo(containerWidth, HIT_LINE_Y);
+          ctx.moveTo(0, hitLineY);
+          ctx.lineTo(containerWidth, hitLineY);
           ctx.stroke();
 
           for (const pitch of s.activeMidiPitches) {
@@ -379,7 +400,7 @@ export function PracticeCascade({
             ctx.fillStyle = "rgba(167, 139, 250, 0.85)";
             ctx.shadowColor = "#A78BFA";
             ctx.shadowBlur = 10;
-            ctx.fillRect(rect.x, HIT_LINE_Y - 4, rect.width, 8);
+            ctx.fillRect(rect.x, hitLineY - 4, rect.width, 8);
             ctx.restore();
           }
 
@@ -404,9 +425,12 @@ export function PracticeCascade({
   const currentBeat = Math.floor(playheadSec / secPerBeat) + 1;
 
   return (
-    <div data-testid="practice-cascade-view" className="space-y-2 w-full min-w-0">
+    <div
+      data-testid="practice-cascade-view"
+      className={`space-y-2 w-full min-w-0 ${isFocusMode ? "flex-1 min-h-0 flex flex-col" : ""}`}
+    >
       {/* Practice Cascade Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#27273A] bg-[#09090F] px-3 py-2 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#27273A] bg-[#09090F] px-3 py-2 text-xs shrink-0">
         <div className="flex flex-wrap items-center gap-2">
           <Button size="sm" onClick={handlePlayPause} aria-label={effectivePlaying ? "Pause cascade" : "Play cascade"}>
             {effectivePlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
@@ -415,6 +439,16 @@ export function PracticeCascade({
           <Button size="sm" variant="secondary" onClick={handleStop} aria-label="Stop cascade">
             <Square className="h-3.5 w-3.5" />
             Stop
+          </Button>
+          <Button
+            size="sm"
+            variant={effectiveLoop ? "primary" : "ghost"}
+            onClick={() => (onToggleLoop ? onToggleLoop() : setLocalLoop((v) => !v))}
+            aria-pressed={effectiveLoop}
+            aria-label="Loop cascade"
+          >
+            <Repeat className="h-3.5 w-3.5" />
+            Loop
           </Button>
 
           <label className="inline-flex items-center gap-1.5 text-[#A1A1AA]">
@@ -540,12 +574,17 @@ export function PracticeCascade({
       )}
 
       {/* Falling Notes Canvas aligned with VirtualPianoKeyboard */}
-      <div className="w-full overflow-x-auto rounded-lg border border-[#27273A] bg-[#09090F] p-1.5">
+      <div
+        ref={canvasWrapperRef}
+        className={`w-full overflow-x-auto rounded-lg border border-[#27273A] bg-[#09090F] p-1.5 ${
+          isFocusMode ? "flex-1 min-h-0" : ""
+        }`}
+      >
         <div className="min-w-[780px] w-full">
           <canvas
             ref={canvasRef}
             data-testid="practice-cascade-canvas"
-            style={{ width: `${containerWidth}px`, height: `${CANVAS_HEIGHT}px` }}
+            style={{ width: `${containerWidth}px`, height: `${canvasHeight}px` }}
             className="block rounded-t-md"
           />
         </div>

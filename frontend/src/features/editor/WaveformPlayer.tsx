@@ -21,6 +21,8 @@ interface WaveformPlayerProps {
   externalStopSignal?: number;
   externalPlaybackRate?: number;
   onPlaybackRateChange?: (rate: number) => void;
+  externalLoop?: boolean;
+  onLoopChange?: (loop: boolean) => void;
 }
 
 export function WaveformPlayer({
@@ -37,6 +39,8 @@ export function WaveformPlayer({
   externalStopSignal = 0,
   externalPlaybackRate,
   onPlaybackRateChange,
+  externalLoop,
+  onLoopChange,
 }: WaveformPlayerProps) {
   const waveContainerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
@@ -204,6 +208,16 @@ export function WaveformPlayer({
   useEffect(() => {
     onPlaybackRateChange?.(playbackRate);
   }, [playbackRate, onPlaybackRateChange]);
+
+  useEffect(() => {
+    if (externalLoop !== undefined && externalLoop !== loop) {
+      setLoop(externalLoop);
+    }
+  }, [externalLoop]);
+
+  useEffect(() => {
+    onLoopChange?.(loop);
+  }, [loop, onLoopChange]);
 
   const prevToggleRef = useRef(externalToggleSignal);
   useEffect(() => {

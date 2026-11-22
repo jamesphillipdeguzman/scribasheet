@@ -48,6 +48,7 @@ export function ProjectStudioPage() {
   const [playheadSec, setPlayheadSec] = useState(0);
   const [isPlaybackActive, setIsPlaybackActive] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1.0);
+  const [loopPlayback, setLoopPlayback] = useState(false);
   const [togglePlaySignal, setTogglePlaySignal] = useState(0);
   const [stopPlaySignal, setStopPlaySignal] = useState(0);
   const [satbSoloVoice, setSatbSoloVoice] = useState<string | null>(null);
@@ -707,6 +708,8 @@ export function ProjectStudioPage() {
               externalStopSignal={stopPlaySignal}
               externalPlaybackRate={playbackRate}
               onPlaybackRateChange={setPlaybackRate}
+              externalLoop={loopPlayback}
+              onLoopChange={setLoopPlayback}
             />
 
             {/* Workspace Tabs */}
@@ -866,6 +869,8 @@ export function ProjectStudioPage() {
                     satbSoloVoice={satbSoloVoice}
                     satbMutedVoices={satbMutedVoices}
                     onSatbSoloChange={setSatbSoloVoice}
+                    loop={loopPlayback}
+                    onToggleLoop={() => setLoopPlayback((v) => !v)}
                   />
                 ) : (
                   <div className="py-12 text-center text-sm text-[#A1A1AA]">
