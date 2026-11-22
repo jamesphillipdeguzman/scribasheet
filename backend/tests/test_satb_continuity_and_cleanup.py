@@ -439,6 +439,76 @@ def test_omr_copyright_permission_filtering_preserves_legitimate_lyrics() -> Non
     assert _is_footer_or_metadata_text("mountain", default_y=-80.0) is False
 
 
+def test_multinote_copyright_and_credit_phrase_filtering_and_genuine_tb_preservation() -> None:
+    from app.notation.omr import sanitize_omr_musicxml
+
+    # 1. Split multi-note phrases ("by An-drew Moore" & "Ma-king co-pies non - church, and per-son-al use") in Bass
+    split_xml = """<?xml version="1.0" encoding="utf-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><lyric number="1"><text>Go</text></lyric></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><lyric number="1"><text>tell</text></lyric></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><lyric number="1"><text>it</text></lyric></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>1</duration><lyric number="1"><text>on</text></lyric></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>1</duration><lyric number="1"><text>by</text></lyric></note>
+      <note><pitch><step>D</step><octave>3</octave></pitch><duration>1</duration><lyric number="1"><syllabic>begin</syllabic><text>An-</text></lyric></note>
+      <note><pitch><step>E</step><octave>3</octave></pitch><duration>1</duration><lyric number="1"><syllabic>end</syllabic><text>drew</text></lyric></note>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>1</duration><lyric number="1"><text>Moore</text></lyric></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><syllabic>begin</syllabic><text>Ma-</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><syllabic>end</syllabic><text>king</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><syllabic>begin</syllabic><text>co-</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><syllabic>end</syllabic><text>pies</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><text>non</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><text>-</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><text>church,</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><text>and</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><syllabic>begin</syllabic><text>per-</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><syllabic>middle</syllabic><text>son-</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><syllabic>end</syllabic><text>al</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><text>use</text></lyric></note>
+    </measure>
+  </part>
+</score-partwise>"""
+    cleaned, _ = sanitize_omr_musicxml(split_xml)
+    root = ET.fromstring(cleaned)
+    parts = root.findall("part")
+    sop_lyrics = [t.text for t in parts[0].findall(".//lyric/text")]
+    bass_lyrics = [t.text for t in parts[1].findall(".//lyric/text")]
+    assert sop_lyrics == ["Go", "tell", "it", "on"]
+    assert bass_lyrics == []
+
+    # 2. Genuine 4-part choral lyrics in Bass are preserved
+    genuine_tb_xml = """<?xml version="1.0" encoding="utf-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1"><measure number="1">""" + "".join(
+        f'<note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><lyric number="1"><text>la{i}</text></lyric></note>'
+        for i in range(12)
+    ) + """</measure></part>
+  <part id="P2"><measure number="1">""" + "".join(
+        f'<note><pitch><step>C</step><octave>3</octave></pitch><duration>1</duration><lyric number="1"><text>dum{i}</text></lyric></note>'
+        for i in range(10)
+    ) + """</measure></part>
+</score-partwise>"""
+    cleaned_tb, _ = sanitize_omr_musicxml(genuine_tb_xml)
+    tb_root = ET.fromstring(cleaned_tb)
+    assert len(tb_root.findall("part")[1].findall(".//lyric/text")) == 10
+
+
 def test_put_score_persists_direct_musicxml_edits(client, db_session) -> None:
     reg = client.post(
         "/api/v1/auth/register",

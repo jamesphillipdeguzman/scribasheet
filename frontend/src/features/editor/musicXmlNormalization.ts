@@ -9,6 +9,104 @@ const TITLE_EXT_RE = /\.(?:pdf|mxl|musicxml|xml|mid|midi|mp3|wav)$/i;
 const XML_DECL_RE = /^<\?xml\b[^>]*\?>\s*/i;
 const URL_RE = /^https?:\/\/\S+$/i;
 
+const FOOTER_PHRASE_RE =
+  /(?:©|\(c\)|copyright|all\s+rights\s+reserved|used\s+by\s+permission|without\s+permission|personal\s+use|non[- ]?commercial|non[- ]?church|making\s+copies|(?:may|not)\s+be\s+reproduced|ccli\b|licen[cs]e|arr\.?\s+by|arranged\s+by|words\s*(?:&|and)\s*music|(?:music|text|lyrics)\s+by\s+[A-Z][\w.-]+(?:\s+[A-Z][\w.-]+){0,3}|published\s+by|engraved\s+by|typeset\s+by|printed\s+in|hal\s+leonard|imslp|public\s+domain|musescore|(?:https?:\/\/|www\.)\S+|^(?:page|p\.?)\s*\d+(?:\s*of\s*\d+)?$)/i;
+
+const CREDIT_BY_NAME_RE = /\bby\s+[A-Z][a-z]{1,24}(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]{1,24}\b/;
+
+function sanitizeDocumentFooterLyrics(doc: Document): void {
+  const parts = Array.from(doc.getElementsByTagName("part"));
+  const numParts = parts.length;
+
+  // Pass 1: multi-note phrase reconstruction per part and verse
+  for (let pIdx = 0; pIdx < numParts; pIdx++) {
+    const partEl = parts[pIdx];
+    const isLowerPart = numParts >= 2 && pIdx >= Math.max(1, numParts - 2);
+    const measures = Array.from(partEl.getElementsByTagName("measure"));
+    const byVerse = new Map<
+      string,
+      Array<{ noteEl: Element; lyrEl: Element; text: string; syllabic: string; mIdx: number }>
+    >();
+
+    for (let mIdx = 0; mIdx < measures.length; mIdx++) {
+      for (const noteEl of Array.from(measures[mIdx].getElementsByTagName("note"))) {
+        for (const lyrEl of Array.from(noteEl.getElementsByTagName("lyric"))) {
+          const vNum = lyrEl.getAttribute("number") || "1";
+          const txt = Array.from(lyrEl.getElementsByTagName("text"))
+            .map((t) => t.textContent || "")
+            .join("")
+            .trim();
+          const syl = (lyrEl.getElementsByTagName("syllabic")[0]?.textContent || "").trim().toLowerCase();
+          const rawY = lyrEl.getAttribute("default-y");
+          const dy = rawY !== null ? Number.parseFloat(rawY) : NaN;
+
+          if ((Number.isFinite(dy) && dy < -150) || FOOTER_PHRASE_RE.test(txt)) {
+            lyrEl.parentNode?.removeChild(lyrEl);
+            continue;
+          }
+          if (!byVerse.has(vNum)) byVerse.set(vNum, []);
+          byVerse.get(vNum)!.push({ noteEl, lyrEl, text: txt, syllabic: syl, mIdx });
+        }
+      }
+    }
+
+    for (const tokList of byVerse.values()) {
+      const chunks: Array<typeof tokList> = [];
+      let cur: typeof tokList = [];
+      for (const tok of tokList) {
+        if (cur.length > 0 && tok.mIdx - cur[cur.length - 1].mIdx > 2) {
+          chunks.push(cur);
+          cur = [];
+        }
+        cur.push(tok);
+      }
+      if (cur.length > 0) chunks.push(cur);
+
+      for (const chunk of chunks) {
+        let phrase = "";
+        let prevJoined = false;
+        for (let i = 0; i < chunk.length; i++) {
+          const t = chunk[i].text;
+          if (!t) continue;
+          if (i > 0 && !prevJoined) phrase += " ";
+          const isHyphenEnd = t.endsWith("-") && t.length > 1;
+          phrase += isHyphenEnd && (chunk[i].syllabic === "begin" || chunk[i].syllabic === "middle" || !chunk[i].syllabic)
+            ? t.slice(0, -1)
+            : t;
+          prevJoined = chunk[i].syllabic === "begin" || chunk[i].syllabic === "middle" || t.endsWith("-");
+        }
+        const trimmed = phrase.trim();
+        if (!trimmed) continue;
+
+        const isFooter =
+          FOOTER_PHRASE_RE.test(trimmed) ||
+          ((isLowerPart || chunk.length <= 6) && CREDIT_BY_NAME_RE.test(trimmed));
+        if (isFooter) {
+          for (const tok of chunk) {
+            tok.lyrEl.parentNode?.removeChild(tok.lyrEl);
+          }
+        }
+      }
+    }
+  }
+
+  // Pass 2: remove sparse bottom-staff pseudo-lyrics in multi-part hymnal scores
+  if (numParts >= 2) {
+    const counts = parts.map((p) => p.getElementsByTagName("lyric").length);
+    const topCount = counts[0];
+    if (topCount >= 12) {
+      for (let pIdx = 1; pIdx < numParts; pIdx++) {
+        const cnt = counts[pIdx];
+        if (cnt > 0 && cnt <= Math.max(4, Math.floor(topCount * 0.18)) && (pIdx >= 2 || numParts === 2)) {
+          for (const lyr of Array.from(parts[pIdx].getElementsByTagName("lyric"))) {
+            lyr.parentNode?.removeChild(lyr);
+          }
+        }
+      }
+    }
+  }
+}
+
 export function cleanDisplayScoreTitle(rawTitle: string): string {
   return rawTitle.trim().replace(TITLE_EXT_RE, "").trim();
 }
@@ -61,6 +159,7 @@ export function prepareDisplayMusicXml(xml: string, showChords: boolean): string
             cw.textContent = "ScribaSheet";
           }
         }
+        sanitizeDocumentFooterLyrics(doc);
 
         const serialized = new XMLSerializer().serializeToString(doc).replace(/^\uFEFF/, "").trim();
         if (serialized.startsWith("<?xml")) {

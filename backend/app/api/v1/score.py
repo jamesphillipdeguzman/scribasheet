@@ -21,6 +21,7 @@ from app.notation.melody import (
     is_lead_melody_mode,
     normalize_transcription_mode,
 )
+from app.notation.omr import sanitize_omr_musicxml
 from app.schemas.score import (
     ArrangementRegenerateRequest,
     ProjectScoreResponse,
@@ -65,12 +66,14 @@ def get_project_score(
                     )
                     if xml_name:
                         raw_xml = zf.read(xml_name).decode("utf-8-sig", errors="replace")
-                        musicxml_str = apply_scribasheet_musicxml_branding(raw_xml, title=clean_title)
+                        cleaned_xml, _ = sanitize_omr_musicxml(raw_xml)
+                        musicxml_str = apply_scribasheet_musicxml_branding(cleaned_xml, title=clean_title)
             except Exception:
                 musicxml_str = None
         else:
             raw_xml = raw_bytes.decode("utf-8-sig", errors="replace")
-            musicxml_str = apply_scribasheet_musicxml_branding(raw_xml, title=clean_title)
+            cleaned_xml, _ = sanitize_omr_musicxml(raw_xml)
+            musicxml_str = apply_scribasheet_musicxml_branding(cleaned_xml, title=clean_title)
 
     score_json_out = dict(score.score_json or {})
     if "title" in score_json_out:

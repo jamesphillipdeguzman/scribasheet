@@ -399,4 +399,46 @@ describe("Synchronized Sheet Music Playback View & Timeline", () => {
     expect(onTogglePlay).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("notation-edit-toolbar")).toBeInTheDocument();
   });
+
+  it("strips multi-note copyright/credit phrases and sparse bottom-staff pseudo-lyrics in saved MusicXML before OSMD load", () => {
+    const savedXmlWithFooter = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><lyric number="1"><text>Go</text></lyric></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><lyric number="1"><text>tell</text></lyric></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>1</duration><lyric number="1"><text>by</text></lyric></note>
+      <note><pitch><step>D</step><octave>3</octave></pitch><duration>1</duration><lyric number="1"><syllabic>begin</syllabic><text>An-</text></lyric></note>
+      <note><pitch><step>E</step><octave>3</octave></pitch><duration>1</duration><lyric number="1"><syllabic>end</syllabic><text>drew</text></lyric></note>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>1</duration><lyric number="1"><text>Moore</text></lyric></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><syllabic>begin</syllabic><text>Ma-</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><syllabic>end</syllabic><text>king</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><syllabic>begin</syllabic><text>co-</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><syllabic>end</syllabic><text>pies</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><text>non</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><text>-</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><text>church,</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><text>and</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><text>personal</text></lyric></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><lyric number="1"><text>use</text></lyric></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const prepared = prepareDisplayMusicXml(savedXmlWithFooter, true);
+    const doc = new DOMParser().parseFromString(prepared, "application/xml");
+    const parts = doc.getElementsByTagName("part");
+    expect(parts[0].getElementsByTagName("lyric")).toHaveLength(2);
+    expect(parts[1].getElementsByTagName("lyric")).toHaveLength(0);
+  });
 });

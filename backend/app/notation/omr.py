@@ -310,14 +310,19 @@ _ACCOMP_KEYWORDS = ("piano", "accompaniment", "accomp", "keyboard", "organ", "pn
 
 _FOOTER_METADATA_RE = re.compile(
     r"(?:©|\(c\)|copyright|all\s+rights\s+reserved|used\s+by\s+permission|"
-    r"without\s+permission|personal\s+use|non[- ]?commercial|making\s+copies|"
+    r"without\s+permission|personal\s+use|non[- ]?commercial|non[- ]?church|making\s+copies|"
     r"(?:may|not)\s+be\s+reproduced|"
     r"ccli\b|licen[cs]e|arr\.?\s+by|arranged\s+by|words\s*(?:&|and)\s*music|"
+    r"(?:music|text|lyrics)\s+by\s+[A-Z][\w.-]+(?:\s+[A-Z][\w.-]+){0,3}|"
     r"published\s+by|engraved\s+by|typeset\s+by|printed\s+in|"
     r"hal\s+leonard|imslp|public\s+domain|musescore|"
     r"(?:https?://|www\.)\S+|\b\S+\.(?:com|org|net)\b|"
     r"^(?:page|p\.?)\s*\d+(?:\s*of\s*\d+)?$)",
     re.IGNORECASE,
+)
+
+_CREDIT_BY_NAME_RE = re.compile(
+    r"\bby\s+[A-Z][a-z]{1,24}(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]{1,24}\b"
 )
 
 _FOOTER_CONTEXT_WORDS_RE = re.compile(
@@ -394,6 +399,113 @@ def _is_footer_or_metadata_text(
     return False
 
 
+def _reconstruct_and_filter_part_lyrics(
+    root: ET.Element,
+    *,
+    pdf_footer_texts: set[str] | None = None,
+) -> int:
+    """Reconstruct multi-note lyric phrases per part/verse and remove footer/credit phrases & sparse bottom-staff pseudo-lyrics."""
+    removed = 0
+    parts = list(root.findall("part"))
+    num_parts = len(parts)
+
+    # Pass 1: per-part, per-verse multi-note phrase reconstruction
+    for p_idx, part_el in enumerate(parts):
+        is_lower_part = num_parts >= 2 and p_idx >= max(1, num_parts - 2)
+        measures = list(part_el.findall("measure"))
+        # Group tokens by lyric number
+        tokens_by_verse: dict[str, list[dict]] = {}
+        for m_idx, m_el in enumerate(measures):
+            for note_el in m_el.findall("note"):
+                for lyr in note_el.findall("lyric"):
+                    v_num = lyr.attrib.get("number") or "1"
+                    txt = "".join(t.text or "" for t in lyr.findall("text")).strip()
+                    syl = (lyr.findtext("syllabic") or "").strip().lower()
+                    raw_y = lyr.attrib.get("default-y")
+                    try:
+                        dy = float(raw_y) if raw_y is not None else None
+                    except ValueError:
+                        dy = None
+                    tokens_by_verse.setdefault(v_num, []).append(
+                        {
+                            "note_el": note_el,
+                            "lyric_el": lyr,
+                            "text": txt,
+                            "syllabic": syl,
+                            "measure_idx": m_idx,
+                            "default_y": dy,
+                        }
+                    )
+
+        for tok_list in tokens_by_verse.values():
+            # Split into contiguous phrase chunks (break on > 2 empty measures)
+            chunks: list[list[dict]] = []
+            cur_chunk: list[dict] = []
+            for tok in tok_list:
+                if cur_chunk and tok["measure_idx"] - cur_chunk[-1]["measure_idx"] > 2:
+                    chunks.append(cur_chunk)
+                    cur_chunk = []
+                cur_chunk.append(tok)
+            if cur_chunk:
+                chunks.append(cur_chunk)
+
+            for chunk in chunks:
+                phrase_parts: list[str] = []
+                spans: list[tuple[int, int, dict]] = []
+                cursor = 0
+                prev_joined = False
+                for idx, tok in enumerate(chunk):
+                    t = tok["text"]
+                    if not t:
+                        continue
+                    if idx > 0 and not prev_joined:
+                        phrase_parts.append(" ")
+                        cursor += 1
+                    clean_tok = t[:-1] if (t.endswith("-") and len(t) > 1 and tok["syllabic"] in ("begin", "middle", "")) else t
+                    start = cursor
+                    phrase_parts.append(clean_tok)
+                    cursor += len(clean_tok)
+                    spans.append((start, cursor, tok))
+                    prev_joined = tok["syllabic"] in ("begin", "middle") or t.endswith("-")
+
+                phrase = "".join(phrase_parts).strip()
+                if not phrase:
+                    continue
+
+                is_footer_phrase = _FOOTER_METADATA_RE.search(phrase) is not None
+                if not is_footer_phrase and (is_lower_part or len(chunk) <= 6):
+                    if _CREDIT_BY_NAME_RE.search(phrase):
+                        is_footer_phrase = True
+                if not is_footer_phrase and pdf_footer_texts:
+                    low_p = re.sub(r"\s+", " ", phrase).lower()
+                    for ft in pdf_footer_texts:
+                        if len(low_p) >= 6 and (low_p in ft or ft in low_p):
+                            is_footer_phrase = True
+                            break
+
+                if is_footer_phrase:
+                    for _, _, tok in spans:
+                        if tok["lyric_el"] in list(tok["note_el"]):
+                            tok["note_el"].remove(tok["lyric_el"])
+                            removed += 1
+
+    # Pass 2: For multi-part hymnal scores, remove sparse/isolated bottom-staff pseudo-lyrics
+    if num_parts >= 2:
+        part_lyric_counts: list[int] = [len(p.findall(".//note/lyric")) for p in parts]
+        top_count = part_lyric_counts[0]
+        if top_count >= 12:
+            for p_idx in range(1, num_parts):
+                cnt = part_lyric_counts[p_idx]
+                if 0 < cnt <= max(4, int(top_count * 0.18)):
+                    # Check if confined to lower staff (Tenor/Bass) or final measures / low default-y
+                    if p_idx >= 2 or num_parts == 2:
+                        for note_el in parts[p_idx].findall(".//note"):
+                            for lyr in list(note_el.findall("lyric")):
+                                note_el.remove(lyr)
+                                removed += 1
+    return removed
+
+
 def sanitize_omr_musicxml(
     xml_str: str,
     *,
@@ -414,7 +526,7 @@ def sanitize_omr_musicxml(
     cue_notes_tagged = 0
 
     for note_el in root.findall(".//note"):
-        # Strip footer/copyright text mistakenly attached as <lyric>
+        # Strip individual footer/copyright text mistakenly attached as <lyric>
         for lyr in list(note_el.findall("lyric")):
             txt = "".join(t.text or "" for t in lyr.findall("text")).strip()
             raw_y = lyr.attrib.get("default-y")
@@ -442,6 +554,9 @@ def sanitize_omr_musicxml(
                 type_el = ET.SubElement(note_el, "type")
                 type_el.text = "quarter"
             type_el.attrib["size"] = "cue"
+
+    # Reconstruct multi-note lyric phrases & clean sparse bottom-staff pseudo-lyrics
+    removed_lyrics += _reconstruct_and_filter_part_lyrics(root, pdf_footer_texts=pdf_footers)
 
     # Strip footer <credit-words> / <words> far below the lowest staff if needed
     for dir_el in root.findall(".//direction"):

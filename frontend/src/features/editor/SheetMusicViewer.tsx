@@ -274,7 +274,7 @@ export function SheetMusicViewer({
           guard++;
         }
         cursor.update();
-        lastCursorWholeRef.current = cursor.iterator.currentTimeStamp?.RealValue ?? targetWhole;
+        lastCursorWholeRef.current = targetWhole;
 
         // Highlight sounding noteheads with SATB colors respecting Solo/Mute
         clearNoteheadHighlights();
@@ -305,7 +305,15 @@ export function SheetMusicViewer({
         }
 
         const geom = computePlayheadGeometry(osmd);
-        setPlayheadRect(geom);
+        setPlayheadRect((prev) =>
+          prev.visible === geom.visible &&
+          prev.left === geom.left &&
+          prev.top === geom.top &&
+          prev.height === geom.height &&
+          prev.systemIndex === geom.systemIndex
+            ? prev
+            : geom,
+        );
         if (allowAutoScroll) {
           maybeAutoScroll(geom);
         }
