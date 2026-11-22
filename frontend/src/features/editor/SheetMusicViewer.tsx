@@ -9,7 +9,15 @@ import {
   timeSecToWholeNotes,
   wholeNotesToTimeSec,
 } from "@/features/editor/musicXmlTimeline";
+import {
+  cleanDisplayScoreTitle,
+  normalizeScorePayload,
+  prepareDisplayMusicXml,
+} from "@/features/editor/musicXmlNormalization";
+import { getStoredTokens } from "@/services/api";
 import type { ScoreTrack } from "@/types/api";
+
+export { cleanDisplayScoreTitle, prepareDisplayMusicXml };
 
 const SATB_SHEET_COLORS: Record<string, string> = {
   soprano: "#3b82f6", // Blue
@@ -18,38 +26,6 @@ const SATB_SHEET_COLORS: Record<string, string> = {
   bass: "#8b5cf6", // Purple
   other: "#3b82f6",
 };
-
-const TITLE_EXT_RE = /\.(?:pdf|mxl|musicxml|xml|mid|midi|mp3|wav)$/i;
-
-export function cleanDisplayScoreTitle(rawTitle: string): string {
-  return rawTitle.trim().replace(TITLE_EXT_RE, "").trim();
-}
-
-export function prepareDisplayMusicXml(xml: string, showChords: boolean): string {
-  if (typeof DOMParser !== "undefined" && typeof XMLSerializer !== "undefined") {
-    try {
-      const doc = new DOMParser().parseFromString(xml, "application/xml");
-      if (!doc.querySelector("parsererror")) {
-        if (!showChords) {
-          const harmonies = Array.from(doc.getElementsByTagName("harmony"));
-          for (const el of harmonies) {
-            el.parentNode?.removeChild(el);
-          }
-        }
-        for (const tag of ["work-title", "movement-title"]) {
-          const el = doc.getElementsByTagName(tag)[0];
-          if (el?.textContent) {
-            el.textContent = cleanDisplayScoreTitle(el.textContent);
-          }
-        }
-        return new XMLSerializer().serializeToString(doc);
-      }
-    } catch {
-      // Fall back to regex removal below
-    }
-  }
-  return showChords ? xml : xml.replace(/<harmony\b[^>]*>[\s\S]*?<\/harmony>/gi, "");
-}
 
 export function stripHarmonyFromMusicXml(xml: string): string {
   return prepareDisplayMusicXml(xml, false);
@@ -110,6 +86,8 @@ export function SheetMusicViewer({
   const [followCursor, setFollowCursor] = useState(true);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
+  const [resolvedXml, setResolvedXml] = useState<string | null>(null);
+  const [payloadStatus, setPayloadStatus] = useState<"empty" | "loading" | "ready" | "error">("empty");
   const [playheadRect, setPlayheadRect] = useState<PlayheadRect>({
     visible: false,
     left: 0,
@@ -129,8 +107,8 @@ export function SheetMusicViewer({
   };
 
   const timeline = useMemo(
-    () => buildMusicXmlTimeline(musicxml, tempoBpm),
-    [musicxml, tempoBpm],
+    () => buildMusicXmlTimeline(resolvedXml ?? musicxml, tempoBpm),
+    [resolvedXml, musicxml, tempoBpm],
   );
 
   const clearNoteheadHighlights = () => {
@@ -289,14 +267,61 @@ export function SheetMusicViewer({
   };
 
   useEffect(() => {
-    if (!containerRef.current || !musicxml) return;
+    const normalized = normalizeScorePayload(musicxml, effectiveShowChords);
+    if (normalized.kind === "empty") {
+      setResolvedXml(null);
+      setRenderError(null);
+      setPayloadStatus("empty");
+      return;
+    }
+    if (normalized.kind === "compressed_mxl" || normalized.kind === "invalid") {
+      console.warn("[SheetMusicViewer] Unsupported score payload:", normalized.kind);
+      setResolvedXml(null);
+      setRenderError(normalized.message);
+      setPayloadStatus("error");
+      return;
+    }
 
     let cancelled = false;
     setRenderError(null);
     setIsRendering(true);
+    setPayloadStatus("loading");
 
     const renderScore = async () => {
       try {
+        let displayXml: string;
+        if (normalized.kind === "url") {
+          const { accessToken } = getStoredTokens();
+          const headers: Record<string, string> = {};
+          if (accessToken && normalized.url.startsWith("/")) {
+            headers.Authorization = `Bearer ${accessToken}`;
+          }
+          const resp = await fetch(normalized.url, { headers });
+          if (!resp.ok) {
+            throw new Error(`Failed to retrieve sheet music (${resp.status}).`);
+          }
+          const contentType = (resp.headers.get("content-type") || "").toLowerCase();
+          if (contentType.includes("application/vnd.recordare.musicxml") && !contentType.includes("+xml")) {
+            throw new Error("Compressed .mxl score cannot be loaded directly in browser notation.");
+          }
+          const fetchedText = await resp.text();
+          const reNormalized = normalizeScorePayload(fetchedText, effectiveShowChords);
+          if (reNormalized.kind !== "xml") {
+            throw new Error(
+              reNormalized.kind === "empty"
+                ? "Retrieved score file is empty."
+                : "Retrieved score file is not valid MusicXML.",
+            );
+          }
+          displayXml = reNormalized.xml;
+        } else {
+          displayXml = normalized.xml;
+        }
+
+        if (cancelled || !containerRef.current) return;
+        setResolvedXml(displayXml);
+        setPayloadStatus("ready");
+
         if (!osmdRef.current && containerRef.current) {
           osmdRef.current = new OpenSheetMusicDisplay(containerRef.current, {
             autoResize: true,
@@ -318,7 +343,6 @@ export function SheetMusicViewer({
         if (rules && "RenderChordSymbols" in rules) {
           rules.RenderChordSymbols = effectiveShowChords;
         }
-        const displayXml = prepareDisplayMusicXml(musicxml, effectiveShowChords);
         await osmd.load(displayXml);
         if (cancelled) return;
         osmd.Zoom = zoom;
@@ -333,14 +357,16 @@ export function SheetMusicViewer({
         syncCursorToSeconds(playheadSec, false);
       } catch (err) {
         if (!cancelled) {
+          console.warn("[SheetMusicViewer] Notation load failed:", err instanceof Error ? err.message : "unknown");
           setRenderError(err instanceof Error ? err.message : "Could not render MusicXML notation.");
+          setPayloadStatus("error");
         }
       } finally {
         if (!cancelled) setIsRendering(false);
       }
     };
 
-    renderScore();
+    void renderScore();
     return () => {
       cancelled = true;
       clearNoteheadHighlights();
@@ -433,10 +459,13 @@ export function SheetMusicViewer({
     }
   };
 
-  if (!musicxml) {
+  if (payloadStatus === "empty" && !musicxml?.trim()) {
     return (
-      <div className="flex h-64 items-center justify-center rounded-xl border border-[#27273A] bg-[#09090F] text-sm text-[#A1A1AA]">
-        Upload and transcribe audio to render sheet music notation.
+      <div
+        data-testid="sheet-music-empty"
+        className="flex h-64 items-center justify-center rounded-xl border border-[#27273A] bg-[#09090F] px-6 text-center text-sm text-[#A1A1AA]"
+      >
+        No sheet music XML available for this project. Click Re-Transcribe or Re-Process Score to generate notation.
       </div>
     );
   }

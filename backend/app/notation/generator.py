@@ -316,13 +316,16 @@ def clean_score_title(raw_title: str | None) -> str:
 
 
 def apply_scribasheet_musicxml_branding(xml_str: str, *, title: str | None = None) -> str:
-    """Replace default Music21 attribution with ScribaSheet and strip file extensions from titles."""
+    """Replace default Music21 attribution with ScribaSheet, strip title extensions, and preserve XML declaration."""
     import xml.etree.ElementTree as ET
 
-    if not xml_str or "<score-" not in xml_str:
+    if not xml_str:
+        return xml_str
+    cleaned_input = xml_str.lstrip("\ufeff").strip()
+    if "<score-partwise" not in cleaned_input and "<score-timewise" not in cleaned_input:
         return xml_str
     try:
-        root = ET.fromstring(xml_str)
+        root = ET.fromstring(cleaned_input)
     except ET.ParseError:
         return xml_str
 
@@ -365,7 +368,10 @@ def apply_scribasheet_musicxml_branding(xml_str: str, *, title: str | None = Non
         if (cw.text or "").strip().lower() == "music21":
             cw.text = "ScribaSheet"
 
-    return ET.tostring(root, encoding="unicode")
+    body = ET.tostring(root, encoding="unicode")
+    if not body.lstrip().startswith("<?xml"):
+        return f'<?xml version="1.0" encoding="UTF-8"?>\n{body}'
+    return body
 
 
 def _parse_key_to_music21(key_str: str) -> music21.key.Key:

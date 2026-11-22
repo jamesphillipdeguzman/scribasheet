@@ -406,11 +406,12 @@ def test_cached_musicxml_and_stale_satb_pdf_are_rebranded_on_read_and_export(cli
     )
     db_session.commit()
 
-    # GET /score returns sanitized MusicXML & clean title
+    # GET /score returns sanitized MusicXML starting with <?xml declaration & clean title
     score_res = client.get(f"/api/v1/projects/{project_id}/score", headers=headers)
     assert score_res.status_code == 200
     body = score_res.json()
     assert body["score_json"]["title"] == "Go Tell It On The Mountain"
+    assert body["musicxml"].lstrip().startswith("<?xml")
     out_root = ET.fromstring(body["musicxml"])
     assert out_root.findtext("./work/work-title") == "Go Tell It On The Mountain"
     assert out_root.findtext("./identification/creator[@type='composer']") == "ScribaSheet"

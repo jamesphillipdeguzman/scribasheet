@@ -49,8 +49,28 @@ def get_project_score(
     clean_title = clean_score_title(project.title)
     musicxml_str = None
     if score.musicxml_path and storage_service.exists(score.musicxml_path):
-        raw_xml = storage_service.read_bytes(score.musicxml_path).decode("utf-8")
-        musicxml_str = apply_scribasheet_musicxml_branding(raw_xml, title=clean_title)
+        raw_bytes = storage_service.read_bytes(score.musicxml_path)
+        if score.musicxml_path.lower().endswith(".mxl") or raw_bytes[:2] == b"PK":
+            import io
+            import zipfile
+
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as zf:
+                    xml_name = next(
+                        (
+                            n for n in zf.namelist()
+                            if n.lower().endswith((".xml", ".musicxml")) and "meta-inf" not in n.lower()
+                        ),
+                        None,
+                    )
+                    if xml_name:
+                        raw_xml = zf.read(xml_name).decode("utf-8-sig", errors="replace")
+                        musicxml_str = apply_scribasheet_musicxml_branding(raw_xml, title=clean_title)
+            except Exception:
+                musicxml_str = None
+        else:
+            raw_xml = raw_bytes.decode("utf-8-sig", errors="replace")
+            musicxml_str = apply_scribasheet_musicxml_branding(raw_xml, title=clean_title)
 
     score_json_out = dict(score.score_json or {})
     if "title" in score_json_out:

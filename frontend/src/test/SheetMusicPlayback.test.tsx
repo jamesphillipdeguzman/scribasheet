@@ -13,7 +13,7 @@ const { mockCursorEl, mockSvgGroup, mockOsmdInstance } = vi.hoisted(() => {
   svgGroup.appendChild(pathEl);
 
   const inst = {
-    load: async () => undefined,
+    load: async (_xml?: string) => undefined,
     render: () => undefined,
     Dispose: () => undefined,
     Zoom: 1,
@@ -67,6 +67,7 @@ import {
   prepareDisplayMusicXml,
   SheetMusicViewer,
 } from "@/features/editor/SheetMusicViewer";
+import { normalizeScorePayload } from "@/features/editor/musicXmlNormalization";
 import type { ScoreNote, ScoreTrack } from "@/types/api";
 
 const sampleXml = `<?xml version="1.0" encoding="utf-8"?>
@@ -220,5 +221,77 @@ describe("Synchronized Sheet Music Playback View & Timeline", () => {
       />,
     );
     expect(pathEl.getAttribute("fill")).toBe("#000000");
+  });
+
+  it("normalizes missing XML declarations, BOM/whitespace, score-timewise, URLs, compressed MXL, and legacy/empty payloads safely", async () => {
+    // 1. Valid MusicXML without <?xml declaration + leading BOM & whitespace
+    const noDecl = `\uFEFF   <score-partwise version="3.1"><work><work-title>Song.Pdf</work-title></work><identification><creator type="composer">Music21</creator><creator type="lyricist">J. Doe</creator></identification><part-list><score-part id="P1"><part-name>P1</part-name></score-part></part-list><part id="P1"><measure number="1"><note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric><text>Grace</text></lyric></note></measure></part></score-partwise>`;
+    const normNoDecl = normalizeScorePayload(noDecl, true);
+    expect(normNoDecl.kind).toBe("xml");
+    if (normNoDecl.kind === "xml") {
+      expect(normNoDecl.xml.startsWith("<?xml")).toBe(true);
+      expect(normNoDecl.xml).toContain("<work-title>Song</work-title>");
+      expect(normNoDecl.xml).toContain("ScribaSheet");
+      expect(normNoDecl.xml).toContain("J. Doe");
+      expect(normNoDecl.xml).toContain("<text>Grace</text>");
+      expect(normNoDecl.xml).not.toContain(">Music21<");
+    }
+
+    // 2. Existing XML declaration is preserved without duplication
+    const withDecl = normalizeScorePayload(sampleXml, true);
+    expect(withDecl.kind).toBe("xml");
+    if (withDecl.kind === "xml") {
+      expect(withDecl.xml.match(/<\?xml\b/g)?.length).toBe(1);
+    }
+
+    // 3. Valid score-timewise document
+    const timewise = `<score-timewise version="3.1"><part-list><score-part id="P1"><part-name>P1</part-name></score-part></part-list><measure number="1"><part id="P1"/></measure></score-timewise>`;
+    const normTimewise = normalizeScorePayload(timewise, true);
+    expect(normTimewise.kind).toBe("xml");
+    if (normTimewise.kind === "xml") {
+      expect(normTimewise.xml.startsWith("<?xml")).toBe(true);
+    }
+
+    // 4. Compressed MXL binary, JSON legacy, non-XML, and empty/null
+    expect(normalizeScorePayload("PK\x03\x04binary-mxl").kind).toBe("compressed_mxl");
+    expect(normalizeScorePayload('{"notes": []}').kind).toBe("invalid");
+    expect(normalizeScorePayload("not xml at all").kind).toBe("invalid");
+    expect(normalizeScorePayload("").kind).toBe("empty");
+    expect(normalizeScorePayload(null).kind).toBe("empty");
+
+    // 5. Empty state renders clean user message
+    const { rerender } = render(<SheetMusicViewer musicxml={null} />);
+    expect(screen.getByTestId("sheet-music-empty")).toHaveTextContent(
+      /No sheet music XML available for this project/i,
+    );
+
+    // 6. Invalid JSON payload shows error without calling osmd.load
+    const loadSpy = vi.spyOn(mockOsmdInstance, "load");
+    rerender(<SheetMusicViewer musicxml='{"legacy": true}' />);
+    expect(await screen.findByText(/Unsupported legacy JSON score payload/i)).toBeInTheDocument();
+    expect(loadSpy).not.toHaveBeenCalled();
+
+    // 7. URL-based score payload fetches and normalizes XML; failed URL shows error
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "application/xml" }),
+      text: async () => noDecl,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    rerender(<SheetMusicViewer musicxml="https://example.com/score.musicxml" />);
+    await screen.findByTestId("sheet-music-playhead");
+    expect(fetchMock).toHaveBeenCalledWith("https://example.com/score.musicxml", expect.any(Object));
+    expect(loadSpy).toHaveBeenCalled();
+    const loadedArg = loadSpy.mock.calls[0]?.[0] as string;
+    expect(loadedArg.startsWith("<?xml")).toBe(true);
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      headers: new Headers(),
+      text: async () => "Not Found",
+    });
+    rerender(<SheetMusicViewer musicxml="https://example.com/missing.musicxml" />);
+    expect(await screen.findByText(/Failed to retrieve sheet music \(404\)/i)).toBeInTheDocument();
   });
 });
