@@ -68,8 +68,17 @@ export class MidiSynthesizer {
   private isPlaying = false;
   private startPerfMs = 0;
   private startOffsetSec = 0;
+  private currentPlaybackRate = 1;
   private scheduledNotes = new Set<string>();
   private lastBeatTick = -1;
+
+  public getPlaybackClock(): { isPlaying: boolean; currentSec: number } {
+    if (!this.isPlaying) {
+      return { isPlaying: false, currentSec: this.startOffsetSec };
+    }
+    const elapsed = ((performance.now() - this.startPerfMs) / 1000) * this.currentPlaybackRate;
+    return { isPlaying: true, currentSec: this.startOffsetSec + elapsed };
+  }
 
   private setupOutputBus(ctx: AudioContext) {
     if (this.dryGain) return;
@@ -427,6 +436,7 @@ export class MidiSynthesizer {
     this.isPlaying = true;
     this.startPerfMs = performance.now();
     this.startOffsetSec = options.fromSec;
+    this.currentPlaybackRate = options.playbackRate || 1;
     this.scheduledNotes.clear();
     this.lastBeatTick = -1;
 

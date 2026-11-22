@@ -10,6 +10,10 @@ interface SATBMixerPanelProps {
   projectTitle: string;
   scoreData: ScoreData;
   onScoreUpdated?: (score: ScoreData, version: number, musicxml: string | null) => void;
+  soloVoice?: string | null;
+  onSoloVoiceChange?: (voice: string | null) => void;
+  mutedVoices?: Record<string, boolean>;
+  onMutedVoicesChange?: (muted: Record<string, boolean>) => void;
 }
 
 const SATB_VOICES = ["Soprano", "Alto", "Tenor", "Bass"] as const;
@@ -86,9 +90,24 @@ export function SATBMixerPanel({
   projectTitle,
   scoreData,
   onScoreUpdated,
+  soloVoice: controlledSoloVoice,
+  onSoloVoiceChange,
+  mutedVoices: controlledMutedVoices,
+  onMutedVoicesChange,
 }: SATBMixerPanelProps) {
-  const [soloVoice, setSoloVoice] = useState<string | null>(null);
-  const [mutedVoices, setMutedVoices] = useState<Record<string, boolean>>({});
+  const [internalSoloVoice, setInternalSoloVoice] = useState<string | null>(null);
+  const [internalMutedVoices, setInternalMutedVoices] = useState<Record<string, boolean>>({});
+  const soloVoice = controlledSoloVoice !== undefined ? controlledSoloVoice : internalSoloVoice;
+  const mutedVoices = controlledMutedVoices !== undefined ? controlledMutedVoices : internalMutedVoices;
+  const setSoloVoice = (next: string | null) => {
+    setInternalSoloVoice(next);
+    onSoloVoiceChange?.(next);
+  };
+  const setMutedVoices = (updater: (prev: Record<string, boolean>) => Record<string, boolean>) => {
+    const next = updater(mutedVoices);
+    setInternalMutedVoices(next);
+    onMutedVoicesChange?.(next);
+  };
   const [volumes, setVolumes] = useState<Record<string, number>>({
     soprano: 1.0,
     alto: 1.0,

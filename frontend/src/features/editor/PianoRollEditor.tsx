@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { midiSynth } from "@/features/editor/midiSynth";
+import { PracticeCascade } from "@/features/editor/PracticeCascade";
 import {
   type RecordedRawNote,
   type SnapGridMode,
@@ -41,6 +42,14 @@ interface PianoRollEditorProps {
   onSelectNote: (id: string | null) => void;
   onChangeNotes: (notes: ScoreNote[]) => void;
   onPlayheadChange?: (sec: number) => void;
+  isPlaying?: boolean;
+  onTogglePlay?: () => void;
+  onStopPlay?: () => void;
+  playbackRate?: number;
+  onPlaybackRateChange?: (rate: number) => void;
+  satbSoloVoice?: string | null;
+  satbMutedVoices?: Record<string, boolean>;
+  onSatbSoloChange?: (voice: string | null) => void;
 }
 
 const MIN_PITCH = 36; // C2
@@ -82,7 +91,17 @@ export function PianoRollEditor({
   onSelectNote,
   onChangeNotes,
   onPlayheadChange,
+  isPlaying = false,
+  onTogglePlay,
+  onStopPlay,
+  playbackRate = 1.0,
+  onPlaybackRateChange,
+  satbSoloVoice = null,
+  satbMutedVoices = {},
+  onSatbSoloChange,
 }: PianoRollEditorProps) {
+  const [viewMode, setViewMode] = useState<"grid" | "cascade">("grid");
+  const [autoSwitchToCascade, setAutoSwitchToCascade] = useState(false);
   const [pxPerSec, setPxPerSec] = useState(140);
   const [snapMode, setSnapMode] = useState<SnapGridMode>("1/16");
   const [selectedNoteIds, setSelectedNoteIds] = useState<Set<string>>(() =>
@@ -116,6 +135,8 @@ export function PianoRollEditor({
   const [recordElapsedSec, setRecordElapsedSec] = useState(0);
 
   const gridRef = useRef<HTMLDivElement>(null);
+  const keyboardBodyRef = useRef<HTMLDivElement>(null);
+  const prevPlayingRef = useRef(isPlaying);
   const notesRef = useRef(notes);
   notesRef.current = notes;
   const selectedIdsRef = useRef(selectedNoteIds);
@@ -136,6 +157,14 @@ export function PianoRollEditor({
   const recordTimerRef = useRef<number | null>(null);
   const countInTimersRef = useRef<number[]>([]);
   const lastMetroBeatRef = useRef<number>(-1);
+
+  // Optional auto-switch to Practice Cascade when playback starts
+  useEffect(() => {
+    if (autoSwitchToCascade && isPlaying && !prevPlayingRef.current) {
+      setViewMode("cascade");
+    }
+    prevPlayingRef.current = isPlaying;
+  }, [autoSwitchToCascade, isPlaying]);
 
   // Keep selectedNoteIds synchronized with external selectedNoteId prop
   useEffect(() => {
@@ -470,32 +499,78 @@ export function PianoRollEditor({
       {/* Main Piano Roll Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="secondary" onClick={addNoteAtPlayhead}>
-            <Plus className="h-3.5 w-3.5" />
-            Add Note
-          </Button>
-          <Button
-            size="sm"
-            variant="danger"
-            disabled={selectedCount === 0}
-            onClick={deleteSelected}
+          {/* Segmented View Selector */}
+          <div
+            role="group"
+            aria-label="Piano Roll View Mode"
+            className="inline-flex rounded-lg border border-[#27273A] bg-[#09090F] p-0.5"
           >
-            <Trash2 className="h-3.5 w-3.5" />
-            Delete
-          </Button>
-          <label className="inline-flex items-center gap-1.5 text-xs text-[#A1A1AA] ml-2">
-            <span>Snap:</span>
-            <select
-              aria-label="Snap quantization"
-              value={snapMode}
-              onChange={(e) => setSnapMode(e.target.value as SnapGridMode)}
-              className="rounded border border-[#27273A] bg-[#181825] px-1.5 py-0.5 text-xs text-[#F5F3FF]"
+            <button
+              type="button"
+              aria-pressed={viewMode === "grid"}
+              onClick={() => setViewMode("grid")}
+              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                viewMode === "grid"
+                  ? "bg-[#8B5CF6] text-[#F5F3FF]"
+                  : "text-[#A1A1AA] hover:text-[#F5F3FF]"
+              }`}
             >
-              <option value="1/16">1/16</option>
-              <option value="1/8">1/8</option>
-              <option value="off">Off</option>
-            </select>
+              Grid Editor
+            </button>
+            <button
+              type="button"
+              aria-pressed={viewMode === "cascade"}
+              onClick={() => setViewMode("cascade")}
+              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                viewMode === "cascade"
+                  ? "bg-[#8B5CF6] text-[#F5F3FF]"
+                  : "text-[#A1A1AA] hover:text-[#F5F3FF]"
+              }`}
+            >
+              Practice Cascade
+            </button>
+          </div>
+
+          <label className="inline-flex items-center gap-1.5 text-[11px] text-[#A1A1AA] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoSwitchToCascade}
+              onChange={(e) => setAutoSwitchToCascade(e.target.checked)}
+              className="accent-[#8B5CF6]"
+            />
+            Auto-switch to Practice Cascade on Play
           </label>
+
+          {viewMode === "grid" && (
+            <>
+              <Button size="sm" variant="secondary" onClick={addNoteAtPlayhead}>
+                <Plus className="h-3.5 w-3.5" />
+                Add Note
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={selectedCount === 0}
+                onClick={deleteSelected}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete
+              </Button>
+              <label className="inline-flex items-center gap-1.5 text-xs text-[#A1A1AA] ml-1">
+                <span>Snap:</span>
+                <select
+                  aria-label="Snap quantization"
+                  value={snapMode}
+                  onChange={(e) => setSnapMode(e.target.value as SnapGridMode)}
+                  className="rounded border border-[#27273A] bg-[#181825] px-1.5 py-0.5 text-xs text-[#F5F3FF]"
+                >
+                  <option value="1/16">1/16</option>
+                  <option value="1/8">1/8</option>
+                  <option value="off">Off</option>
+                </select>
+              </label>
+            </>
+          )}
         </div>
 
         {selectedNote && (
@@ -528,33 +603,36 @@ export function PianoRollEditor({
           </div>
         )}
 
-        <div className="flex items-center gap-1">
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => setPxPerSec((p) => Math.max(60, p - 30))}
-            aria-label="Zoom out piano roll"
-          >
-            <ZoomOut className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => setPxPerSec((p) => Math.min(320, p + 30))}
-            aria-label="Zoom in piano roll"
-          >
-            <ZoomIn className="h-3.5 w-3.5" />
-          </Button>
-        </div>
+        {viewMode === "grid" && (
+          <div className="flex items-center gap-1">
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setPxPerSec((p) => Math.max(60, p - 30))}
+              aria-label="Zoom out piano roll"
+            >
+              <ZoomOut className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setPxPerSec((p) => Math.min(320, p + 30))}
+              aria-label="Zoom in piano roll"
+            >
+              <ZoomIn className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        )}
       </div>
 
-      {/* Piano Roll Canvas */}
-      <div
-        className="relative flex w-full max-w-full max-h-[340px] overflow-auto rounded-xl border border-[#27273A] bg-[#09090F] select-none touch-pan-x touch-pan-y"
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-      >
+      {viewMode === "grid" ? (
+        /* Piano Roll Grid Canvas */
+        <div
+          className="relative flex w-full max-w-full max-h-[340px] overflow-auto rounded-xl border border-[#27273A] bg-[#09090F] select-none touch-pan-x touch-pan-y"
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+        >
         {/* Pitch Keys Column */}
         <div className="sticky left-0 z-20 w-12 shrink-0 border-r border-[#27273A] bg-[#11111B]">
           {pitchRows.map((p) => {
@@ -691,6 +769,29 @@ export function PianoRollEditor({
           />
         </div>
       </div>
+      ) : (
+        <PracticeCascade
+          notes={notes}
+          tracks={tracks}
+          durationSeconds={durationSeconds}
+          tempoBpm={tempoBpm}
+          timeSignature={timeSignature}
+          playheadSec={playheadSec}
+          isPlaying={isPlaying}
+          activeMidiPitches={activeMidiPitches}
+          minPitch={21}
+          maxPitch={108}
+          keyboardBodyRef={keyboardBodyRef}
+          satbSoloVoice={satbSoloVoice}
+          satbMutedVoices={satbMutedVoices}
+          onSatbSoloChange={onSatbSoloChange}
+          onTogglePlay={onTogglePlay}
+          onStop={onStopPlay}
+          onPlayheadChange={onPlayheadChange}
+          playbackRate={playbackRate}
+          onPlaybackRateChange={onPlaybackRateChange}
+        />
+      )}
 
       {/* Integrated MIDI & Virtual Keyboard Toolbar */}
       <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-2.5 space-y-2">
@@ -879,6 +980,7 @@ export function PianoRollEditor({
           activePlaybackNotes={activePlaybackNotes}
           activeMidiPitches={activeMidiPitches}
           rePitchArmed={rePitchArmed}
+          keyboardBodyRef={keyboardBodyRef}
           onKeyDown={handlePitchNoteOn}
           onKeyUp={handlePitchNoteOff}
         />

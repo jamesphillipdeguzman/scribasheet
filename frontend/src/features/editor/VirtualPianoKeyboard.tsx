@@ -12,6 +12,7 @@ interface VirtualPianoKeyboardProps {
   activePlaybackNotes: PlaybackActivePitch[];
   activeMidiPitches: Set<number>;
   rePitchArmed?: boolean;
+  keyboardBodyRef?: React.RefObject<HTMLDivElement>;
   onKeyDown: (pitchMidi: number, velocity?: number) => void;
   onKeyUp: (pitchMidi: number) => void;
 }
@@ -24,6 +25,7 @@ export function VirtualPianoKeyboard({
   activePlaybackNotes,
   activeMidiPitches,
   rePitchArmed = false,
+  keyboardBodyRef,
   onKeyDown,
   onKeyUp,
 }: VirtualPianoKeyboardProps) {
@@ -85,6 +87,7 @@ export function VirtualPianoKeyboard({
       className="w-full overflow-x-auto rounded-lg border border-[#27273A] bg-[#09090F] p-1.5 select-none"
     >
       <div
+        ref={keyboardBodyRef}
         className="relative h-24 min-w-[780px] w-full"
         role="group"
         aria-label="Virtual Piano Keyboard"

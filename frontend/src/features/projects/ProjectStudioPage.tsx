@@ -46,6 +46,12 @@ export function ProjectStudioPage() {
   const [activeTab, setActiveTab] = useState<StudioTab>("notation");
   const [showPartMixerOverride, setShowPartMixerOverride] = useState<boolean | null>(null);
   const [playheadSec, setPlayheadSec] = useState(0);
+  const [isPlaybackActive, setIsPlaybackActive] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1.0);
+  const [togglePlaySignal, setTogglePlaySignal] = useState(0);
+  const [stopPlaySignal, setStopPlaySignal] = useState(0);
+  const [satbSoloVoice, setSatbSoloVoice] = useState<string | null>(null);
+  const [satbMutedVoices, setSatbMutedVoices] = useState<Record<string, boolean>>({});
   const [seekRequest, setSeekRequest] = useState<{ sec: number; autoplay?: boolean; nonce: number } | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
 
@@ -696,6 +702,11 @@ export function ProjectStudioPage() {
               playheadSec={playheadSec}
               onPlayheadChange={setPlayheadSec}
               seekRequest={seekRequest}
+              onPlayingChange={setIsPlaybackActive}
+              externalToggleSignal={togglePlaySignal}
+              externalStopSignal={stopPlaySignal}
+              externalPlaybackRate={playbackRate}
+              onPlaybackRateChange={setPlaybackRate}
             />
 
             {/* Workspace Tabs */}
@@ -759,6 +770,10 @@ export function ProjectStudioPage() {
                   projectId={project.id}
                   projectTitle={project.title}
                   scoreData={scoreData}
+                  soloVoice={satbSoloVoice}
+                  onSoloVoiceChange={setSatbSoloVoice}
+                  mutedVoices={satbMutedVoices}
+                  onMutedVoicesChange={setSatbMutedVoices}
                   onScoreUpdated={(updatedScore, updatedVersion, updatedXml) => {
                     setScoreData(updatedScore);
                     setScoreVersion(updatedVersion);
@@ -843,6 +858,14 @@ export function ProjectStudioPage() {
                     onSelectNote={setSelectedNoteId}
                     onChangeNotes={handleNotesChange}
                     onPlayheadChange={setPlayheadSec}
+                    isPlaying={isPlaybackActive}
+                    onTogglePlay={() => setTogglePlaySignal((n) => n + 1)}
+                    onStopPlay={() => setStopPlaySignal((n) => n + 1)}
+                    playbackRate={playbackRate}
+                    onPlaybackRateChange={setPlaybackRate}
+                    satbSoloVoice={satbSoloVoice}
+                    satbMutedVoices={satbMutedVoices}
+                    onSatbSoloChange={setSatbSoloVoice}
                   />
                 ) : (
                   <div className="py-12 text-center text-sm text-[#A1A1AA]">

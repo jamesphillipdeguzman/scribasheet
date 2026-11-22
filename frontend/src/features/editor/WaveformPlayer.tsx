@@ -16,6 +16,11 @@ interface WaveformPlayerProps {
   playheadSec: number;
   onPlayheadChange: (sec: number) => void;
   seekRequest?: { sec: number; autoplay?: boolean; nonce: number } | null;
+  onPlayingChange?: (playing: boolean) => void;
+  externalToggleSignal?: number;
+  externalStopSignal?: number;
+  externalPlaybackRate?: number;
+  onPlaybackRateChange?: (rate: number) => void;
 }
 
 export function WaveformPlayer({
@@ -27,6 +32,11 @@ export function WaveformPlayer({
   playheadSec,
   onPlayheadChange,
   seekRequest = null,
+  onPlayingChange,
+  externalToggleSignal = 0,
+  externalStopSignal = 0,
+  externalPlaybackRate,
+  onPlaybackRateChange,
 }: WaveformPlayerProps) {
   const waveContainerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
@@ -180,6 +190,36 @@ export function WaveformPlayer({
     if (wsRef.current) wsRef.current.seekTo(0);
     onPlayheadChange(0);
   };
+
+  useEffect(() => {
+    onPlayingChange?.(isPlaying);
+  }, [isPlaying, onPlayingChange]);
+
+  useEffect(() => {
+    if (externalPlaybackRate !== undefined && externalPlaybackRate !== playbackRate) {
+      setPlaybackRate(externalPlaybackRate);
+    }
+  }, [externalPlaybackRate]);
+
+  useEffect(() => {
+    onPlaybackRateChange?.(playbackRate);
+  }, [playbackRate, onPlaybackRateChange]);
+
+  const prevToggleRef = useRef(externalToggleSignal);
+  useEffect(() => {
+    if (externalToggleSignal > 0 && externalToggleSignal !== prevToggleRef.current) {
+      prevToggleRef.current = externalToggleSignal;
+      togglePlay();
+    }
+  }, [externalToggleSignal]);
+
+  const prevStopRef = useRef(externalStopSignal);
+  useEffect(() => {
+    if (externalStopSignal > 0 && externalStopSignal !== prevStopRef.current) {
+      prevStopRef.current = externalStopSignal;
+      handleStopReset();
+    }
+  }, [externalStopSignal]);
 
   return (
     <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-3 sm:p-4 space-y-3 w-full min-w-0 overflow-hidden">
