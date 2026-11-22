@@ -272,3 +272,56 @@ def test_satb_audio_defaults_to_acoustic_grand_piano(monkeypatch) -> None:
     assert set(outputs.keys()) == {"soprano", "alto", "tenor", "bass", "combined"}
     for key, wav_bytes in outputs.items():
         assert wav_bytes[:4] == b"RIFF", f"{key} did not render valid WAV"
+
+
+def test_scribasheet_attribution_and_clean_titles(tmp_path: Path) -> None:
+    from app.notation.generator import apply_scribasheet_musicxml_branding, clean_score_title, score_data_to_musicxml
+    from app.schemas.score import ScoreData, ScoreNote, ScoreTrack
+
+    assert clean_score_title("go_tell_it_on_the_mountain.pdf") == "Go Tell It On The Mountain"
+    assert clean_score_title("Choir Hymn.Pdf") == "Choir Hymn"
+    assert clean_score_title("Hymn_Arrangement.mxl") == "Hymn Arrangement"
+    assert clean_score_title("Psalm 23.musicxml") == "Psalm 23"
+
+    # Replaces Music21 composer/software attribution while preserving real composer & unrelated text
+    raw_music21_xml = """<?xml version="1.0" encoding="utf-8"?>
+<score-partwise version="3.1">
+  <work><work-title>My Song.Pdf</work-title></work>
+  <movement-title>My Song.mxl</movement-title>
+  <identification>
+    <creator type="composer">Music21</creator>
+    <creator type="lyricist">Traditional</creator>
+    <encoding><software>Music21 v.10.5.2</software></encoding>
+  </identification>
+  <credit><credit-words>Music21</credit-words></credit>
+  <credit><credit-words>Sung in harmony</credit-words></credit>
+  <part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list>
+  <part id="P1"><measure number="1"><note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>whole</type></note></measure></part>
+</score-partwise>"""
+    branded = apply_scribasheet_musicxml_branding(raw_music21_xml)
+    root = ET.fromstring(branded)
+    assert root.findtext("./work/work-title") == "My Song"
+    assert root.findtext("./movement-title") == "My Song"
+    creators = {el.attrib.get("type"): el.text for el in root.findall("./identification/creator")}
+    assert creators["composer"] == "ScribaSheet"
+    assert creators["lyricist"] == "Traditional"
+    assert root.findtext("./identification/encoding/software") == "ScribaSheet"
+    credit_texts = [el.text for el in root.findall("./credit/credit-words")]
+    assert "ScribaSheet" in credit_texts
+    assert "Sung in harmony" in credit_texts
+    assert "Music21" not in credit_texts
+
+    # score_data_to_musicxml sets ScribaSheet attribution
+    score = ScoreData(
+        title="Amazing Grace.pdf",
+        tempo_bpm=100,
+        time_signature="4/4",
+        key_signature="C major",
+        duration_seconds=1.0,
+        tracks=[ScoreTrack(index=0, name="Soprano", instrument="piano", clef="treble", program=0)],
+        notes=[ScoreNote(id="n1", pitch_midi=72, onset_sec=0.0, offset_sec=0.6, velocity=80, track_index=0)],
+    )
+    gen_xml = score_data_to_musicxml(score, include_chords=False, include_lyrics=False)
+    gen_root = ET.fromstring(gen_xml)
+    assert gen_root.findtext("./work/work-title") == "Amazing Grace"
+    assert gen_root.findtext("./identification/creator[@type='composer']") == "ScribaSheet"

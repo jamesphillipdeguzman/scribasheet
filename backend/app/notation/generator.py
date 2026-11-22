@@ -287,9 +287,22 @@ def clean_score_title(raw_title: str | None) -> str:
     text = (raw_title or "").strip()
     if not text:
         return "ScribaSheet Transcription"
-    # If it looks like a filename (has extension, underscores, or technical tags), clean it
-    if "." in text and text.rsplit(".", 1)[-1].lower() in {"wav", "mp3", "flac", "m4a", "aac", "ogg", "mid", "midi", "musicxml", "xml"}:
-        text = text.rsplit(".", 1)[0]
+    # Strip known media/score file extensions (case-insensitive)
+    if "." in text and text.rsplit(".", 1)[-1].lower() in {
+        "wav",
+        "mp3",
+        "flac",
+        "m4a",
+        "aac",
+        "ogg",
+        "mid",
+        "midi",
+        "musicxml",
+        "xml",
+        "pdf",
+        "mxl",
+    }:
+        text = text.rsplit(".", 1)[0].strip()
     looks_like_filename = ("_" in text or "-" in text) and " " not in text
     if looks_like_filename:
         prev = None
@@ -299,7 +312,60 @@ def clean_score_title(raw_title: str | None) -> str:
         text = re.sub(r"[_-]+", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
         return text.title() if text else "ScribaSheet Transcription"
-    return text
+    return text or "ScribaSheet Transcription"
+
+
+def apply_scribasheet_musicxml_branding(xml_str: str, *, title: str | None = None) -> str:
+    """Replace default Music21 attribution with ScribaSheet and strip file extensions from titles."""
+    import xml.etree.ElementTree as ET
+
+    if not xml_str or "<score-" not in xml_str:
+        return xml_str
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return xml_str
+
+    cleaned_title = clean_score_title(title) if title is not None else None
+
+    work_title_el = root.find("./work/work-title")
+    if work_title_el is not None:
+        raw_wt = (work_title_el.text or "").strip()
+        work_title_el.text = cleaned_title if cleaned_title is not None else clean_score_title(raw_wt)
+
+    mov_title_el = root.find("./movement-title")
+    if mov_title_el is not None:
+        raw_mt = (mov_title_el.text or "").strip()
+        mov_title_el.text = cleaned_title if cleaned_title is not None else clean_score_title(raw_mt)
+
+    ident = root.find("identification")
+    if ident is None:
+        ident = ET.SubElement(root, "identification")
+
+    has_composer = False
+    for creator in ident.findall("creator"):
+        c_type = (creator.attrib.get("type") or "").strip().lower()
+        c_text = (creator.text or "").strip()
+        if c_type == "composer":
+            has_composer = True
+        if c_text.lower().startswith("music21"):
+            creator.text = "ScribaSheet"
+
+    if not has_composer:
+        comp_el = ET.SubElement(ident, "creator", {"type": "composer"})
+        comp_el.text = "ScribaSheet"
+
+    encoding = ident.find("encoding")
+    if encoding is not None:
+        for sw in encoding.findall("software"):
+            if (sw.text or "").strip().lower().startswith("music21"):
+                sw.text = "ScribaSheet"
+
+    for cw in root.findall("./credit/credit-words"):
+        if (cw.text or "").strip().lower() == "music21":
+            cw.text = "ScribaSheet"
+
+    return ET.tostring(root, encoding="unicode")
 
 
 def _parse_key_to_music21(key_str: str) -> music21.key.Key:
@@ -934,6 +1000,7 @@ def score_data_to_musicxml(
     clean_title = clean_score_title(score.title)
     m21_score.metadata.title = clean_title
     m21_score.metadata.movementName = clean_title
+    m21_score.metadata.composer = "ScribaSheet"
 
     key_str = score.key_signature or "C major"
     time_sig = score.time_signature or "4/4"
@@ -1020,7 +1087,7 @@ def score_data_to_musicxml(
                 if ord_idx in extend_ordinals and lyr_el.find("extend") is None:
                     ET.SubElement(lyr_el, "extend")
         xml_str = ET.tostring(root, encoding="unicode")
-    return xml_str
+    return apply_scribasheet_musicxml_branding(xml_str, title=clean_title)
 
 
 def score_data_to_midi_bytes(score: ScoreData) -> bytes:
@@ -1172,7 +1239,7 @@ def render_score_pdf(score: ScoreData, *, include_chords: bool = True) -> bytes:
 
     def draw_header(page_num: int) -> float:
         c.setFont("Helvetica-Bold", 17)
-        c.drawCentredString(width / 2, height - 46, score.title or "ScribaSheet Transcription")
+        c.drawCentredString(width / 2, height - 46, clean_score_title(score.title))
         c.setFont("Helvetica", 9.5)
         meta = (
             f"Tempo: {score.tempo_bpm:.0f} BPM  |  Time: {score.time_signature}  |  "

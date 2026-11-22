@@ -865,6 +865,15 @@ export function ProjectStudioPage() {
                     musicxml={musicxml}
                     showChordSymbols={showChordSymbols}
                     onToggleChordSymbols={handleToggleChordSymbols}
+                    playheadSec={playheadSec}
+                    isPlaying={isPlaybackActive}
+                    tempoBpm={(scoreData?.tempo_bpm || 120) * playbackRate}
+                    tracks={scoreData?.tracks || []}
+                    satbSoloVoice={satbSoloVoice}
+                    satbMutedVoices={satbMutedVoices}
+                    onTogglePlay={() => setTogglePlaySignal((n) => n + 1)}
+                    onStopPlay={() => setStopPlaySignal((n) => n + 1)}
+                    onSeek={(sec) => setSeekRequest({ sec, autoplay: isPlaybackActive, nonce: Date.now() })}
                   />
                 ))}
 
@@ -895,6 +904,9 @@ export function ProjectStudioPage() {
                     onMetronomeSettingsChange={handleMetronomeSettingsChange}
                     activeBeat={activeMetronomeBeat}
                     onActiveBeatChange={setActiveMetronomeBeat}
+                    musicxml={musicxml}
+                    showChordSymbols={showChordSymbols}
+                    onToggleChordSymbols={handleToggleChordSymbols}
                   />
                 ) : (
                   <div className="py-12 text-center text-sm text-[#A1A1AA]">

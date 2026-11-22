@@ -924,11 +924,24 @@ def _build_separated_satb_musicxml(
 ) -> str:
     """Export cleanly labeled SATB MusicXML preserving measures, rests, ties, fermatas, and lyrics."""
     import music21
+    from app.notation.generator import apply_scribasheet_musicxml_branding, clean_score_title
 
     out_score = music21.stream.Score()
     out_score.metadata = music21.metadata.Metadata()
-    out_score.metadata.title = title
-    out_score.metadata.movementName = title
+    clean_title = clean_score_title(title)
+    out_score.metadata.title = clean_title
+    out_score.metadata.movementName = clean_title
+    src_meta = getattr(m21_score, "metadata", None)
+    src_composer = getattr(src_meta, "composer", None) if src_meta else None
+    if src_composer and str(src_composer).strip().lower() not in ("", "music21"):
+        out_score.metadata.composer = str(src_composer).strip()
+    else:
+        out_score.metadata.composer = "ScribaSheet"
+    if src_meta:
+        for attr in ("lyricist", "arranger"):
+            val = getattr(src_meta, attr, None)
+            if val:
+                setattr(out_score.metadata, attr, val)
 
     for a in assignments:
         _, _, _, _, _, _, part_obj = raw_streams[a.part_index]
@@ -940,7 +953,7 @@ def _build_separated_satb_musicxml(
         out_score.insert(0, p_copy)
 
     xml_bytes = music21.musicxml.m21ToXml.GeneralObjectExporter(out_score).parse()
-    return xml_bytes.decode("utf-8")
+    return apply_scribasheet_musicxml_branding(xml_bytes.decode("utf-8"), title=clean_title)
 
 
 def musicxml_to_satb_score_data(
@@ -1180,7 +1193,9 @@ def process_satb_pdf(
         raw_streams = _extract_part_streams(parsed_clean, satb_mode=satb_mode)
         out_xml = _build_separated_satb_musicxml(parsed_clean, assignments, raw_streams, title=title)
     else:
-        out_xml = cleaned_xml
+        from app.notation.generator import apply_scribasheet_musicxml_branding
+
+        out_xml = apply_scribasheet_musicxml_branding(cleaned_xml, title=title)
 
     return OMRRecognitionResult(
         musicxml=out_xml,

@@ -22,6 +22,7 @@ import {
 } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
 import { PracticeCascade } from "@/features/editor/PracticeCascade";
+import { SheetMusicViewer } from "@/features/editor/SheetMusicViewer";
 import {
   type RecordedRawNote,
   type SnapGridMode,
@@ -64,6 +65,9 @@ interface PianoRollEditorProps {
   onMetronomeSettingsChange?: (next: MetronomeSettings) => void;
   activeBeat?: number | null;
   onActiveBeatChange?: (beat: number | null) => void;
+  musicxml?: string | null;
+  showChordSymbols?: boolean;
+  onToggleChordSymbols?: (value: boolean) => void;
 }
 
 const MIN_PITCH = 36; // C2
@@ -119,8 +123,11 @@ export function PianoRollEditor({
   onMetronomeSettingsChange,
   activeBeat: controlledBeat,
   onActiveBeatChange,
+  musicxml = null,
+  showChordSymbols = true,
+  onToggleChordSymbols,
 }: PianoRollEditorProps) {
-  const [viewMode, setViewMode] = useState<"grid" | "cascade">("grid");
+  const [viewMode, setViewMode] = useState<"grid" | "cascade" | "sheet">("grid");
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [autoSwitchToCascade, setAutoSwitchToCascade] = useState(false);
   const [internalMetronome, setInternalMetronome] = useState<MetronomeSettings>(() =>
@@ -590,6 +597,18 @@ export function PianoRollEditor({
             >
               Practice Cascade
             </button>
+            <button
+              type="button"
+              aria-pressed={viewMode === "sheet"}
+              onClick={() => setViewMode("sheet")}
+              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                viewMode === "sheet"
+                  ? "bg-[#8B5CF6] text-[#F5F3FF]"
+                  : "text-[#A1A1AA] hover:text-[#F5F3FF]"
+              }`}
+            >
+              Sheet Music
+            </button>
           </div>
 
           <label className="inline-flex items-center gap-1.5 text-[11px] text-[#A1A1AA] cursor-pointer">
@@ -855,7 +874,7 @@ export function PianoRollEditor({
           />
         </div>
       </div>
-      ) : (
+      ) : viewMode === "cascade" ? (
         <PracticeCascade
           notes={notes}
           tracks={tracks}
@@ -879,6 +898,22 @@ export function PianoRollEditor({
           isFocusMode={isFocusMode}
           loop={loop}
           onToggleLoop={onToggleLoop}
+        />
+      ) : (
+        <SheetMusicViewer
+          musicxml={musicxml}
+          showChordSymbols={showChordSymbols}
+          onToggleChordSymbols={onToggleChordSymbols}
+          playheadSec={playheadSec}
+          isPlaying={isPlaying}
+          tempoBpm={tempoBpm * playbackRate}
+          tracks={tracks}
+          satbSoloVoice={satbSoloVoice}
+          satbMutedVoices={satbMutedVoices}
+          onTogglePlay={onTogglePlay}
+          onStopPlay={onStopPlay}
+          onSeek={onPlayheadChange}
+          isFocusMode={isFocusMode}
         />
       )}
 
