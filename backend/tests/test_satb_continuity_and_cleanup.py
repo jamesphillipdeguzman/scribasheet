@@ -423,3 +423,68 @@ def test_cached_musicxml_and_stale_satb_pdf_are_rebranded_on_read_and_export(cli
     assert pdf_dl.status_code == 200
     assert b"STALE_MUSIC21_PDF" not in pdf_dl.content
     assert pdf_dl.content.startswith(b"%PDF-")
+
+
+def test_omr_copyright_permission_filtering_preserves_legitimate_lyrics() -> None:
+    from app.notation.omr import _is_footer_or_metadata_text
+
+    # Copyright & permission footer phrases are filtered
+    assert _is_footer_or_metadata_text("For non-commercial personal use only") is True
+    assert _is_footer_or_metadata_text("All rights reserved. Making copies prohibited.") is True
+    assert _is_footer_or_metadata_text("May not be reproduced without permission") is True
+    assert _is_footer_or_metadata_text("commercial", default_y=-130.0) is True
+
+    # Legitimate single-word lyric in normal staff lyric zone is preserved
+    assert _is_footer_or_metadata_text("permission", default_y=-75.0) is False
+    assert _is_footer_or_metadata_text("mountain", default_y=-80.0) is False
+
+
+def test_put_score_persists_direct_musicxml_edits(client, db_session) -> None:
+    reg = client.post(
+        "/api/v1/auth/register",
+        json={"email": "xml_edit@example.com", "password": "Password123!", "display_name": "Editor"},
+    )
+    assert reg.status_code == 201
+    headers = {"Authorization": f"Bearer {reg.json()['access_token']}"}
+    proj = client.post(
+        "/api/v1/projects",
+        headers=headers,
+        json={"title": "Edited Hymn.Pdf", "instrument": "vocals", "transcription_mode": "satb_pdf"},
+    ).json()
+    project_id = proj["id"]
+
+    from app.models import ProjectScore
+
+    base_score = {
+        "title": "Edited Hymn",
+        "tempo_bpm": 100.0,
+        "time_signature": "4/4",
+        "key_signature": "C major",
+        "duration_seconds": 2.0,
+        "tracks": [{"index": 0, "name": "Soprano", "instrument": "piano", "clef": "treble", "program": 0, "muted": False}],
+        "notes": [{"id": "n1", "pitch_midi": 72, "onset_sec": 0.0, "offset_sec": 1.0, "velocity": 80, "track_index": 0}],
+        "chords": [],
+        "analysis": {"mode": "satb_pdf"},
+    }
+    db_session.add(ProjectScore(project_id=project_id, version=1, score_json=base_score))
+    db_session.commit()
+
+    edited_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <work><work-title>Edited Hymn.Pdf</work-title></work>
+  <identification><creator type="composer">Music21</creator></identification>
+  <part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list>
+  <part id="P1"><measure number="1"><note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><type>whole</type><lyric><text>Amen</text></lyric></note></measure></part>
+</score-partwise>"""
+
+    put_res = client.put(
+        f"/api/v1/projects/{project_id}/score",
+        headers=headers,
+        json={"expected_version": 1, "score_json": base_score, "musicxml": edited_xml},
+    )
+    assert put_res.status_code == 200
+    data = put_res.json()
+    assert data["version"] == 2
+    assert "<text>Amen</text>" in data["musicxml"]
+    assert "<work-title>Edited Hymn</work-title>" in data["musicxml"]
+    assert '<creator type="composer">ScribaSheet</creator>' in data["musicxml"]

@@ -1,19 +1,45 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
-import { Maximize2, Minimize2, Pause, Play, Square, ZoomIn, ZoomOut } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Maximize2,
+  Minimize2,
+  Pause,
+  Pencil,
+  Play,
+  Plus,
+  Square,
+  Trash2,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
 import { midiSynth } from "@/features/editor/midiSynth";
 import {
-  buildMusicXmlTimeline,
-  timeSecToWholeNotes,
-  wholeNotesToTimeSec,
-} from "@/features/editor/musicXmlTimeline";
+  addMeasureToAllParts,
+  convertXmlNoteToRest,
+  deleteMeasureFromAllParts,
+  type EditableNoteType,
+  setXmlNoteAccidental,
+  setXmlNoteDuration,
+  transposeXmlNote,
+  type XmlNoteTarget,
+} from "@/features/editor/musicXmlEditor";
 import {
   cleanDisplayScoreTitle,
   normalizeScorePayload,
   prepareDisplayMusicXml,
 } from "@/features/editor/musicXmlNormalization";
+import {
+  buildMusicXmlTimeline,
+  findCursorSnapshotIndex,
+  type OsmdCursorSnapshot,
+  timeSecToWholeNotes,
+  wholeNotesToTimeSec,
+} from "@/features/editor/musicXmlTimeline";
+import { midiToNoteName } from "@/lib/utils";
 import { getStoredTokens } from "@/services/api";
 import type { ScoreTrack } from "@/types/api";
 
@@ -54,6 +80,7 @@ interface SheetMusicViewerProps {
   onSeek?: (sec: number) => void;
   isFocusMode?: boolean;
   onToggleFocusMode?: () => void;
+  onMusicXmlChange?: (nextXml: string) => void;
 }
 
 export function SheetMusicViewer({
@@ -71,19 +98,26 @@ export function SheetMusicViewer({
   onSeek,
   isFocusMode = false,
   onToggleFocusMode,
+  onMusicXmlChange,
 }: SheetMusicViewerProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
   const highlightedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
+  const selectedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
+  const svgNoteTargetMapRef = useRef<WeakMap<Element, XmlNoteTarget>>(new WeakMap());
+  const cursorSnapshotsRef = useRef<OsmdCursorSnapshot[]>([]);
   const lastCursorWholeRef = useRef<number>(-1);
   const lastFollowedSystemRef = useRef<number>(-1);
   const manualScrollPauseUntilRef = useRef<number>(0);
   const programmaticScrollAtRef = useRef<number>(0);
+  const savedScrollRef = useRef<{ top: number; left: number } | null>(null);
 
   const [zoom, setZoom] = useState(0.9);
   const [localShowChords, setLocalShowChords] = useState(true);
   const [followCursor, setFollowCursor] = useState(true);
+  const [editMode, setEditMode] = useState(false);
+  const [selectedTarget, setSelectedTarget] = useState<XmlNoteTarget | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [resolvedXml, setResolvedXml] = useState<string | null>(null);
@@ -113,13 +147,18 @@ export function SheetMusicViewer({
 
   const clearNoteheadHighlights = () => {
     for (const item of highlightedSvgRef.current) {
-      if (item.origFill === null) {
-        item.el.removeAttribute("fill");
-      } else {
-        item.el.setAttribute("fill", item.origFill);
-      }
+      if (item.origFill === null) item.el.removeAttribute("fill");
+      else item.el.setAttribute("fill", item.origFill);
     }
     highlightedSvgRef.current = [];
+  };
+
+  const clearSelectedHighlight = () => {
+    for (const item of selectedSvgRef.current) {
+      if (item.origFill === null) item.el.removeAttribute("fill");
+      else item.el.setAttribute("fill", item.origFill);
+    }
+    selectedSvgRef.current = [];
   };
 
   const computePlayheadGeometry = (osmd: OpenSheetMusicDisplay): PlayheadRect => {
@@ -189,81 +228,171 @@ export function SheetMusicViewer({
     }
   };
 
-  const syncCursorToSeconds = (sec: number, allowAutoScroll: boolean) => {
-    const osmd = osmdRef.current;
-    if (!osmd || !osmd.cursor) return;
-    const cursor = osmd.cursor;
-    const targetWhole = timeSecToWholeNotes(timeline, sec, tempoBpm);
+  const syncCursorToSeconds = useCallback(
+    (sec: number, allowAutoScroll: boolean) => {
+      const osmd = osmdRef.current;
+      if (!osmd || !osmd.cursor) return;
+      const cursor = osmd.cursor;
 
-    if (Math.abs(targetWhole - lastCursorWholeRef.current) < 0.002 && sec > 0) {
-      return;
+      // Use O(log N) snapshot lookup when OSMD iterator timeline is populated
+      const snapshots = cursorSnapshotsRef.current;
+      let targetWhole = timeSecToWholeNotes(timeline, sec, tempoBpm);
+      if (snapshots.length > 1) {
+        const idx = findCursorSnapshotIndex(snapshots, sec);
+        if (idx >= 0) {
+          targetWhole = snapshots[idx].wholeNote;
+        }
+      }
+
+      if (Math.abs(targetWhole - lastCursorWholeRef.current) < 0.002 && sec > 0) {
+        return;
+      }
+
+      try {
+        if (!cursor.iterator) return;
+        cursor.show();
+        if (cursor.cursorElement) {
+          cursor.cursorElement.style.opacity = "0";
+          cursor.cursorElement.style.pointerEvents = "none";
+        }
+
+        const curReal = cursor.iterator.currentTimeStamp?.RealValue ?? 0;
+        if (sec <= 0.01 || targetWhole < curReal - 0.001) {
+          cursor.reset();
+          if (sec <= 0.01) {
+            lastFollowedSystemRef.current = -1;
+          }
+        }
+
+        let guard = 0;
+        while (
+          !cursor.iterator.EndReached &&
+          (cursor.iterator.currentTimeStamp?.RealValue ?? 0) < targetWhole - 0.004 &&
+          guard < 4000
+        ) {
+          cursor.next();
+          guard++;
+        }
+        cursor.update();
+        lastCursorWholeRef.current = cursor.iterator.currentTimeStamp?.RealValue ?? targetWhole;
+
+        // Highlight sounding noteheads with SATB colors respecting Solo/Mute
+        clearNoteheadHighlights();
+        const gNotes = typeof cursor.GNotesUnderCursor === "function" ? cursor.GNotesUnderCursor() : [];
+        for (const gn of gNotes) {
+          const svgEl =
+            typeof (gn as unknown as { getSVGGElement?: () => Element | null }).getSVGGElement === "function"
+              ? (gn as unknown as { getSVGGElement: () => Element | null }).getSVGGElement()
+              : null;
+          if (!svgEl) continue;
+
+          const staffIdx =
+            (gn as unknown as { sourceNote?: { ParentStaffEntry?: { ParentStaff?: { idInMusicSheet?: number } } } })
+              .sourceNote?.ParentStaffEntry?.ParentStaff?.idInMusicSheet ?? 0;
+          const track = tracks[staffIdx];
+          const role = resolveTrackVoiceRole(track);
+          const isMuted = role !== "other" ? Boolean(satbMutedVoices[role]) : Boolean(track?.muted);
+          if (isMuted) continue;
+          if (satbSoloVoice && role !== satbSoloVoice) continue;
+
+          const fillHex = SATB_SHEET_COLORS[role] || SATB_SHEET_COLORS.other;
+          const noteheadTargets = svgEl.querySelectorAll("path, ellipse");
+          const els = noteheadTargets.length > 0 ? Array.from(noteheadTargets) : [svgEl];
+          for (const el of els) {
+            highlightedSvgRef.current.push({ el, origFill: el.getAttribute("fill") });
+            el.setAttribute("fill", fillHex);
+          }
+        }
+
+        const geom = computePlayheadGeometry(osmd);
+        setPlayheadRect(geom);
+        if (allowAutoScroll) {
+          maybeAutoScroll(geom);
+        }
+      } catch {
+        // Ignore OSMD cursor boundary exceptions during re-render
+      }
+    },
+    [timeline, tempoBpm, tracks, satbMutedVoices, satbSoloVoice, followCursor, isPlaying],
+  );
+
+  // Build OSMD iterator timeline & SVG notehead -> XmlNoteTarget map after render
+  const indexRenderedScore = (osmd: OpenSheetMusicDisplay, activeTimeline: ReturnType<typeof buildMusicXmlTimeline>) => {
+    const snapshots: OsmdCursorSnapshot[] = [];
+    if (osmd.cursor?.iterator) {
+      try {
+        osmd.cursor.reset();
+        let prevReal = -1;
+        let step = 0;
+        while (!osmd.cursor.iterator.EndReached && step < 4000) {
+          const real = osmd.cursor.iterator.currentTimeStamp?.RealValue ?? 0;
+          if (step > 0 && real <= prevReal) break; // Guard against mocked/non-advancing iterator
+          snapshots.push({
+            wholeNote: real,
+            sec: wholeNotesToTimeSec(activeTimeline, real, tempoBpm),
+            stepIndex: step,
+          });
+          prevReal = real;
+          osmd.cursor.next();
+          step++;
+        }
+        osmd.cursor.reset();
+      } catch {
+        // Ignore iterator indexing errors
+      }
     }
+    cursorSnapshotsRef.current = snapshots;
 
+    // Map rendered SVG notehead elements to XmlNoteTarget for direct editing
+    const newMap = new WeakMap<Element, XmlNoteTarget>();
     try {
-      if (!cursor.iterator) return;
-      cursor.show();
-      // Hide OSMD's built-in green cursor while retaining its DOM coordinates for tracking
-      if (cursor.cursorElement) {
-        cursor.cursorElement.style.opacity = "0";
-        cursor.cursorElement.style.pointerEvents = "none";
-      }
-
-      const curReal = cursor.iterator.currentTimeStamp?.RealValue ?? 0;
-      if (sec <= 0.01 || targetWhole < curReal - 0.001) {
-        cursor.reset();
-        if (sec <= 0.01) {
-          lastFollowedSystemRef.current = -1;
+      const measureList = osmd.GraphicSheet?.MeasureList;
+      if (Array.isArray(measureList)) {
+        for (let mIdx = 0; mIdx < measureList.length; mIdx++) {
+          const row = measureList[mIdx];
+          if (!Array.isArray(row)) continue;
+          for (let sIdx = 0; sIdx < row.length; sIdx++) {
+            const gm = row[sIdx] as unknown as {
+              MeasureNumber?: number;
+              parentSourceMeasure?: { MeasureNumber?: number };
+              staffEntries?: Array<{
+                getAbsoluteTimestamp?: () => { RealValue?: number };
+                graphicalVoiceEntries?: Array<{
+                  notes?: Array<{
+                    getSVGGElement?: () => Element | null;
+                    sourceNote?: { Pitch?: { halfTone?: number } };
+                  }>;
+                }>;
+              }>;
+            };
+            if (!gm || !Array.isArray(gm.staffEntries)) continue;
+            const mNum = gm.MeasureNumber ?? gm.parentSourceMeasure?.MeasureNumber ?? mIdx + 1;
+            for (const se of gm.staffEntries) {
+              const onsetWhole = se.getAbsoluteTimestamp?.()?.RealValue ?? 0;
+              for (const gve of se.graphicalVoiceEntries || []) {
+                for (const gn of gve.notes || []) {
+                  const svgEl = gn.getSVGGElement?.();
+                  if (!svgEl) continue;
+                  const halfTone = gn.sourceNote?.Pitch?.halfTone;
+                  const midi = typeof halfTone === "number" ? halfTone + 12 : null;
+                  const target: XmlNoteTarget = {
+                    partIndex: sIdx,
+                    measureNumber: mNum,
+                    onsetWhole,
+                    pitchMidi: midi,
+                  };
+                  newMap.set(svgEl, target);
+                  svgEl.setAttribute("data-mxml-note", "true");
+                }
+              }
+            }
+          }
         }
-      }
-
-      let guard = 0;
-      while (
-        !cursor.iterator.EndReached &&
-        (cursor.iterator.currentTimeStamp?.RealValue ?? 0) < targetWhole - 0.004 &&
-        guard < 4000
-      ) {
-        cursor.next();
-        guard++;
-      }
-      cursor.update();
-      lastCursorWholeRef.current = cursor.iterator.currentTimeStamp?.RealValue ?? targetWhole;
-
-      // Highlight sounding noteheads with SATB colors respecting Solo/Mute
-      clearNoteheadHighlights();
-      const gNotes = typeof cursor.GNotesUnderCursor === "function" ? cursor.GNotesUnderCursor() : [];
-      for (const gn of gNotes) {
-        const svgEl =
-          typeof (gn as unknown as { getSVGGElement?: () => Element | null }).getSVGGElement === "function"
-            ? (gn as unknown as { getSVGGElement: () => Element | null }).getSVGGElement()
-            : null;
-        if (!svgEl) continue;
-
-        const staffIdx =
-          (gn as unknown as { sourceNote?: { ParentStaffEntry?: { ParentStaff?: { idInMusicSheet?: number } } } })
-            .sourceNote?.ParentStaffEntry?.ParentStaff?.idInMusicSheet ?? 0;
-        const track = tracks[staffIdx];
-        const role = resolveTrackVoiceRole(track);
-        const isMuted = role !== "other" ? Boolean(satbMutedVoices[role]) : Boolean(track?.muted);
-        if (isMuted) continue;
-        if (satbSoloVoice && role !== satbSoloVoice) continue;
-
-        const fillHex = SATB_SHEET_COLORS[role] || SATB_SHEET_COLORS.other;
-        const noteheadTargets = svgEl.querySelectorAll("path, ellipse");
-        const els = noteheadTargets.length > 0 ? Array.from(noteheadTargets) : [svgEl];
-        for (const el of els) {
-          highlightedSvgRef.current.push({ el, origFill: el.getAttribute("fill") });
-          el.setAttribute("fill", fillHex);
-        }
-      }
-
-      const geom = computePlayheadGeometry(osmd);
-      setPlayheadRect(geom);
-      if (allowAutoScroll) {
-        maybeAutoScroll(geom);
       }
     } catch {
-      // Ignore OSMD cursor boundary exceptions during re-render
+      // Ignore graphic indexing errors
     }
+    svgNoteTargetMapRef.current = newMap;
   };
 
   useEffect(() => {
@@ -347,6 +476,10 @@ export function SheetMusicViewer({
         if (cancelled) return;
         osmd.Zoom = zoom;
         osmd.render();
+
+        const localTimeline = buildMusicXmlTimeline(displayXml, tempoBpm);
+        indexRenderedScore(osmd, localTimeline);
+
         lastCursorWholeRef.current = -1;
         lastFollowedSystemRef.current = -1;
         osmd.cursor?.reset();
@@ -355,6 +488,12 @@ export function SheetMusicViewer({
           osmd.cursor.cursorElement.style.pointerEvents = "none";
         }
         syncCursorToSeconds(playheadSec, false);
+
+        if (savedScrollRef.current && scrollContainerRef.current) {
+          scrollContainerRef.current.scrollTop = savedScrollRef.current.top;
+          scrollContainerRef.current.scrollLeft = savedScrollRef.current.left;
+          savedScrollRef.current = null;
+        }
       } catch (err) {
         if (!cancelled) {
           console.warn("[SheetMusicViewer] Notation load failed:", err instanceof Error ? err.message : "unknown");
@@ -370,6 +509,7 @@ export function SheetMusicViewer({
     return () => {
       cancelled = true;
       clearNoteheadHighlights();
+      clearSelectedHighlight();
     };
   }, [musicxml, zoom, effectiveShowChords]);
 
@@ -377,6 +517,7 @@ export function SheetMusicViewer({
   useEffect(() => {
     return () => {
       clearNoteheadHighlights();
+      clearSelectedHighlight();
       try {
         (osmdRef.current as unknown as { Dispose?: () => void } | null)?.Dispose?.();
       } catch {
@@ -395,7 +536,7 @@ export function SheetMusicViewer({
         clearNoteheadHighlights();
       }
     }
-  }, [playheadSec, isPlaying, isRendering, satbSoloVoice, satbMutedVoices, timeline]);
+  }, [playheadSec, isPlaying, isRendering, syncCursorToSeconds]);
 
   // Smooth rAF cursor tracking synced to authoritative playback clock while playing
   useEffect(() => {
@@ -411,15 +552,82 @@ export function SheetMusicViewer({
     return () => {
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
-  }, [isPlaying, isRendering, followCursor, satbSoloVoice, satbMutedVoices, timeline, playheadSec]);
+  }, [isPlaying, isRendering, syncCursorToSeconds, playheadSec]);
+
+  const applyXmlEdit = useCallback(
+    (resultXml: string | null, nextTarget?: XmlNoteTarget | null) => {
+      if (!resultXml || !onMusicXmlChange) return;
+      if (isPlaying) {
+        onTogglePlay?.();
+        return;
+      }
+      if (scrollContainerRef.current) {
+        savedScrollRef.current = {
+          top: scrollContainerRef.current.scrollTop,
+          left: scrollContainerRef.current.scrollLeft,
+        };
+      }
+      if (nextTarget !== undefined) {
+        setSelectedTarget(nextTarget);
+      }
+      onMusicXmlChange(resultXml);
+    },
+    [isPlaying, onMusicXmlChange, onTogglePlay],
+  );
+
+  // Keyboard shortcuts when Edit Notation is active
+  useEffect(() => {
+    if (!editMode || !selectedTarget || !resolvedXml) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        const res = transposeXmlNote(resolvedXml, selectedTarget, e.shiftKey ? 12 : 1);
+        if (res) applyXmlEdit(res.xml, res.nextTarget);
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        const res = transposeXmlNote(resolvedXml, selectedTarget, e.shiftKey ? -12 : -1);
+        if (res) applyXmlEdit(res.xml, res.nextTarget);
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        const res = convertXmlNoteToRest(resolvedXml, selectedTarget);
+        if (res) applyXmlEdit(res.xml, null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [editMode, selectedTarget, resolvedXml, applyXmlEdit]);
 
   const handleManualScrollSignal = () => {
-    // Ignore scroll events triggered by our own smooth scrollTo within 350ms
     if (performance.now() - programmaticScrollAtRef.current < 350) return;
     manualScrollPauseUntilRef.current = performance.now() + 3000;
   };
 
   const handleScoreClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    // In Edit Notation mode, select clicked SVG notehead
+    if (editMode) {
+      let node: Element | null = e.target as Element | null;
+      while (node && node !== containerRef.current) {
+        const mapped = svgNoteTargetMapRef.current.get(node);
+        if (mapped) {
+          clearSelectedHighlight();
+          const els = Array.from(node.querySelectorAll("path, ellipse"));
+          const targets = els.length > 0 ? els : [node];
+          for (const el of targets) {
+            selectedSvgRef.current.push({ el, origFill: el.getAttribute("fill") });
+            el.setAttribute("fill", "#f59e0b");
+          }
+          setSelectedTarget(mapped);
+          return;
+        }
+        node = node.parentElement;
+      }
+      clearSelectedHighlight();
+      setSelectedTarget(null);
+      return;
+    }
+
     if (!onSeek || !osmdRef.current || !containerRef.current) return;
     const measureList = osmdRef.current.GraphicSheet?.MeasureList;
     if (!measureList || measureList.length === 0) return;
@@ -470,6 +678,8 @@ export function SheetMusicViewer({
     );
   }
 
+  const activeXml = resolvedXml ?? musicxml ?? "";
+
   return (
     <div
       data-testid="sheet-music-viewer"
@@ -506,6 +716,29 @@ export function SheetMusicViewer({
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
+          {onMusicXmlChange && (
+            <button
+              type="button"
+              aria-label="Edit notation"
+              aria-pressed={editMode}
+              onClick={() => {
+                if (!editMode && isPlaying) {
+                  onTogglePlay?.();
+                }
+                setEditMode((v) => !v);
+                clearSelectedHighlight();
+                setSelectedTarget(null);
+              }}
+              className={`inline-flex items-center gap-1 h-8 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+                editMode
+                  ? "border-amber-400/60 bg-amber-500/20 text-amber-200"
+                  : "border-[#27273A] bg-[#11111B] text-[#A1A1AA] hover:text-[#F5F3FF]"
+              }`}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              Edit Notation
+            </button>
+          )}
           <button
             type="button"
             aria-label="Follow cursor"
@@ -564,6 +797,165 @@ export function SheetMusicViewer({
         </div>
       </div>
 
+      {/* Direct Notation Editing Toolbar (only visible when Edit Notation is enabled) */}
+      {editMode && (
+        <div
+          data-testid="notation-edit-toolbar"
+          className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-[#181825] px-3 py-2 text-xs shrink-0"
+        >
+          {isPlaying ? (
+            <span className="text-amber-300">Pause playback before editing notation.</span>
+          ) : (
+            <>
+              <span className="font-mono text-amber-200">
+                {selectedTarget
+                  ? `${selectedTarget.pitchMidi !== null ? midiToNoteName(selectedTarget.pitchMidi) : "Rest"} • m.${selectedTarget.measureNumber}`
+                  : "Click a notehead to edit"}
+              </span>
+
+              <div className="flex items-center gap-1 border-l border-[#27273A] pl-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={!selectedTarget}
+                  aria-label="Pitch up"
+                  onClick={() => {
+                    if (!selectedTarget) return;
+                    const res = transposeXmlNote(activeXml, selectedTarget, 1);
+                    if (res) applyXmlEdit(res.xml, res.nextTarget);
+                  }}
+                >
+                  <ArrowUp className="h-3 w-3" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={!selectedTarget}
+                  aria-label="Pitch down"
+                  onClick={() => {
+                    if (!selectedTarget) return;
+                    const res = transposeXmlNote(activeXml, selectedTarget, -1);
+                    if (res) applyXmlEdit(res.xml, res.nextTarget);
+                  }}
+                >
+                  <ArrowDown className="h-3 w-3" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={!selectedTarget}
+                  aria-label="Octave up"
+                  onClick={() => {
+                    if (!selectedTarget) return;
+                    const res = transposeXmlNote(activeXml, selectedTarget, 12);
+                    if (res) applyXmlEdit(res.xml, res.nextTarget);
+                  }}
+                >
+                  +8va
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={!selectedTarget}
+                  aria-label="Octave down"
+                  onClick={() => {
+                    if (!selectedTarget) return;
+                    const res = transposeXmlNote(activeXml, selectedTarget, -12);
+                    if (res) applyXmlEdit(res.xml, res.nextTarget);
+                  }}
+                >
+                  -8va
+                </Button>
+              </div>
+
+              <div className="flex items-center gap-1 border-l border-[#27273A] pl-2">
+                {(["sharp", "flat", "natural"] as const).map((acc) => (
+                  <Button
+                    key={acc}
+                    size="sm"
+                    variant="secondary"
+                    disabled={!selectedTarget}
+                    aria-label={`Set accidental ${acc}`}
+                    onClick={() => {
+                      if (!selectedTarget) return;
+                      const res = setXmlNoteAccidental(activeXml, selectedTarget, acc);
+                      if (res) applyXmlEdit(res.xml, res.nextTarget);
+                    }}
+                  >
+                    {acc === "sharp" ? "♯" : acc === "flat" ? "♭" : "♮"}
+                  </Button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-1 border-l border-[#27273A] pl-2">
+                {(["whole", "half", "quarter", "eighth", "16th"] as EditableNoteType[]).map((dur) => (
+                  <Button
+                    key={dur}
+                    size="sm"
+                    variant="secondary"
+                    disabled={!selectedTarget}
+                    aria-label={`Set duration ${dur}`}
+                    onClick={() => {
+                      if (!selectedTarget) return;
+                      const res = setXmlNoteDuration(activeXml, selectedTarget, dur);
+                      if (res) applyXmlEdit(res.xml, res.nextTarget);
+                    }}
+                  >
+                    {dur === "16th" ? "16th" : dur.charAt(0).toUpperCase() + dur.slice(1)}
+                  </Button>
+                ))}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={!selectedTarget}
+                  aria-label="Convert note to rest"
+                  onClick={() => {
+                    if (!selectedTarget) return;
+                    const res = convertXmlNoteToRest(activeXml, selectedTarget);
+                    if (res) applyXmlEdit(res.xml, null);
+                  }}
+                >
+                  Rest
+                </Button>
+              </div>
+
+              <div className="flex items-center gap-1 border-l border-[#27273A] pl-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  aria-label="Add measure"
+                  onClick={() => {
+                    const nextXml = addMeasureToAllParts(activeXml, selectedTarget?.measureNumber);
+                    if (nextXml) applyXmlEdit(nextXml);
+                  }}
+                >
+                  <Plus className="h-3 w-3" /> Add Measure
+                </Button>
+                <Button
+                  size="sm"
+                  variant="danger"
+                  disabled={!selectedTarget}
+                  aria-label="Delete measure"
+                  onClick={() => {
+                    if (!selectedTarget) return;
+                    if (
+                      typeof window.confirm === "function" &&
+                      !window.confirm(`Delete measure ${selectedTarget.measureNumber} across all parts?`)
+                    ) {
+                      return;
+                    }
+                    const nextXml = deleteMeasureFromAllParts(activeXml, selectedTarget.measureNumber);
+                    if (nextXml) applyXmlEdit(nextXml, null);
+                  }}
+                >
+                  <Trash2 className="h-3 w-3" /> Delete Measure
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {renderError && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
           {renderError}
@@ -579,7 +971,7 @@ export function SheetMusicViewer({
         onScroll={handleManualScrollSignal}
         className={`relative w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 touch-pan-x touch-pan-y ${
           isFocusMode ? "flex-1 min-h-0" : "min-h-[280px] max-h-[560px]"
-        } ${onSeek ? "cursor-pointer" : ""}`}
+        } ${onSeek || editMode ? "cursor-pointer" : ""}`}
       >
         {isRendering && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/20 text-xs text-zinc-700 z-30">

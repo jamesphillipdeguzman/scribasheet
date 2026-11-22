@@ -57,9 +57,19 @@ vi.mock("opensheetmusicdisplay", () => ({
 
 import {
   buildMusicXmlTimeline,
+  findCursorSnapshotIndex,
   timeSecToWholeNotes,
   wholeNotesToTimeSec,
 } from "@/features/editor/musicXmlTimeline";
+import {
+  addMeasureToAllParts,
+  convertXmlNoteToRest,
+  deleteMeasureFromAllParts,
+  musicXmlToScoreNotes,
+  setXmlNoteAccidental,
+  setXmlNoteDuration,
+  transposeXmlNote,
+} from "@/features/editor/musicXmlEditor";
 import { midiSynth } from "@/features/editor/midiSynth";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import {
@@ -293,5 +303,100 @@ describe("Synchronized Sheet Music Playback View & Timeline", () => {
     });
     rerender(<SheetMusicViewer musicxml="https://example.com/missing.musicxml" />);
     expect(await screen.findByText(/Failed to retrieve sheet music \(404\)/i)).toBeInTheDocument();
+  });
+
+  it("supports direct MusicXML note/measure editing, keyboard shortcuts, and ScoreData synchronization", async () => {
+    const satbXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <direction><sound tempo="120"/></direction>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>2</duration><type>quarter</type><lyric><text>Sing</text></lyric></note>
+      <direction><sound tempo="60"/></direction>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>6</duration><type>half</type></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>2</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>8</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    // Mid-measure tempo change: beat 1 at 120 BPM (0.5s), beats 2-4 at 60 BPM (3.0s) -> total 3.5s
+    const midTimeline = buildMusicXmlTimeline(satbXml, 120);
+    expect(midTimeline.segments).toHaveLength(2);
+    expect(midTimeline.segments[0].secEnd).toBeCloseTo(0.5, 3);
+    expect(midTimeline.segments[1].secEnd).toBeCloseTo(3.5, 3);
+
+    // Binary search snapshot lookup
+    const snaps = [
+      { wholeNote: 0, sec: 0, stepIndex: 0 },
+      { wholeNote: 0.25, sec: 0.5, stepIndex: 1 },
+      { wholeNote: 1.0, sec: 3.5, stepIndex: 2 },
+    ];
+    expect(findCursorSnapshotIndex(snaps, 0.4)).toBe(0);
+    expect(findCursorSnapshotIndex(snaps, 0.55)).toBe(1);
+    expect(findCursorSnapshotIndex(snaps, 3.6)).toBe(2);
+
+    // Structured MusicXML edits preserve lyrics and sync ScoreData
+    const target = { partIndex: 0, measureNumber: 1, onsetWhole: 0, pitchMidi: 72 };
+    const up = transposeXmlNote(satbXml, target, 1)!;
+    expect(up.nextTarget.pitchMidi).toBe(73);
+    expect(up.xml).toContain("<text>Sing</text>");
+
+    const oct = transposeXmlNote(up.xml, up.nextTarget, 12)!;
+    expect(oct.nextTarget.pitchMidi).toBe(85);
+
+    const flat = setXmlNoteAccidental(oct.xml, oct.nextTarget, "flat")!;
+    expect(flat.xml).toContain("<accidental>flat</accidental>");
+
+    const eighth = setXmlNoteDuration(flat.xml, flat.nextTarget, "eighth")!;
+    expect(eighth.xml).toContain("<type>eighth</type>");
+
+    const restRes = convertXmlNoteToRest(eighth.xml, eighth.nextTarget)!;
+    expect(restRes.xml).toContain("<rest");
+
+    // Add & Delete measure across ALL SATB parts
+    const addedXml = addMeasureToAllParts(satbXml, 1)!;
+    const addedDoc = new DOMParser().parseFromString(addedXml, "application/xml");
+    expect(addedDoc.getElementsByTagName("part")[0].getElementsByTagName("measure")).toHaveLength(2);
+    expect(addedDoc.getElementsByTagName("part")[1].getElementsByTagName("measure")).toHaveLength(2);
+
+    const synced = musicXmlToScoreNotes(
+      up.xml,
+      [
+        { index: 0, name: "Soprano", instrument: "piano", clef: "treble", program: 0, muted: false },
+        { index: 1, name: "Alto", instrument: "piano", clef: "treble", program: 0, muted: false },
+      ],
+      120,
+    );
+    expect(synced.notes.some((n) => n.pitch_midi === 73 && n.track_index === 0)).toBe(true);
+
+    const deletedXml = deleteMeasureFromAllParts(addedXml, 2)!;
+    const delDoc = new DOMParser().parseFromString(deletedXml, "application/xml");
+    expect(delDoc.getElementsByTagName("part")[0].getElementsByTagName("measure")).toHaveLength(1);
+
+    // UI Edit Notation toggle pauses playback if playing and exposes editing toolbar
+    const onMusicXmlChange = vi.fn();
+    const onTogglePlay = vi.fn();
+    render(
+      <SheetMusicViewer
+        musicxml={satbXml}
+        isPlaying={true}
+        onTogglePlay={onTogglePlay}
+        onMusicXmlChange={onMusicXmlChange}
+      />,
+    );
+    expect(screen.queryByTestId("notation-edit-toolbar")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit notation" }));
+    expect(onTogglePlay).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("notation-edit-toolbar")).toBeInTheDocument();
   });
 });

@@ -103,8 +103,14 @@ def update_project_score(
             detail=f"Score version conflict: expected {payload.expected_version}, current is {score.version}.",
         )
 
-    # Regenerate genuine MusicXML and MIDI from the updated score_json
-    musicxml_str = score_data_to_musicxml(payload.score_json)
+    # Persist direct MusicXML edits when provided (branded & validated), otherwise regenerate from score_json
+    if payload.musicxml and ("<score-partwise" in payload.musicxml or "<score-timewise" in payload.musicxml):
+        musicxml_str = apply_scribasheet_musicxml_branding(
+            payload.musicxml,
+            title=clean_score_title(payload.score_json.title or project.title),
+        )
+    else:
+        musicxml_str = score_data_to_musicxml(payload.score_json)
     midi_bytes = score_data_to_midi_bytes(payload.score_json)
 
     xml_key = storage_service.build_key(current_user.id, project.id, "musicxml", "score.musicxml")

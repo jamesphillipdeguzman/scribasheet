@@ -68,6 +68,7 @@ interface PianoRollEditorProps {
   musicxml?: string | null;
   showChordSymbols?: boolean;
   onToggleChordSymbols?: (value: boolean) => void;
+  onMusicXmlChange?: (nextXml: string) => void;
 }
 
 const MIN_PITCH = 36; // C2
@@ -126,6 +127,7 @@ export function PianoRollEditor({
   musicxml = null,
   showChordSymbols = true,
   onToggleChordSymbols,
+  onMusicXmlChange,
 }: PianoRollEditorProps) {
   const [viewMode, setViewMode] = useState<"grid" | "cascade" | "sheet">("grid");
   const [isFocusMode, setIsFocusMode] = useState(false);
@@ -906,7 +908,7 @@ export function PianoRollEditor({
           onToggleChordSymbols={onToggleChordSymbols}
           playheadSec={playheadSec}
           isPlaying={isPlaying}
-          tempoBpm={tempoBpm * playbackRate}
+          tempoBpm={tempoBpm}
           tracks={tracks}
           satbSoloVoice={satbSoloVoice}
           satbMutedVoices={satbMutedVoices}
@@ -914,6 +916,7 @@ export function PianoRollEditor({
           onStopPlay={onStopPlay}
           onSeek={onPlayheadChange}
           isFocusMode={isFocusMode}
+          onMusicXmlChange={onMusicXmlChange}
         />
       )}
 

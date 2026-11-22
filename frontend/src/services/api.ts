@@ -319,10 +319,19 @@ export const api = {
 
   // Score & Editor
   getScore: (projectId: string) => request<ProjectScoreResponse>(`/projects/${projectId}/score`),
-  saveScore: (projectId: string, score_json: ScoreData, expected_version?: number) =>
+  saveScore: (
+    projectId: string,
+    score_json: ScoreData,
+    expected_version?: number,
+    musicxml?: string | null,
+  ) =>
     request<ProjectScoreResponse>(`/projects/${projectId}/score`, {
       method: "PUT",
-      body: JSON.stringify({ score_json, expected_version }),
+      body: JSON.stringify({
+        score_json,
+        expected_version,
+        ...(musicxml ? { musicxml } : {}),
+      }),
     }),
   regenerateArrangement: (
     projectId: string,

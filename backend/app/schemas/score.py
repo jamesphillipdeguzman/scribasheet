@@ -66,6 +66,7 @@ class ProjectScoreResponse(BaseModel):
 class ProjectScoreUpdateRequest(BaseModel):
     expected_version: int | None = None
     score_json: ScoreData
+    musicxml: str | None = None
 
 
 class ArrangementRegenerateRequest(BaseModel):

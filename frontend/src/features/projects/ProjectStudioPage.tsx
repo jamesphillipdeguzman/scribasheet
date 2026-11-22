@@ -27,6 +27,7 @@ import { ChordAndTabPanel } from "@/features/editor/ChordAndTabPanel";
 import { ExportCenter } from "@/features/editor/ExportCenter";
 import { LyricsPanel } from "@/features/editor/LyricsPanel";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
+import { musicXmlToScoreNotes } from "@/features/editor/musicXmlEditor";
 import {
   loadMetronomeSettings,
   type MetronomeSettings,
@@ -299,11 +300,11 @@ export function ProjectStudioPage() {
   }, [saveStatus]);
 
   const persistScore = useCallback(
-    async (dataToSave: ScoreData, versionToSave: number) => {
+    async (dataToSave: ScoreData, versionToSave: number, xmlOverride?: string | null) => {
       setSaveStatus("saving");
       setSaveError(null);
       try {
-        const updated = await api.saveScore(projectId, dataToSave, versionToSave);
+        const updated = await api.saveScore(projectId, dataToSave, versionToSave, xmlOverride);
         setScoreVersion(updated.version);
         setMusicxml(updated.musicxml);
         setSaveStatus("saved");
@@ -315,17 +316,20 @@ export function ProjectStudioPage() {
     [projectId]
   );
 
-  const mutateScore = (updater: (prev: ScoreData) => ScoreData) => {
+  const mutateScore = (updater: (prev: ScoreData) => ScoreData, xmlOverride?: string | null) => {
     if (!scoreData) return;
     setUndoStack((s) => [...s.slice(-29), scoreData]);
     setRedoStack([]);
     const next = updater(scoreData);
     setScoreData(next);
+    if (xmlOverride !== undefined) {
+      setMusicxml(xmlOverride);
+    }
     setSaveStatus("unsaved");
 
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = window.setTimeout(() => {
-      persistScore(next, scoreVersion);
+      persistScore(next, scoreVersion, xmlOverride);
     }, 1500);
   };
 
@@ -349,6 +353,19 @@ export function ProjectStudioPage() {
 
   const handleNotesChange = (newNotes: ScoreNote[]) => {
     mutateScore((prev) => ({ ...prev, notes: newNotes }));
+  };
+
+  const handleMusicXmlChange = (nextXml: string) => {
+    if (!scoreData) return;
+    const synced = musicXmlToScoreNotes(nextXml, scoreData.tracks, scoreData.tempo_bpm);
+    mutateScore(
+      (prev) => ({
+        ...prev,
+        notes: synced.notes,
+        duration_seconds: Math.max(synced.durationSeconds, 0.5),
+      }),
+      nextXml,
+    );
   };
 
   const handleUpdateChord = (chordId: string, symbol: string) => {
@@ -867,13 +884,14 @@ export function ProjectStudioPage() {
                     onToggleChordSymbols={handleToggleChordSymbols}
                     playheadSec={playheadSec}
                     isPlaying={isPlaybackActive}
-                    tempoBpm={(scoreData?.tempo_bpm || 120) * playbackRate}
+                    tempoBpm={scoreData?.tempo_bpm || 120}
                     tracks={scoreData?.tracks || []}
                     satbSoloVoice={satbSoloVoice}
                     satbMutedVoices={satbMutedVoices}
                     onTogglePlay={() => setTogglePlaySignal((n) => n + 1)}
                     onStopPlay={() => setStopPlaySignal((n) => n + 1)}
                     onSeek={(sec) => setSeekRequest({ sec, autoplay: isPlaybackActive, nonce: Date.now() })}
+                    onMusicXmlChange={handleMusicXmlChange}
                   />
                 ))}
 
@@ -907,6 +925,7 @@ export function ProjectStudioPage() {
                     musicxml={musicxml}
                     showChordSymbols={showChordSymbols}
                     onToggleChordSymbols={handleToggleChordSymbols}
+                    onMusicXmlChange={handleMusicXmlChange}
                   />
                 ) : (
                   <div className="py-12 text-center text-sm text-[#A1A1AA]">

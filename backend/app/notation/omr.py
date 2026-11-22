@@ -310,11 +310,18 @@ _ACCOMP_KEYWORDS = ("piano", "accompaniment", "accomp", "keyboard", "organ", "pn
 
 _FOOTER_METADATA_RE = re.compile(
     r"(?:©|\(c\)|copyright|all\s+rights\s+reserved|used\s+by\s+permission|"
+    r"without\s+permission|personal\s+use|non[- ]?commercial|making\s+copies|"
+    r"(?:may|not)\s+be\s+reproduced|"
     r"ccli\b|licen[cs]e|arr\.?\s+by|arranged\s+by|words\s*(?:&|and)\s*music|"
     r"published\s+by|engraved\s+by|typeset\s+by|printed\s+in|"
     r"hal\s+leonard|imslp|public\s+domain|musescore|"
     r"(?:https?://|www\.)\S+|\b\S+\.(?:com|org|net)\b|"
     r"^(?:page|p\.?)\s*\d+(?:\s*of\s*\d+)?$)",
+    re.IGNORECASE,
+)
+
+_FOOTER_CONTEXT_WORDS_RE = re.compile(
+    r"\b(?:commercial|permission|reproduced)\b",
     re.IGNORECASE,
 )
 
@@ -373,6 +380,11 @@ def _is_footer_or_metadata_text(
     if default_y is not None and default_y < -150.0:
         return True
     if _FOOTER_METADATA_RE.search(cleaned):
+        return True
+    if _FOOTER_CONTEXT_WORDS_RE.search(cleaned) and (
+        (default_y is not None and default_y < -115.0)
+        or len(cleaned.split()) >= 3
+    ):
         return True
     if pdf_footer_texts:
         low = cleaned.lower()

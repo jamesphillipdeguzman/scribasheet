@@ -13,9 +13,16 @@ export interface MusicXmlTimeline {
   totalSec: number;
 }
 
+export interface OsmdCursorSnapshot {
+  wholeNote: number;
+  sec: number;
+  stepIndex: number;
+}
+
 /**
- * Parse MusicXML divisions, tempo changes, notes, rests, backups, and forwards
- * into an exact whole-note <-> seconds timeline (supporting pickups, ties, and tempo changes).
+ * Parse MusicXML divisions, mid-measure and measure-level tempo changes,
+ * notes (including tuplets), rests, backups, and forwards into an exact
+ * whole-note <-> seconds timeline.
  */
 export function buildMusicXmlTimeline(
   xmlStr: string | null | undefined,
@@ -53,6 +60,7 @@ export function buildMusicXmlTimeline(
     const measureNum = Number.parseInt(m.getAttribute("number") || String(mIdx + 1), 10) || mIdx + 1;
     let measureOffsetDiv = 0;
     let maxMeasureDiv = 0;
+    const tempoEvents: Array<{ divOffset: number; tempoBpm: number }> = [];
 
     const children = Array.from(m.children);
     for (const el of children) {
@@ -67,7 +75,7 @@ export function buildMusicXmlTimeline(
         const tAttr = el.getAttribute("tempo");
         const parsedT = tAttr ? Number.parseFloat(tAttr) : NaN;
         if (Number.isFinite(parsedT) && parsedT >= 20 && parsedT <= 320) {
-          currentTempo = parsedT;
+          tempoEvents.push({ divOffset: measureOffsetDiv, tempoBpm: parsedT });
         }
       } else if (tag === "direction") {
         const soundEl = el.getElementsByTagName("sound")[0];
@@ -75,7 +83,7 @@ export function buildMusicXmlTimeline(
         const perMin = el.getElementsByTagName("per-minute")[0]?.textContent;
         const parsedT = Number.parseFloat(tAttr || perMin || "");
         if (Number.isFinite(parsedT) && parsedT >= 20 && parsedT <= 320) {
-          currentTempo = parsedT;
+          tempoEvents.push({ divOffset: measureOffsetDiv, tempoBpm: parsedT });
         }
       } else if (tag === "note") {
         const isChord = el.getElementsByTagName("chord").length > 0;
@@ -103,18 +111,44 @@ export function buildMusicXmlTimeline(
       }
     }
 
-    const measureWhole = maxMeasureDiv > 0 ? maxMeasureDiv / (divisions * 4) : 1.0;
-    const measureSec = measureWhole * 4 * (60 / currentTempo);
-    segments.push({
-      wholeNoteStart: curWhole,
-      wholeNoteEnd: curWhole + measureWhole,
-      secStart: curSec,
-      secEnd: curSec + measureSec,
-      tempoBpm: currentTempo,
-      measureNumber: measureNum,
-    });
-    curWhole += measureWhole;
-    curSec += measureSec;
+    const totalMeasureDiv = maxMeasureDiv > 0 ? maxMeasureDiv : divisions * 4;
+    // Split measure at any mid-measure tempo change
+    tempoEvents.sort((a, b) => a.divOffset - b.divOffset);
+    let localDiv = 0;
+    for (const ev of tempoEvents) {
+      const clampedDiv = Math.max(localDiv, Math.min(totalMeasureDiv, ev.divOffset));
+      if (clampedDiv > localDiv) {
+        const segWhole = (clampedDiv - localDiv) / (divisions * 4);
+        const segSec = segWhole * 4 * (60 / currentTempo);
+        segments.push({
+          wholeNoteStart: curWhole,
+          wholeNoteEnd: curWhole + segWhole,
+          secStart: curSec,
+          secEnd: curSec + segSec,
+          tempoBpm: currentTempo,
+          measureNumber: measureNum,
+        });
+        curWhole += segWhole;
+        curSec += segSec;
+        localDiv = clampedDiv;
+      }
+      currentTempo = ev.tempoBpm;
+    }
+
+    if (totalMeasureDiv > localDiv) {
+      const remWhole = (totalMeasureDiv - localDiv) / (divisions * 4);
+      const remSec = remWhole * 4 * (60 / currentTempo);
+      segments.push({
+        wholeNoteStart: curWhole,
+        wholeNoteEnd: curWhole + remWhole,
+        secStart: curSec,
+        secEnd: curSec + remSec,
+        tempoBpm: currentTempo,
+        measureNumber: measureNum,
+      });
+      curWhole += remWhole;
+      curSec += remSec;
+    }
   }
 
   return {
@@ -124,43 +158,80 @@ export function buildMusicXmlTimeline(
   };
 }
 
+/** Binary search for the active timeline segment at `sec`. */
 export function timeSecToWholeNotes(
   timeline: MusicXmlTimeline,
   sec: number,
   fallbackTempoBpm = 120,
 ): number {
   const safeSec = Math.max(0, sec);
-  if (timeline.segments.length === 0) {
+  const segs = timeline.segments;
+  if (segs.length === 0) {
     const beats = safeSec * (Math.max(20, fallbackTempoBpm) / 60);
     return beats / 4;
   }
-  for (let i = 0; i < timeline.segments.length; i++) {
-    const seg = timeline.segments[i];
-    if (safeSec <= seg.secEnd || i === timeline.segments.length - 1) {
-      const durSec = Math.max(1e-6, seg.secEnd - seg.secStart);
-      const frac = Math.max(0, Math.min(1, (safeSec - seg.secStart) / durSec));
-      return seg.wholeNoteStart + frac * (seg.wholeNoteEnd - seg.wholeNoteStart);
+
+  let lo = 0;
+  let hi = segs.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (segs[mid].secEnd < safeSec) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
     }
   }
-  return timeline.totalWholeNotes;
+  const seg = segs[lo];
+  const durSec = Math.max(1e-6, seg.secEnd - seg.secStart);
+  const frac = Math.max(0, Math.min(1, (safeSec - seg.secStart) / durSec));
+  return seg.wholeNoteStart + frac * (seg.wholeNoteEnd - seg.wholeNoteStart);
 }
 
+/** Binary search for the active playback time in seconds at `wholeNotes`. */
 export function wholeNotesToTimeSec(
   timeline: MusicXmlTimeline,
   wholeNotes: number,
   fallbackTempoBpm = 120,
 ): number {
   const safeWhole = Math.max(0, wholeNotes);
-  if (timeline.segments.length === 0) {
+  const segs = timeline.segments;
+  if (segs.length === 0) {
     return safeWhole * 4 * (60 / Math.max(20, fallbackTempoBpm));
   }
-  for (let i = 0; i < timeline.segments.length; i++) {
-    const seg = timeline.segments[i];
-    if (safeWhole <= seg.wholeNoteEnd || i === timeline.segments.length - 1) {
-      const durWhole = Math.max(1e-6, seg.wholeNoteEnd - seg.wholeNoteStart);
-      const frac = Math.max(0, Math.min(1, (safeWhole - seg.wholeNoteStart) / durWhole));
-      return seg.secStart + frac * (seg.secEnd - seg.secStart);
+
+  let lo = 0;
+  let hi = segs.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (segs[mid].wholeNoteEnd < safeWhole) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
     }
   }
-  return timeline.totalSec;
+  const seg = segs[lo];
+  const durWhole = Math.max(1e-6, seg.wholeNoteEnd - seg.wholeNoteStart);
+  const frac = Math.max(0, Math.min(1, (safeWhole - seg.wholeNoteStart) / durWhole));
+  return seg.secStart + frac * (seg.secEnd - seg.secStart);
+}
+
+/** Binary search for the latest OSMD cursor snapshot at or before `sec`. */
+export function findCursorSnapshotIndex(
+  snapshots: OsmdCursorSnapshot[],
+  sec: number,
+): number {
+  if (snapshots.length === 0) return -1;
+  let lo = 0;
+  let hi = snapshots.length - 1;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (snapshots[mid].sec <= sec + 0.004) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
 }
