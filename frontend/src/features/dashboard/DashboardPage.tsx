@@ -11,6 +11,7 @@ import {
   Search,
   Trash2,
 } from "lucide-react";
+import { AmbientScoreBackdrop } from "@/components/AmbientScoreBackdrop";
 import { AppShell } from "@/components/AppShell";
 import { WorkerControlPanel } from "@/components/WorkerControlPanel";
 import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
@@ -87,9 +88,10 @@ export function DashboardPage() {
 
   return (
     <AppShell>
-      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 space-y-6">
+      <div className="relative mx-auto max-w-7xl px-4 py-8 sm:px-6 space-y-6">
+        <AmbientScoreBackdrop variant="watermark" className="h-64 sm:h-72" />
         {/* Top Welcome & CTA */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="relative z-10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="min-w-0 space-y-2">
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight break-words">
               Welcome back, {user?.display_name || "Musician"}

@@ -18,6 +18,7 @@ import {
   Save,
   Undo2,
 } from "lucide-react";
+import { AmbientScoreBackdrop } from "@/components/AmbientScoreBackdrop";
 import { AppShell } from "@/components/AppShell";
 import { WorkerControlPanel } from "@/components/WorkerControlPanel";
 import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
@@ -591,11 +592,12 @@ export function ProjectStudioPage() {
 
   return (
     <AppShell>
-      <div className="mx-auto max-w-[1600px] px-3 sm:px-4 py-4 space-y-4 min-w-0">
+      <div className="relative mx-auto max-w-[1600px] px-3 sm:px-4 py-4 space-y-4 min-w-0">
+        <AmbientScoreBackdrop variant="watermark" className="h-44 sm:h-52" />
         {/* Top Studio Toolbar */}
         <div
           data-testid="studio-header"
-          className="flex flex-col gap-3 rounded-xl border border-[#27273A] bg-[#11111B] px-3 sm:px-4 py-3 min-w-0 sm:flex-row sm:items-center sm:justify-between"
+          className="relative z-10 flex flex-col gap-3 rounded-xl border border-[#27273A] bg-[#11111B]/90 backdrop-blur-sm px-3 sm:px-4 py-3 min-w-0 sm:flex-row sm:items-center sm:justify-between"
         >
           {/* Row 1 on mobile: Navigation (left) + Actions (right); on sm+: contents flatten into single row */}
           <div className="flex items-center justify-between gap-2 w-full sm:w-auto sm:contents">

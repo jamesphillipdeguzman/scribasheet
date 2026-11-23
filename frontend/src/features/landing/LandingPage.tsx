@@ -18,6 +18,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { AmbientScoreBackdrop } from "@/components/AmbientScoreBackdrop";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/Button";
 import { useAuth } from "@/features/auth/AuthContext";
@@ -152,7 +153,8 @@ export function LandingPage() {
 
       {/* Hero Section */}
       <section className="relative overflow-hidden border-b border-[#27273A]/60 py-16 sm:py-24">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6">
+        <AmbientScoreBackdrop variant="hero" />
+        <div className="relative z-10 mx-auto max-w-7xl px-4 sm:px-6">
           <div className="mx-auto max-w-3xl text-center">
             <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-[#A78BFA]/30 bg-[#181825] px-3.5 py-1 text-xs font-medium text-[#A78BFA]">
               <Sparkles className="h-3.5 w-3.5" />
