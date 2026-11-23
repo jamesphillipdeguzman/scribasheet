@@ -3,6 +3,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Check, Copy, Cpu, KeyRound, Play, RotateCw, Smartphone, Square, Terminal } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
+import {
+  beginWorkerConnecting,
+  resetWorkerConnectionState,
+  useWorkerConnection,
+} from "@/features/worker/useWorkerConnection";
 import { api } from "@/services/api";
 import {
   clearControllerToken,
@@ -29,11 +34,12 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
 
   const mobile = isMobileDevice();
   const hasToken = Boolean(getControllerToken());
+  const conn = useWorkerConnection();
 
   const { data: railwayStatus } = useQuery({
     queryKey: ["worker-status"],
     queryFn: () => api.getWorkerStatus(),
-    refetchInterval: 12000,
+    refetchInterval: conn.isConnecting ? 1500 : 12000,
     refetchOnWindowFocus: false,
     retry: 1,
   });
@@ -53,10 +59,12 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
       return workerController.getStatus();
     },
     enabled: !mobile,
-    refetchInterval: 8000,
+    refetchInterval: conn.isConnecting ? 1500 : 8000,
     refetchOnWindowFocus: false,
     retry: false,
   });
+
+  useWorkerConnection(railwayStatus?.worker_online, controllerStatus?.worker_running);
 
   const needsPairing =
     !mobile &&
@@ -90,6 +98,13 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
       if (res.message) {
         setActionNotice(res.message);
       }
+      if (action === "stop") {
+        resetWorkerConnectionState();
+      } else if (action === "start" || action === "restart") {
+        if (!railwayStatus?.worker_online || action === "restart") {
+          beginWorkerConnecting(action);
+        }
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["controller-status"] }),
         queryClient.invalidateQueries({ queryKey: ["worker-status"] }),
@@ -120,10 +135,16 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
                 className={
                   railwayStatus.worker_online
                     ? "text-emerald-700 font-semibold dark:text-emerald-400"
-                    : "text-amber-700 font-semibold dark:text-amber-300"
+                    : conn.isConnecting
+                      ? "text-violet-700 font-semibold dark:text-violet-300"
+                      : "text-amber-700 font-semibold dark:text-amber-300"
                 }
               >
-                {railwayStatus.worker_online ? "Online" : "Offline"}
+                {railwayStatus.worker_online
+                  ? "Online"
+                  : conn.isConnecting
+                    ? "Connecting..."
+                    : "Offline"}
               </span>
               {railwayStatus.active_job_count > 0 && ` • ${railwayStatus.active_job_count} active`}
               {railwayStatus.queue_depth > 0 && ` • ${railwayStatus.queue_depth} queued`}
@@ -234,6 +255,40 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
               )}
               {actionNotice && (
                 <div className="text-emerald-800 font-medium dark:text-emerald-300">{actionNotice}</div>
+              )}
+              {(conn.isConnecting || conn.justConnected) && (
+                <div data-testid="worker-connecting-progress" className="pt-1.5 space-y-1.5 max-w-md">
+                  <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-violet-900 dark:text-violet-200">
+                    <span>
+                      {conn.justConnected
+                        ? "Desktop worker connected!"
+                        : "Initializing Python worker & syncing heartbeat with Railway..."}
+                    </span>
+                    <span className="tabular-nums">{conn.progress}%</span>
+                  </div>
+                  <div
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={conn.progress}
+                    className="h-2 w-full overflow-hidden rounded-full bg-violet-100 dark:bg-violet-500/20"
+                  >
+                    <div
+                      className="h-full rounded-full bg-violet-600 transition-all duration-300 motion-reduce:transition-none dark:bg-violet-400"
+                      style={{ width: `${conn.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              {conn.timedOut && !railwayStatus?.worker_online && (
+                <div className="text-amber-800 font-medium dark:text-amber-300">
+                  Worker process started, but Railway heartbeat did not arrive within 20s. Worker remains offline.
+                </div>
+              )}
+              {conn.exitedEarly && !controllerStatus.worker_running && (
+                <div className="text-red-800 font-medium dark:text-red-300">
+                  Worker process stopped during initialization before syncing with Railway.
+                </div>
               )}
             </div>
 
