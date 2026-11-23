@@ -4,12 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as alphaTab from "@coderline/alphatab";
 import { AmbientScoreBackdrop } from "@/components/AmbientScoreBackdrop";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { Button } from "@/components/ui/Button";
 import { injectChordsIntoMusicXml } from "@/features/editor/musicXmlChords";
 import { prepareDisplayMusicXml } from "@/features/editor/musicXmlNormalization";
 import { buildMusicXmlTimeline } from "@/features/editor/musicXmlTimeline";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { SheetMusicViewer } from "@/features/editor/SheetMusicViewer";
 import { ThemeProvider } from "@/features/theme/ThemeContext";
+import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import type { ScoreChord, ScoreNote } from "@/types/api";
 
 vi.mock("opensheetmusicdisplay", () => ({
@@ -204,5 +206,46 @@ describe("Theme Toggle, Hero Backdrop & SATB Chord Injection", () => {
     expect(screen.getByTestId("piano-roll-workspace").getAttribute("data-focus-mode")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "Exit Focus" }));
     expect(onToggleFocus).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders Light Mode accessible button, toggle, select, and Demucs checkbox styles while preserving dark: variants", () => {
+    render(
+      <div>
+        <Button variant="primary">Play</Button>
+        <Button variant="danger" disabled>Stop Worker</Button>
+        <SheetMusicViewer musicxml={buildAwayInAMangerSatbXml()} />
+        <TranscriptionConfigPanel
+          hasMedia={true}
+          activeJob={null}
+          defaultInstrument="piano"
+          defaultMode="single_instrument"
+          onStart={vi.fn()}
+          onCancel={vi.fn()}
+          onRetry={vi.fn()}
+          isStarting={false}
+        />
+      </div>,
+    );
+
+    const playBtn = screen.getByRole("button", { name: "Play" });
+    expect(playBtn.className).toContain("bg-violet-600");
+    expect(playBtn.className).toContain("dark:bg-[#8B5CF6]");
+
+    const stopWorkerBtn = screen.getByRole("button", { name: "Stop Worker" });
+    expect(stopWorkerBtn.className).toContain("disabled:bg-stone-100");
+    expect(stopWorkerBtn.className).toContain("disabled:text-stone-400");
+
+    const followBtn = screen.getByRole("button", { name: "Follow cursor" });
+    expect(followBtn.className).toContain("bg-emerald-100");
+    expect(followBtn.className).toContain("text-emerald-900");
+
+    const chordsBtn = screen.getByRole("button", { name: "Show chord symbols" });
+    expect(chordsBtn.className).toContain("bg-violet-100");
+    expect(chordsBtn.className).toContain("text-violet-900");
+
+    const quantSelect = screen.getByLabelText("Quantization");
+    expect(quantSelect.className).toContain("pr-7");
+    expect(quantSelect.className).toContain("bg-white");
+    expect(quantSelect.className).toContain("dark:bg-[#09090F]");
   });
 });

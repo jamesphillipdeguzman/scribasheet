@@ -252,22 +252,24 @@ export function TranscriptionConfigPanel({
             </p>
           </div>
 
-          <div className="space-y-1.5">
+          <div className="space-y-1.5 min-w-0">
             <label htmlFor="demucs-separation-toggle" className="block text-xs font-medium text-[#A1A1AA]">
               Separate Audio Stems (Demucs)
             </label>
             <label
               htmlFor="demucs-separation-toggle"
-              className="flex h-9 items-center gap-2 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF] cursor-pointer"
+              className="flex items-start gap-2 rounded-lg border border-stone-300 bg-white p-2.5 text-xs text-stone-800 cursor-pointer dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
             >
               <input
                 id="demucs-separation-toggle"
                 type="checkbox"
                 checked={settings.enable_source_separation}
                 onChange={(e) => setSettings({ ...settings, enable_source_separation: e.target.checked })}
-                className="accent-[#A78BFA]"
+                className="mt-0.5 shrink-0 accent-violet-600 dark:accent-[#A78BFA]"
               />
-              <span>{settings.enable_source_separation ? "On — Separate Vocals & Accompaniment" : "Off"}</span>
+              <span className="leading-snug">
+                {settings.enable_source_separation ? "On — Separate Vocals & Accompaniment" : "Off"}
+              </span>
             </label>
             <p className="text-[11px] text-[#71717A]">
               Separates vocals, bass, drums, and other instruments before transcription. Recommended for full songs with vocals and accompaniment.
@@ -287,13 +289,14 @@ export function TranscriptionConfigPanel({
 
       {!isScoreImport && (
         <>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <div className="space-y-1.5">
-              <label className="block text-xs font-medium text-[#A1A1AA]">Tempo</label>
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
+            <div className="space-y-1.5 min-w-0">
+              <label htmlFor="tempo-mode-select" className="block text-xs font-medium text-[#A1A1AA]">Tempo</label>
               <select
+                id="tempo-mode-select"
                 value={settings.tempo_mode}
                 onChange={(e) => setSettings({ ...settings, tempo_mode: e.target.value as "auto" | "manual" })}
-                className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
+                className="w-full min-w-0 h-9 rounded-lg border border-stone-300 bg-white px-2.5 pr-7 text-xs text-stone-900 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20 dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
               >
                 <option value="auto">Auto-detect</option>
                 <option value="manual">Manual BPM</option>
@@ -301,7 +304,7 @@ export function TranscriptionConfigPanel({
             </div>
 
             {settings.tempo_mode === "manual" && (
-              <div className="space-y-1.5">
+              <div className="space-y-1.5 min-w-0">
                 <label className="block text-xs font-medium text-[#A1A1AA]">BPM</label>
                 <input
                   type="number"
@@ -309,12 +312,12 @@ export function TranscriptionConfigPanel({
                   max={300}
                   value={settings.manual_tempo_bpm || 120}
                   onChange={(e) => setSettings({ ...settings, manual_tempo_bpm: Number(e.target.value) })}
-                  className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
+                  className="w-full min-w-0 h-9 rounded-lg border border-stone-300 bg-white px-2.5 text-xs text-stone-900 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20 dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
                 />
               </div>
             )}
 
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 min-w-0">
               <label htmlFor="quantization-select" className="block text-xs font-medium text-[#A1A1AA]">
                 Quantization
               </label>
@@ -325,7 +328,7 @@ export function TranscriptionConfigPanel({
                   setQuantizationManuallySet(true);
                   setSettings({ ...settings, quantization: e.target.value as TranscriptionSettings["quantization"] });
                 }}
-                className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
+                className="w-full min-w-0 h-9 rounded-lg border border-stone-300 bg-white px-2.5 pr-7 text-xs text-stone-900 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20 dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
               >
                 <option value="none">None (Raw timing)</option>
                 <option value="quarter">1/4 Note</option>

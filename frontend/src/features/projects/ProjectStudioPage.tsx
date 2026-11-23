@@ -883,10 +883,10 @@ export function ProjectStudioPage() {
                         role="tab"
                         aria-selected={active}
                         onClick={() => setActiveTab(t.id)}
-                        className={`inline-flex shrink-0 min-h-[40px] items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                        className={`inline-flex shrink-0 min-h-[40px] items-center gap-2 rounded-lg px-3 py-1.5 text-xs transition-colors ${
                           active
-                            ? "bg-[#8B5CF6] text-[#F5F3FF]"
-                            : "text-[#A1A1AA] hover:text-[#F5F3FF] hover:bg-[#181825]"
+                            ? "bg-violet-600 text-white font-semibold shadow-sm dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:font-medium"
+                            : "text-stone-700 hover:text-stone-950 hover:bg-stone-200/60 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-[#181825]"
                         }`}
                       >
                         <Icon className="h-3.5 w-3.5" />

@@ -393,7 +393,7 @@ export function WaveformPlayer({
         </div>
 
         {/* A/B Switch */}
-        <div className="inline-flex rounded-lg border border-[#27273A] bg-[#09090F] p-0.5 text-xs">
+        <div className="inline-flex rounded-lg border border-stone-300 bg-stone-200/80 p-0.5 text-xs dark:border-[#27273A] dark:bg-[#09090F]">
           {!isScoreOnly && (
             <button
               type="button"
@@ -402,8 +402,11 @@ export function WaveformPlayer({
                 stopAll();
                 setSourceMode("original");
               }}
-              className={`rounded-md px-3 py-1 transition-colors disabled:opacity-40 ${sourceMode === "original" ? "bg-[#8B5CF6] text-[#F5F3FF]" : "text-[#A1A1AA]"
-                }`}
+              className={`rounded-md px-3 py-1 transition-colors disabled:opacity-40 ${
+                sourceMode === "original"
+                  ? "bg-violet-600 text-white shadow-sm font-semibold dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:font-medium"
+                  : "text-stone-700 hover:text-stone-950 hover:bg-white/60 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-transparent"
+              }`}
             >
               Original Audio
             </button>
@@ -414,19 +417,25 @@ export function WaveformPlayer({
               stopAll();
               setSourceMode("midi");
             }}
-            className={`rounded-md px-3 py-1 transition-colors ${sourceMode === "midi" ? "bg-[#8B5CF6] text-[#F5F3FF]" : "text-[#A1A1AA]"
-              }`}
+            className={`rounded-md px-3 py-1 transition-colors ${
+              sourceMode === "midi"
+                ? "bg-violet-600 text-white shadow-sm font-semibold dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:font-medium"
+                : "text-stone-700 hover:text-stone-950 hover:bg-white/60 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-transparent"
+            }`}
           >
             {isScoreOnly ? "Synthesized Score Playback" : "Transcribed MIDI"}
           </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 text-xs text-[#A1A1AA]">
+        <div className="flex flex-wrap items-center gap-3 text-xs text-stone-700 dark:text-[#A1A1AA]">
           <button
             type="button"
             onClick={() => setLoop(!loop)}
-            className={`inline-flex items-center gap-1 rounded px-2 py-1 border ${loop ? "border-[#A78BFA] text-[#A78BFA] bg-[#181825]" : "border-[#27273A]"
-              }`}
+            className={`inline-flex items-center gap-1 rounded px-2 py-1 border transition-colors ${
+              loop
+                ? "bg-violet-100 text-violet-900 border-violet-400 font-semibold dark:border-[#A78BFA] dark:text-[#A78BFA] dark:bg-[#181825] dark:font-medium"
+                : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:bg-transparent dark:text-[#A1A1AA] dark:border-[#27273A]"
+            }`}
           >
             <Repeat className="h-3.5 w-3.5" />
             Loop
@@ -444,7 +453,7 @@ export function WaveformPlayer({
             aria-label="Playback speed"
             value={playbackRate}
             onChange={(e) => setPlaybackRate(Number(e.target.value))}
-            className="h-7 rounded border border-[#27273A] bg-[#09090F] px-2 text-xs text-[#F5F3FF]"
+            className="h-7 rounded border border-stone-300 bg-white px-2 pr-6 text-xs text-stone-900 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20 dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
           >
             <option value={0.5}>0.5x</option>
             <option value={0.75}>0.75x</option>

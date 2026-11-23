@@ -10,14 +10,15 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant = "primary", size = "md", type = "button", ...props }, ref) => {
     const variants: Record<NonNullable<ButtonProps["variant"]>, string> = {
       primary:
-        "bg-[#8B5CF6] text-[#F5F3FF] hover:bg-[#7C3AED] active:bg-[#6D28D9] shadow-sm shadow-[#8B5CF6]/20 border border-[#A78BFA]/30",
+        "bg-violet-600 text-white hover:bg-violet-700 active:bg-violet-800 font-semibold shadow-sm border border-violet-700/20 dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:hover:bg-[#7C3AED] dark:active:bg-[#6D28D9] dark:font-medium dark:shadow-[#8B5CF6]/20 dark:border-[#A78BFA]/30",
       secondary:
-        "bg-[#181825] text-[#F5F3FF] hover:bg-[#232336] border border-[#27273A]",
+        "bg-white text-stone-800 hover:bg-stone-100 border border-stone-300 shadow-sm font-medium dark:bg-[#181825] dark:text-[#F5F3FF] dark:hover:bg-[#232336] dark:border-[#27273A]",
       outline:
-        "bg-transparent text-[#F5F3FF] hover:bg-[#181825] border border-[#27273A] hover:border-[#A78BFA]/50",
-      ghost: "bg-transparent text-[#A1A1AA] hover:text-[#F5F3FF] hover:bg-[#181825]",
+        "bg-white text-stone-800 hover:bg-stone-100 border border-stone-300 shadow-sm font-medium dark:bg-transparent dark:text-[#F5F3FF] dark:hover:bg-[#181825] dark:border-[#27273A] dark:hover:border-[#A78BFA]/50",
+      ghost:
+        "bg-transparent text-stone-700 hover:text-stone-950 hover:bg-stone-200/70 disabled:text-stone-400 dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-[#181825] dark:disabled:text-[#A1A1AA]",
       danger:
-        "bg-red-500/15 text-red-300 hover:bg-red-500/25 border border-red-500/30",
+        "bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 font-medium disabled:bg-stone-100 disabled:text-stone-400 disabled:border-stone-200 disabled:cursor-not-allowed disabled:opacity-100 dark:bg-red-500/15 dark:text-red-300 dark:hover:bg-red-500/25 dark:border-red-500/30 dark:disabled:opacity-50",
     };
 
     const sizes: Record<NonNullable<ButtonProps["size"]>, string> = {

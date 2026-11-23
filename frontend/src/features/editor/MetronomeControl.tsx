@@ -102,15 +102,15 @@ export function MetronomeControl({
   return (
     <div ref={containerRef} className="relative inline-flex items-center gap-1.5">
       {/* Split Transport Toggle + Settings Popover Trigger */}
-      <div className="inline-flex items-center rounded border border-[#27273A] bg-[#09090F]">
+      <div className="inline-flex items-center rounded border border-stone-300 bg-white dark:border-[#27273A] dark:bg-[#09090F]">
         <button
           type="button"
           aria-pressed={settings.enabled}
           onClick={toggleEnabled}
           className={`px-2 py-1 text-xs rounded-l transition-colors ${
             settings.enabled
-              ? "bg-[#181825] text-[#A78BFA] font-medium"
-              : "text-[#A1A1AA] hover:text-[#F5F3FF]"
+              ? "bg-violet-100 text-violet-900 font-semibold dark:bg-[#181825] dark:text-[#A78BFA] dark:font-medium"
+              : "text-stone-800 hover:bg-stone-100 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-transparent"
           }`}
         >
           Metronome
@@ -120,8 +120,8 @@ export function MetronomeControl({
           aria-label="Metronome settings"
           aria-expanded={open}
           onClick={() => setOpen((v) => !v)}
-          className={`px-1.5 py-1 border-l border-[#27273A] rounded-r text-[#A1A1AA] hover:text-[#F5F3FF] ${
-            open ? "bg-[#181825] text-[#F5F3FF]" : ""
+          className={`px-1.5 py-1 border-l border-stone-300 rounded-r text-stone-700 hover:text-stone-950 hover:bg-stone-100 dark:border-[#27273A] dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-transparent ${
+            open ? "bg-stone-100 text-stone-950 dark:bg-[#181825] dark:text-[#F5F3FF]" : ""
           }`}
           title="Metronome Settings"
         >

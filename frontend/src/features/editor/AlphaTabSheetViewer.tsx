@@ -484,10 +484,10 @@ export function AlphaTabSheetViewer({
             aria-label="Follow cursor"
             aria-pressed={followCursor}
             onClick={() => setFollowCursor((v) => !v)}
-            className={`h-8 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+            className={`h-8 rounded-lg border px-2.5 text-xs transition-colors ${
               followCursor
-                ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200"
-                : "border-[#27273A] bg-[#11111B] text-[#A1A1AA] hover:text-[#F5F3FF]"
+                ? "bg-emerald-100 text-emerald-900 border-emerald-400 font-semibold dark:border-emerald-500/40 dark:bg-emerald-500/20 dark:text-emerald-300 dark:font-medium"
+                : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF]"
             }`}
           >
             Follow Cursor
@@ -497,10 +497,10 @@ export function AlphaTabSheetViewer({
             aria-label="Show chord symbols"
             aria-pressed={effectiveShowChords}
             onClick={handleToggleChords}
-            className={`h-8 rounded-lg border px-2.5 text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${
+            className={`h-8 rounded-lg border px-2.5 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-violet-500/40 ${
               effectiveShowChords
-                ? "border-[#A78BFA]/60 bg-[#7C3AED]/20 text-[#F5F3FF]"
-                : "border-[#27273A] bg-[#11111B] text-[#A1A1AA] hover:text-[#F5F3FF]"
+                ? "bg-violet-100 text-violet-900 border-violet-400 font-semibold dark:border-[#A78BFA]/60 dark:bg-[#7C3AED]/20 dark:text-[#F5F3FF] dark:font-medium"
+                : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF]"
             }`}
           >
             Chords

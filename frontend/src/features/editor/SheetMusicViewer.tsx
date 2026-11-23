@@ -167,16 +167,16 @@ export function SheetMusicViewer({
     <div
       role="group"
       aria-label="Sheet music engine"
-      className="inline-flex rounded-lg border border-[#27273A] bg-[#09090F] p-0.5 text-[11px]"
+      className="inline-flex rounded-lg border border-stone-300 bg-stone-200/80 p-0.5 text-[11px] dark:border-[#27273A] dark:bg-[#09090F]"
     >
       <button
         type="button"
         aria-pressed={engine === "alphatab"}
         onClick={() => handleEngineChange("alphatab")}
-        className={`rounded-md px-2 py-0.5 font-medium transition-colors ${
+        className={`rounded-md px-2 py-0.5 transition-colors ${
           engine === "alphatab"
-            ? "bg-[#8B5CF6] text-[#F5F3FF]"
-            : "text-[#A1A1AA] hover:text-[#F5F3FF]"
+            ? "bg-violet-600 text-white shadow-sm font-semibold dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:font-medium"
+            : "text-stone-700 hover:text-stone-950 hover:bg-white/60 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-transparent"
         }`}
       >
         AlphaTab
@@ -185,10 +185,10 @@ export function SheetMusicViewer({
         type="button"
         aria-pressed={engine === "osmd"}
         onClick={() => handleEngineChange("osmd")}
-        className={`rounded-md px-2 py-0.5 font-medium transition-colors ${
+        className={`rounded-md px-2 py-0.5 transition-colors ${
           engine === "osmd"
-            ? "bg-[#8B5CF6] text-[#F5F3FF]"
-            : "text-[#A1A1AA] hover:text-[#F5F3FF]"
+            ? "bg-violet-600 text-white shadow-sm font-semibold dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:font-medium"
+            : "text-stone-700 hover:text-stone-950 hover:bg-white/60 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-transparent"
         }`}
       >
         OSMD
@@ -1391,9 +1391,9 @@ export function SheetMusicViewer({
             aria-label="Follow cursor"
             aria-pressed={followCursor}
             onClick={() => setFollowCursor((v) => !v)}
-            className={`h-8 rounded-lg border px-2.5 text-xs font-medium transition-colors ${followCursor
-              ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200"
-              : "border-[#27273A] bg-[#11111B] text-[#A1A1AA] hover:text-[#F5F3FF]"
+            className={`h-8 rounded-lg border px-2.5 text-xs transition-colors ${followCursor
+              ? "bg-emerald-100 text-emerald-900 border-emerald-400 font-semibold dark:border-emerald-500/40 dark:bg-emerald-500/20 dark:text-emerald-300 dark:font-medium"
+              : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF]"
               }`}
           >
             Follow Cursor
@@ -1403,9 +1403,9 @@ export function SheetMusicViewer({
             aria-label="Show chord symbols"
             aria-pressed={effectiveShowChords}
             onClick={handleToggleChords}
-            className={`h-8 rounded-lg border px-2.5 text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${effectiveShowChords
-              ? "border-[#A78BFA]/60 bg-[#7C3AED]/20 text-[#F5F3FF]"
-              : "border-[#27273A] bg-[#11111B] text-[#A1A1AA] hover:text-[#F5F3FF]"
+            className={`h-8 rounded-lg border px-2.5 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-violet-500/40 ${effectiveShowChords
+              ? "bg-violet-100 text-violet-900 border-violet-400 font-semibold dark:border-[#A78BFA]/60 dark:bg-[#7C3AED]/20 dark:text-[#F5F3FF] dark:font-medium"
+              : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF]"
               }`}
           >
             Chords
