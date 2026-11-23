@@ -247,4 +247,43 @@ describe("Light Mode Contrast & Hover-State Fixes", () => {
     expect(audioSourceSelect.className).toContain("pr-6");
     expect(audioSourceSelect.textContent).toContain("Solo Piano");
   });
+
+  it("renders high-contrast Light Mode callouts for transcription mode change and offline worker queue", () => {
+    render(
+      <TranscriptionConfigPanel
+        hasMedia={true}
+        hasScore={true}
+        activeJob={null}
+        workerOnline={false}
+        defaultInstrument="piano"
+        defaultMode="single_instrument"
+        initialMode="single_instrument"
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        isStarting={false}
+      />,
+    );
+
+    // Switch mode to Lead Melody to show the modeChangedSinceScore callout
+    fireEvent.change(screen.getByLabelText("Output Arrangement"), { target: { value: "melody" } });
+    const modeNotice = screen.getByText(/Transcription mode changed/i);
+    expect(modeNotice.className).toContain("bg-violet-50");
+    expect(modeNotice.className).toContain("border-violet-300");
+    expect(modeNotice.className).toContain("text-violet-950");
+    expect(modeNotice.className).toContain("dark:bg-violet-500/10");
+    expect(modeNotice.className).toContain("dark:text-violet-200");
+
+    // Click Re-Transcribe while workerOnline=false to show offline queue callout
+    fireEvent.click(screen.getByRole("button", { name: /Re-Transcribe in Lead Melody Mode/i }));
+    const offlineCopy = screen.getByText(/Desktop worker is currently offline/i);
+    expect(offlineCopy.className).toContain("text-amber-950");
+    expect(offlineCopy.className).toContain("font-medium");
+    expect(offlineCopy.className).toContain("dark:text-amber-200");
+
+    const cancelBtn = screen.getByRole("button", { name: "Cancel" });
+    expect(cancelBtn.className).toContain("bg-white");
+    expect(cancelBtn.className).toContain("text-stone-800");
+    expect(cancelBtn.className).toContain("border-stone-300");
+  });
 });

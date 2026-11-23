@@ -533,9 +533,9 @@ export function TranscriptionConfigPanel({
             </div>
           )}
           {modeChangedSinceScore && (
-            <div className="rounded-lg border border-[#A78BFA]/30 bg-[#181825] p-2.5 text-xs text-[#E4E4E7]">
+            <div className="rounded-lg border border-violet-300 bg-violet-50 p-2.5 text-xs text-violet-950 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-200">
               Transcription mode changed — click{" "}
-              <span className="font-medium text-[#A78BFA]">
+              <span className="font-semibold text-violet-700 dark:text-violet-300">
                 {normalizeModeId(settings.mode) === "melody"
                   ? "Re-Transcribe in Lead Melody Mode"
                   : normalizeModeId(settings.mode) === "piano_vocal"
@@ -546,8 +546,8 @@ export function TranscriptionConfigPanel({
             </div>
           )}
           {confirmOfflineQueue ? (
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 space-y-3 text-xs">
-              <p className="text-amber-100">
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 space-y-3 text-xs dark:border-amber-500/30 dark:bg-amber-500/10">
+              <p className="text-amber-950 dark:text-amber-200 font-medium">
                 Desktop worker is currently offline. Queue this song to transcribe automatically when your Windows PC comes online?
               </p>
               <div className="flex flex-wrap gap-2">
@@ -566,7 +566,7 @@ export function TranscriptionConfigPanel({
                   size="sm"
                   variant="ghost"
                   onClick={() => setConfirmOfflineQueue(false)}
-                  className="min-h-[44px]"
+                  className="min-h-[44px] bg-white hover:bg-stone-100 text-stone-800 border border-stone-300 dark:bg-white/5 dark:hover:bg-white/10 dark:text-slate-300 dark:border-white/10"
                 >
                   Cancel
                 </Button>
