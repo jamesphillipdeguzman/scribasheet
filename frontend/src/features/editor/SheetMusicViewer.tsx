@@ -17,7 +17,6 @@ import {
 import { Button } from "@/components/ui/Button";
 import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
 import { midiSynth } from "@/features/editor/midiSynth";
-import { diagLogOnce } from "@/features/editor/playbackDiag";
 import {
   addMeasureToAllParts,
   convertXmlNoteToRest,
@@ -245,7 +244,7 @@ export function SheetMusicViewer({
       if (snapshots.length > 1) {
         const idx = findCursorSnapshotIndex(snapshots, sec);
         if (idx >= 0) {
-          targetWhole = snapshots[idx].wholeNote;
+          targetWhole = snapshots[idx].osmdRealValue ?? snapshots[idx].wholeNote;
         }
       }
 
@@ -310,17 +309,6 @@ export function SheetMusicViewer({
         }
 
         const geom = computePlayheadGeometry(osmd);
-        if (isPlaying) {
-          diagLogOnce("firstCursor", "First cursor position calculated and applied", {
-            sec,
-            targetWhole,
-            snapshotCount: snapshots.length,
-            firstSnapshotSec: snapshots[0]?.sec,
-            secondSnapshotSec: snapshots[1]?.sec,
-            left: geom.left,
-            visible: geom.visible,
-          });
-        }
         setPlayheadRect((prev) =>
           prev.visible === geom.visible &&
             prev.left === geom.left &&
@@ -383,7 +371,8 @@ export function SheetMusicViewer({
         let prevReal = -1;
         let step = 0;
         let lastMeasureKey = "";
-        let fallbackMeasureStartRaw = 0;
+        let measureOriginRaw = 0;
+        let firstSoundingIdx: number | null = null;
 
         while (!osmd.cursor.iterator.EndReached && step < 4000) {
           const iter = osmd.cursor.iterator as unknown as {
@@ -423,17 +412,18 @@ export function SheetMusicViewer({
           const measureKey = mNum !== undefined ? `n:${mNum}` : `i:${mIdx ?? ""}`;
           if (measureKey !== lastMeasureKey) {
             lastMeasureKey = measureKey;
-            fallbackMeasureStartRaw = rawReal;
+            const absReal = measureObj?.AbsoluteTimestamp?.RealValue;
+            // OSMD right-aligns Measure 0 pickup notes inside a full bar (e.g. rawReal=0.75 while absReal=0.0);
+            // anchoring Measure 0 to its first cursor rawReal avoids a phantom 3-beat lead-in offset.
+            measureOriginRaw =
+              (mNum === 0 || mIdx === 0) && typeof absReal === "number"
+                ? Math.max(absReal, rawReal)
+                : typeof absReal === "number"
+                  ? absReal
+                  : rawReal;
           }
 
-          let beatOffsetWhole = 0;
-          if (typeof measureObj?.AbsoluteTimestamp?.RealValue === "number") {
-            beatOffsetWhole = Math.max(0, rawReal - measureObj.AbsoluteTimestamp.RealValue);
-          } else if (typeof iter.CurrentVoiceEntries?.[0]?.Timestamp?.RealValue === "number") {
-            beatOffsetWhole = Math.max(0, iter.CurrentVoiceEntries[0].Timestamp.RealValue);
-          } else {
-            beatOffsetWhole = Math.max(0, rawReal - fallbackMeasureStartRaw);
-          }
+          const beatOffsetWhole = Math.max(0, rawReal - measureOriginRaw);
 
           const measureWholeStart =
             (mNum !== undefined ? measureStartByNumber.get(mNum) : undefined) ??
@@ -453,6 +443,9 @@ export function SheetMusicViewer({
             }
           }
           if (hasSounding) {
+            if (firstSoundingIdx === null) {
+              firstSoundingIdx = snapshots.length;
+            }
             const matchedOnset = findNearestOnset(sec);
             if (matchedOnset !== null) {
               sec = matchedOnset;
@@ -460,7 +453,8 @@ export function SheetMusicViewer({
           }
 
           snapshots.push({
-            wholeNote: rawReal,
+            wholeNote: scoreWhole,
+            osmdRealValue: rawReal,
             sec,
             stepIndex: step,
           });
@@ -469,6 +463,19 @@ export function SheetMusicViewer({
           step++;
         }
         osmd.cursor.reset();
+
+        // Normalize both sec and wholeNote against the first sounding note so playback starts at 0.0s
+        if (snapshots.length > 0) {
+          const anchor = snapshots[firstSoundingIdx ?? 0] ?? snapshots[0];
+          const leadInSec = anchor.sec;
+          const leadInWhole = anchor.wholeNote;
+          if (leadInSec > 0 || leadInWhole > 0) {
+            for (const snap of snapshots) {
+              snap.sec = Math.max(0, snap.sec - leadInSec);
+              snap.wholeNote = Math.max(0, snap.wholeNote - leadInWhole);
+            }
+          }
+        }
       } catch {
         // Ignore iterator indexing errors
       }
@@ -692,7 +699,6 @@ export function SheetMusicViewer({
 
     let rafId: number | null = null;
     const tick = () => {
-      diagLogOnce("firstRaf", "First animation frame in SheetMusicViewer");
       const clock = midiSynth.getPlaybackClock();
       const sec = clock.isPlaying ? clock.currentSec : playheadSecRef.current;
       syncCursorToSecondsRef.current(sec, true);

@@ -11,7 +11,6 @@ import {
   saveMetronomeSettings,
 } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
-import { diagLogEvent, diagMarkPlayInteraction } from "@/features/editor/playbackDiag";
 import { API_BASE_URL, api } from "@/services/api";
 import type { ScoreNote } from "@/types/api";
 
@@ -216,12 +215,8 @@ export function WaveformPlayer({
     if (wsRef.current?.isPlaying()) wsRef.current.pause();
 
     if (midiSynth.needsSamplerWait()) {
-      diagLogEvent("Awaiting sampler readiness before playback");
       await midiSynth.loaded();
-      diagLogEvent("Sampler ready in WaveformPlayer", { pianoReady: midiSynth.isPianoReady() });
       if (attemptId !== playAttemptRef.current) return;
-    } else {
-      diagLogEvent("Sampler ready (preloaded/no-wait)", { pianoReady: midiSynth.isPianoReady() });
     }
 
     const beginSynth = () => {
@@ -294,7 +289,6 @@ export function WaveformPlayer({
       stopAll();
       return;
     }
-    diagMarkPlayInteraction({ sourceMode, playheadSec, isScoreOnly });
     if (sourceMode === "original" && wsRef.current) {
       playAttemptRef.current++;
       midiSynth.stop();

@@ -22,6 +22,7 @@ const {
     steps: [] as Array<{
       realValue: number;
       measureNumber: number;
+      measureAbsReal?: number;
       durationReal: number;
       num: number;
       den: number;
@@ -119,6 +120,7 @@ vi.mock("opensheetmusicdisplay", () => ({
             if (!cur) return undefined;
             return {
               MeasureNumber: cur.measureNumber,
+              AbsoluteTimestamp: { RealValue: cur.measureAbsReal ?? (cur.measureNumber === 0 ? 0 : cur.measureNumber) },
               Duration: { RealValue: cur.durationReal },
               ActiveTimeSignature: { Numerator: cur.num, Denominator: cur.den },
             };
@@ -641,5 +643,105 @@ describe("Piano Sampler Preloading, Pickup Timing & Spacebar Playback", () => {
       />,
     );
     expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "160px" });
+  });
+
+  it("removes OSMD 3-beat right-aligned pickup lead-in at 68 BPM and normalizes leading rests in 3/4", async () => {
+    const pickup68Xml = `<?xml version="1.0" encoding="utf-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>eighth</type></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>eighth</type></note>
+    </measure>
+    <measure number="1">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>half</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><type>half</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    // Simulate OSMD right-aligning 1-beat pickup in Measure 0: rawReal=0.75, 0.875 while AbsoluteTimestamp=0.0
+    mockOsmdState.steps = [
+      { realValue: 0.75, measureNumber: 0, measureAbsReal: 0.0, durationReal: 0.25, num: 4, den: 4, offsetLeft: 55 },
+      { realValue: 0.875, measureNumber: 0, measureAbsReal: 0.0, durationReal: 0.25, num: 4, den: 4, offsetLeft: 95 },
+      { realValue: 1.0, measureNumber: 1, measureAbsReal: 1.0, durationReal: 1.0, num: 4, den: 4, offsetLeft: 170 },
+      { realValue: 1.5, measureNumber: 1, measureAbsReal: 1.0, durationReal: 1.0, num: 4, den: 4, offsetLeft: 250 },
+    ];
+
+    const { rerender } = render(
+      <SheetMusicViewer
+        musicxml={pickup68Xml}
+        playheadSec={0}
+        isPlaying={true}
+        tempoBpm={68}
+        tracks={sampleTracks}
+      />,
+    );
+
+    // At t=0.0s, cursor starts immediately at first pickup eighth note (55px), NOT frozen for 2.6471s
+    await waitFor(() => {
+      expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "55px" });
+    });
+
+    // At t=0.45s (after 1 eighth note @ 68 BPM = 0.4412s), cursor moves to second pickup eighth note (95px)
+    rerender(
+      <SheetMusicViewer
+        musicxml={pickup68Xml}
+        playheadSec={0.45}
+        isPlaying={false}
+        tempoBpm={68}
+        tracks={sampleTracks}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "95px" });
+    });
+
+    // At t=0.90s (after 1 beat @ 68 BPM = 0.8824s), cursor enters Measure 1 downbeat (170px)
+    rerender(
+      <SheetMusicViewer
+        musicxml={pickup68Xml}
+        playheadSec={0.9}
+        isPlaying={false}
+        tempoBpm={68}
+        tracks={sampleTracks}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "170px" });
+    });
+
+    // 3/4 score with a leading quarter rest before the first sounding note
+    const waltzRestXml = `<?xml version="1.0" encoding="utf-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>3</beats><beat-type>4</beat-type></time></attributes>
+      <note><rest/><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>2</duration><type>half</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    mockOsmdState.steps = [
+      { realValue: 0.0, measureNumber: 1, measureAbsReal: 0.0, durationReal: 0.75, num: 3, den: 4, isRest: true, offsetLeft: 40 },
+      { realValue: 0.25, measureNumber: 1, measureAbsReal: 0.0, durationReal: 0.75, num: 3, den: 4, isRest: false, offsetLeft: 120 },
+    ];
+
+    rerender(
+      <SheetMusicViewer
+        musicxml={waltzRestXml}
+        playheadSec={0}
+        isPlaying={false}
+        tempoBpm={120}
+        tracks={sampleTracks}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "120px" });
+    });
   });
 });

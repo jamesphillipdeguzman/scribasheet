@@ -16,6 +16,7 @@ export interface MusicXmlTimeline {
 
 export interface OsmdCursorSnapshot {
   wholeNote: number;
+  osmdRealValue?: number;
   sec: number;
   stepIndex: number;
 }
