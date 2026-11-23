@@ -974,14 +974,17 @@ export function PianoRollEditor({
 
             <span
               data-testid="midi-connection-status"
-              className={`rounded-md border px-2 py-0.5 text-[11px] font-medium ${
+              className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] ${
                 webMidi.status === "connected"
-                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                  ? "bg-emerald-50 text-emerald-800 border-emerald-300 font-semibold dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/35"
                   : webMidi.status === "permission_denied" || webMidi.status === "not_supported"
-                    ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
-                    : "border-[#27273A] bg-[#181825] text-[#A1A1AA]"
+                    ? "bg-amber-50 text-amber-800 border-amber-300 font-medium dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200"
+                    : "bg-stone-100 text-stone-700 border-stone-300 font-medium dark:bg-white/5 dark:text-slate-400 dark:border-white/10"
               }`}
             >
+              {webMidi.status === "connected" && (
+                <span className="h-2 w-2 rounded-full bg-emerald-600 dark:bg-emerald-400 shrink-0" />
+              )}
               {statusText}
             </span>
 
@@ -1036,7 +1039,7 @@ export function PianoRollEditor({
               className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors ${
                 monitorEnabled
                   ? "bg-emerald-600 text-white border-emerald-700 font-semibold dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/40"
-                  : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:bg-white/5 dark:hover:bg-white/10 dark:text-slate-200 dark:border-white/10"
+                  : "bg-stone-100 hover:bg-stone-200/70 text-stone-600 border-stone-300 font-medium dark:bg-white/5 dark:hover:bg-white/10 dark:text-slate-200 dark:border-white/10"
               }`}
             >
               {monitorEnabled ? <Volume2 className="h-3 w-3" /> : <VolumeX className="h-3 w-3" />}
