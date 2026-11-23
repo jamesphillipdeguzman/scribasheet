@@ -297,7 +297,12 @@ export function MediaUploader({
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                    <span
+                      data-testid="uploaded-media-checkmark"
+                      className="inline-flex items-center justify-center rounded-full border border-emerald-300 bg-emerald-50 p-0.5 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-400 shrink-0"
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2.25} />
+                    </span>
                     <button
                       type="button"
                       aria-label="Remove uploaded media"

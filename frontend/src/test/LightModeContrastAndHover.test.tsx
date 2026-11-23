@@ -10,6 +10,7 @@ import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { VirtualPianoKeyboard } from "@/features/editor/VirtualPianoKeyboard";
 import { LandingPage } from "@/features/landing/LandingPage";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
+import { MediaUploader } from "@/features/uploads/MediaUploader";
 import { setControllerToken, workerController } from "@/services/workerController";
 import type { ScoreNote } from "@/types/api";
 
@@ -285,5 +286,37 @@ describe("Light Mode Contrast & Hover-State Fixes", () => {
     expect(cancelBtn.className).toContain("bg-white");
     expect(cancelBtn.className).toContain("text-stone-800");
     expect(cancelBtn.className).toContain("border-stone-300");
+  });
+
+  it("renders high-contrast Light Mode emerald checkmark badge on uploaded media items", () => {
+    render(
+      <MediaUploader
+        projectId="p1"
+        existingAssets={[
+          {
+            id: "a1",
+            project_id: "p1",
+            asset_type: "original",
+            original_filename: "song.mp3",
+            mime_type: "audio/mpeg",
+            size_bytes: 1024000,
+            duration_seconds: 120,
+            sample_rate: 44100,
+            channels: 2,
+            created_at: "2026-11-23T00:00:00Z",
+          },
+        ]}
+        isProcessing={false}
+        onUploadComplete={vi.fn()}
+        onMediaRemoved={vi.fn()}
+      />,
+    );
+
+    const checkBadge = screen.getByTestId("uploaded-media-checkmark");
+    expect(checkBadge.className).toContain("text-emerald-700");
+    expect(checkBadge.className).toContain("bg-emerald-50");
+    expect(checkBadge.className).toContain("border-emerald-300");
+    expect(checkBadge.className).toContain("dark:text-emerald-400");
+    expect(checkBadge.className).toContain("dark:bg-emerald-500/15");
   });
 });
