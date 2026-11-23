@@ -1,5 +1,6 @@
 import { Soundfont, SplendidGrandPiano } from "smplr";
 import { metronomeEngine } from "@/features/editor/metronome";
+import { diagLogEvent, diagLogOnce } from "@/features/editor/playbackDiag";
 import { midiToFreq } from "@/lib/utils";
 import type { ScoreNote } from "@/types/api";
 
@@ -319,6 +320,11 @@ export class MidiSynthesizer {
 
     const allowPiano = !this.isPlaying || this.sessionAllowPianoSampler;
     if (program === 0 && allowPiano && this.pianoSampler && this.pianoLoaded) {
+      diagLogOnce("firstAudible", "First audible note (SplendidGrandPiano)", {
+        pitchMidi,
+        startDelaySec,
+        ctxState: ctx.state,
+      });
       const stopFn = this.pianoSampler.start({
         note: pitchMidi,
         velocity: scaledVel,
@@ -396,6 +402,10 @@ export class MidiSynthesizer {
     osc1.start(startAt);
     osc2.start(startAt);
     osc3.start(startAt);
+    diagLogOnce("firstAudible", "First audible note (oscillator fallback)", {
+      pitchMidi,
+      ctxState: ctx.state,
+    });
     osc1.stop(stopAt);
     osc2.stop(stopAt);
     osc3.stop(stopAt);
@@ -479,6 +489,10 @@ export class MidiSynthesizer {
     osc1.start(startAt);
     osc2.start(startAt);
     osc3.start(startAt);
+    diagLogOnce("firstAudible", "First audible note (oscillator fallback)", {
+      pitchMidi,
+      ctxState: ctx.state,
+    });
 
     let released = false;
     const stopAll = () => {
@@ -550,6 +564,7 @@ export class MidiSynthesizer {
     const token = ++this.startToken;
     this.stopPlaybackOnly();
     const ctx = this.ensureContext();
+    diagLogEvent("AudioContext ready", { state: ctx.state, currentTime: ctx.currentTime });
     const requiredPrograms = Array.from(
       new Set([0, ...Object.values(options.trackPrograms ?? {})])
     );
@@ -597,6 +612,11 @@ export class MidiSynthesizer {
     this.currentPlaybackRate = options.playbackRate || 1;
     this.scheduledNotes.clear();
     this.lastBeatTick = -1;
+    diagLogEvent("Playback clock initialized", {
+      fromSec: options.fromSec,
+      playbackRate: this.currentPlaybackRate,
+      noteCount: options.notes.length,
+    });
     options.onPosition(options.fromSec);
 
     const totalDur = Math.max(
@@ -641,6 +661,12 @@ export class MidiSynthesizer {
           const delay = Math.max(0, (note.onset_sec - currentSec) / options.playbackRate);
           const prog = options.trackPrograms?.[note.track_index] ?? 0;
           const tVol = options.trackVolumes?.[note.track_index] ?? 1.0;
+          diagLogOnce("firstScheduled", "First MIDI note scheduled", {
+            noteId: note.id,
+            onsetSec: note.onset_sec,
+            currentSec,
+            delay,
+          });
           this.triggerNote(note.pitch_midi, dur, note.velocity, options.volume * tVol, delay, prog);
         }
       }

@@ -17,6 +17,7 @@ import {
 import { Button } from "@/components/ui/Button";
 import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
 import { midiSynth } from "@/features/editor/midiSynth";
+import { diagLogOnce } from "@/features/editor/playbackDiag";
 import {
   addMeasureToAllParts,
   convertXmlNoteToRest,
@@ -309,6 +310,17 @@ export function SheetMusicViewer({
         }
 
         const geom = computePlayheadGeometry(osmd);
+        if (isPlaying) {
+          diagLogOnce("firstCursor", "First cursor position calculated and applied", {
+            sec,
+            targetWhole,
+            snapshotCount: snapshots.length,
+            firstSnapshotSec: snapshots[0]?.sec,
+            secondSnapshotSec: snapshots[1]?.sec,
+            left: geom.left,
+            visible: geom.visible,
+          });
+        }
         setPlayheadRect((prev) =>
           prev.visible === geom.visible &&
             prev.left === geom.left &&
@@ -680,6 +692,7 @@ export function SheetMusicViewer({
 
     let rafId: number | null = null;
     const tick = () => {
+      diagLogOnce("firstRaf", "First animation frame in SheetMusicViewer");
       const clock = midiSynth.getPlaybackClock();
       const sec = clock.isPlaying ? clock.currentSec : playheadSecRef.current;
       syncCursorToSecondsRef.current(sec, true);
