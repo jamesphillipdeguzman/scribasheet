@@ -520,4 +520,126 @@ describe("Piano Sampler Preloading, Pickup Timing & Spacebar Playback", () => {
     fireEvent.keyDown(window, { code: "Space", key: " " });
     await waitFor(() => expect(synthStopSpy.mock.calls.length).toBeGreaterThan(stopCountBefore));
   });
+
+  it("initializes playhead immediately at t=0 and keeps rAF uninterrupted across Play, Pause, Resume, Seek, Stop, and tempo changes", async () => {
+    const pickupXml = `<?xml version="1.0" encoding="utf-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="1">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    mockOsmdState.steps = [
+      { realValue: 0.0, measureNumber: 0, durationReal: 0.25, num: 4, den: 4, offsetLeft: 50 },
+      { realValue: 1.0, measureNumber: 1, durationReal: 1.0, num: 4, den: 4, offsetLeft: 160 },
+    ];
+
+    let clockSec = 0;
+    let clockPlaying = false;
+    vi.spyOn(midiSynth, "getPlaybackClock").mockImplementation(() => ({
+      isPlaying: clockPlaying,
+      currentSec: clockSec,
+    }));
+
+    const rafCallbacks: FrameRequestCallback[] = [];
+    const cancelSpy = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      rafCallbacks.push(cb);
+      return rafCallbacks.length;
+    });
+
+    const { rerender } = render(
+      <SheetMusicViewer
+        musicxml={pickupXml}
+        playheadSec={0}
+        isPlaying={false}
+        tempoBpm={120}
+        tracks={sampleTracks}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "50px" });
+    });
+
+    // Play starts at t=0 -> immediate initialization & rAF starts
+    clockPlaying = true;
+    clockSec = 0;
+    rerender(
+      <SheetMusicViewer
+        musicxml={pickupXml}
+        playheadSec={0}
+        isPlaying={true}
+        tempoBpm={120}
+        tracks={sampleTracks}
+      />,
+    );
+    expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "50px" });
+
+    // Even as playheadSec updates on every React render, rAF is NOT cancelled/restarted
+    const cancelCountAfterStart = cancelSpy.mock.calls.length;
+    clockSec = 0.5;
+    rerender(
+      <SheetMusicViewer
+        musicxml={pickupXml}
+        playheadSec={0.5}
+        isPlaying={true}
+        tempoBpm={120}
+        tracks={sampleTracks}
+      />,
+    );
+    expect(cancelSpy.mock.calls.length).toBe(cancelCountAfterStart);
+
+    // Next rAF tick immediately moves playhead to Measure 1 downbeat (160px)
+    act(() => {
+      const cb = rafCallbacks[rafCallbacks.length - 1];
+      cb?.(performance.now());
+    });
+    expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "160px" });
+
+    // Pause -> Stop/Seek back to 0 -> playhead returns immediately to 50px
+    clockPlaying = false;
+    clockSec = 0;
+    rerender(
+      <SheetMusicViewer
+        musicxml={pickupXml}
+        playheadSec={0}
+        isPlaying={false}
+        tempoBpm={60}
+        tracks={sampleTracks}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "50px" });
+    });
+
+    // Tempo change to 60 BPM: Measure 1 downbeat now occurs at 1.0s (instead of 0.5s)
+    rerender(
+      <SheetMusicViewer
+        musicxml={pickupXml}
+        playheadSec={0.5}
+        isPlaying={false}
+        tempoBpm={60}
+        tracks={sampleTracks}
+      />,
+    );
+    expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "50px" });
+    rerender(
+      <SheetMusicViewer
+        musicxml={pickupXml}
+        playheadSec={1.0}
+        isPlaying={false}
+        tempoBpm={60}
+        tracks={sampleTracks}
+      />,
+    );
+    expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "160px" });
+  });
 });

@@ -597,6 +597,7 @@ export class MidiSynthesizer {
     this.currentPlaybackRate = options.playbackRate || 1;
     this.scheduledNotes.clear();
     this.lastBeatTick = -1;
+    options.onPosition(options.fromSec);
 
     const totalDur = Math.max(
       options.durationSec,

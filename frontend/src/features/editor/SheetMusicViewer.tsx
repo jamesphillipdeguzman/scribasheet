@@ -111,6 +111,8 @@ export function SheetMusicViewer({
   const cursorSnapshotsRef = useRef<OsmdCursorSnapshot[]>([]);
   const lastCursorWholeRef = useRef<number>(-1);
   const lastFollowedSystemRef = useRef<number>(-1);
+  const playheadSecRef = useRef<number>(playheadSec);
+  playheadSecRef.current = playheadSec;
   const manualScrollPauseUntilRef = useRef<number>(0);
   const programmaticScrollAtRef = useRef<number>(0);
   const savedScrollRef = useRef<{ top: number; left: number } | null>(null);
@@ -231,7 +233,7 @@ export function SheetMusicViewer({
   };
 
   const syncCursorToSeconds = useCallback(
-    (sec: number, allowAutoScroll: boolean) => {
+    (sec: number, allowAutoScroll: boolean, force = false) => {
       const osmd = osmdRef.current;
       if (!osmd || !osmd.cursor) return;
       const cursor = osmd.cursor;
@@ -246,7 +248,7 @@ export function SheetMusicViewer({
         }
       }
 
-      if (Math.abs(targetWhole - lastCursorWholeRef.current) < 0.002 && sec > 0) {
+      if (!force && Math.abs(targetWhole - lastCursorWholeRef.current) < 0.002 && sec > 0) {
         return;
       }
 
@@ -645,32 +647,49 @@ export function SheetMusicViewer({
     };
   }, []);
 
+  const syncCursorToSecondsRef = useRef(syncCursorToSeconds);
+  syncCursorToSecondsRef.current = syncCursorToSeconds;
+
+  // Re-index cursor timeline snapshots if notes or tempo change without re-rendering OSMD SVG
+  useEffect(() => {
+    if (isRendering || !osmdRef.current) return;
+    indexRenderedScore(osmdRef.current, timeline);
+    syncCursorToSecondsRef.current(playheadSecRef.current, false, true);
+  }, [timeline, notes, tempoBpm, isRendering]);
+
   // Keep cursor synced to playheadSec when paused/seeking/stopped
   useEffect(() => {
     if (isRendering) return;
     if (!isPlaying) {
-      syncCursorToSeconds(playheadSec, false);
+      syncCursorToSeconds(playheadSec, false, true);
       if (playheadSec === 0) {
         clearNoteheadHighlights();
       }
     }
   }, [playheadSec, isPlaying, isRendering, syncCursorToSeconds]);
 
-  // Smooth rAF cursor tracking synced to authoritative playback clock while playing
+  // Smooth, uninterrupted rAF cursor tracking synced to authoritative playback clock while playing
   useEffect(() => {
     if (!isPlaying || isRendering) return;
+
+    // Immediately initialize playhead & notehead highlights at the current/first sounding position
+    const initClock = midiSynth.getPlaybackClock();
+    const initSec = initClock.isPlaying ? initClock.currentSec : playheadSecRef.current;
+    lastCursorWholeRef.current = -1;
+    syncCursorToSecondsRef.current(initSec, true, true);
+
     let rafId: number | null = null;
     const tick = () => {
       const clock = midiSynth.getPlaybackClock();
-      const sec = clock.isPlaying ? clock.currentSec : playheadSec;
-      syncCursorToSeconds(sec, true);
+      const sec = clock.isPlaying ? clock.currentSec : playheadSecRef.current;
+      syncCursorToSecondsRef.current(sec, true);
       rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
     return () => {
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
-  }, [isPlaying, isRendering, syncCursorToSeconds, playheadSec]);
+  }, [isPlaying, isRendering]);
 
   const applyXmlEdit = useCallback(
     (resultXml: string | null, nextTarget?: XmlNoteTarget | null) => {
