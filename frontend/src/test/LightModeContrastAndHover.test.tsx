@@ -7,6 +7,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/Button";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { VirtualPianoKeyboard } from "@/features/editor/VirtualPianoKeyboard";
+import { LandingPage } from "@/features/landing/LandingPage";
 import type { ScoreNote } from "@/types/api";
 
 vi.mock("@/features/auth/AuthContext", () => ({
@@ -146,5 +147,36 @@ describe("Light Mode Contrast & Hover-State Fixes", () => {
     expect(activeBlack.className).toContain("bg-[#8b5cf6]");
     expect(inactiveBlack.className).toContain("bg-[#1e293b]");
     expect(inactiveBlack.className).toContain("border-[#0f172a]");
+  });
+
+  it("renders dynamic copyright notice for James Phillip De Guzman in both LandingPage and AppShell footers", () => {
+    const year = new Date().getFullYear();
+    const expectedText = `© ${year} James Phillip De Guzman. All rights reserved.`;
+    const qc = new QueryClient();
+
+    const { unmount } = render(
+      <MemoryRouter>
+        <QueryClientProvider client={qc}>
+          <LandingPage />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    const landingCopy = screen.getByText(expectedText);
+    expect(landingCopy.className).toContain("text-stone-600");
+    expect(landingCopy.className).toContain("dark:text-slate-500");
+    unmount();
+
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={qc}>
+          <AppShell>
+            <div>Studio Content</div>
+          </AppShell>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    const shellCopy = screen.getByText(expectedText);
+    expect(shellCopy.className).toContain("text-stone-600");
+    expect(shellCopy.className).toContain("dark:text-slate-500");
   });
 });

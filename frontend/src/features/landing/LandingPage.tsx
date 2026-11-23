@@ -434,13 +434,20 @@ export function LandingPage() {
       </section>
 
       {/* Footer */}
-      <footer className="py-10 bg-[#09090F]">
+      <footer className="border-t border-stone-200 dark:border-white/10 py-10 bg-[#09090F]">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
           <BrandMark size="sm" />
-          <p className="text-xs text-[#A1A1AA]">ScribaSheet — AI-Powered Music Transcription Studio. From Sound to Sheet Music.</p>
-          <div className="flex items-center gap-4 text-xs text-[#A1A1AA]">
-            <Link to="/login" className="hover:text-[#F5F3FF]">Sign In</Link>
-            <Link to="/register" className="hover:text-[#F5F3FF]">Create Account</Link>
+          <div className="text-center space-y-1">
+            <p className="text-xs text-stone-600 dark:text-slate-400">
+              ScribaSheet — AI-Powered Music Transcription Studio. From Sound to Sheet Music.
+            </p>
+            <p className="text-xs text-stone-600 dark:text-slate-500">
+              © {new Date().getFullYear()} James Phillip De Guzman. All rights reserved.
+            </p>
+          </div>
+          <div className="flex items-center gap-4 text-xs text-stone-600 dark:text-slate-400">
+            <Link to="/login" className="hover:text-stone-950 dark:hover:text-[#F5F3FF] transition-colors">Sign In</Link>
+            <Link to="/register" className="hover:text-stone-950 dark:hover:text-[#F5F3FF] transition-colors">Create Account</Link>
           </div>
         </div>
       </footer>

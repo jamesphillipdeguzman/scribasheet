@@ -147,6 +147,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
       </header>
       <main className="flex-1 min-w-0">{children}</main>
+      <footer className="border-t border-stone-200 dark:border-white/10 py-4 mt-8">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-stone-600 dark:text-slate-400">
+          <span>ScribaSheet — AI-Powered Music Transcription Studio.</span>
+          <span className="text-stone-600 dark:text-slate-500">
+            © {new Date().getFullYear()} James Phillip De Guzman. All rights reserved.
+          </span>
+        </div>
+      </footer>
     </div>
   );
 }
