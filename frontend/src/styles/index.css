@@ -14,10 +14,79 @@
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
 
+  html.light body {
+    background-color: #f8f7f4;
+    color: #18181b;
+  }
+
   *:focus-visible {
     outline: 2px solid #a78bfa;
     outline-offset: 2px;
   }
+}
+
+/* Light mode semantic palette overrides */
+html.light .bg-\[\#09090F\],
+html.light .bg-\[\#09090f\],
+html.light .bg-\[\#0b0d17\],
+html.light .bg-\[\#0B0D17\] {
+  background-color: #f8f7f4 !important;
+}
+
+html.light .bg-\[\#09090F\]\/85,
+html.light .bg-\[\#09090F\]\/90 {
+  background-color: rgba(248, 247, 244, 0.9) !important;
+}
+
+html.light .bg-\[\#11111B\],
+html.light .bg-\[\#11111b\],
+html.light .bg-\[\#111424\],
+html.light .bg-\[\#11111B\]\/90 {
+  background-color: #ffffff !important;
+}
+
+html.light .bg-\[\#181825\] {
+  background-color: #f1efe9 !important;
+}
+
+html.light .border-\[\#27273A\],
+html.light .border-\[\#27273A\]\/80,
+html.light .border-\[\#27273A\]\/60 {
+  border-color: #e2dfd7 !important;
+}
+
+html.light .text-\[\#F5F3FF\],
+html.light .text-\[\#f5f3ff\] {
+  color: #18181b !important;
+}
+
+html.light .text-\[\#A1A1AA\],
+html.light .text-\[\#a1a1aa\] {
+  color: #52525b !important;
+}
+
+html.light .text-\[\#71717A\] {
+  color: #71717a !important;
+}
+
+html.light .text-\[\#A78BFA\] {
+  color: #6d28d9 !important;
+}
+
+/* Keep crisp white text on solid violet primary buttons/tabs in light mode */
+html.light .bg-\[\#8B5CF6\],
+html.light .bg-\[\#7C3AED\] {
+  color: #ffffff !important;
+}
+
+html.light ::-webkit-scrollbar-track {
+  background: #f1efe9;
+}
+html.light ::-webkit-scrollbar-thumb {
+  background: #d4d0c7;
+}
+html.light ::-webkit-scrollbar-thumb:hover {
+  background: #a8a29e;
 }
 
 @keyframes ambientBreathe {

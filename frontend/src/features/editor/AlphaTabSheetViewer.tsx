@@ -4,13 +4,15 @@ import { Maximize2, Minimize2, Pause, Play, Square, ZoomIn, ZoomOut } from "luci
 import { Button } from "@/components/ui/Button";
 import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
 import { midiSynth } from "@/features/editor/midiSynth";
+import { injectChordsIntoMusicXml } from "@/features/editor/musicXmlChords";
 import { normalizeScorePayload } from "@/features/editor/musicXmlNormalization";
 import { getStoredTokens } from "@/services/api";
-import type { ScoreNote, ScoreTrack } from "@/types/api";
+import type { ScoreChord, ScoreNote, ScoreTrack } from "@/types/api";
 
 export interface AlphaTabSheetViewerProps {
   musicxml: string | null;
   notes?: ScoreNote[];
+  chords?: ScoreChord[];
   showChordSymbols?: boolean;
   onToggleChordSymbols?: (value: boolean) => void;
   playheadSec?: number;
@@ -37,6 +39,7 @@ const SATB_COLORS: Record<string, string> = {
 };
 
 const EMPTY_NOTES: ScoreNote[] = [];
+const EMPTY_CHORDS: ScoreChord[] = [];
 const EMPTY_TRACKS: ScoreTrack[] = [];
 const EMPTY_MUTED: Record<string, boolean> = {};
 
@@ -64,6 +67,7 @@ export function resolveAlphaTabTrackRole(
 export function AlphaTabSheetViewer({
   musicxml,
   notes = EMPTY_NOTES,
+  chords = EMPTY_CHORDS,
   showChordSymbols = true,
   onToggleChordSymbols,
   playheadSec = 0,
@@ -148,6 +152,8 @@ export function AlphaTabSheetViewer({
     settings.core.fontDirectory = "/alphatab/font/";
     settings.display.layoutMode = alphaTab.LayoutMode.Page;
     settings.display.scale = zoom;
+    settings.notation.elements.set(alphaTab.NotationElement.EffectChordNames, effectiveShowChords);
+    settings.notation.elements.set(alphaTab.NotationElement.ChordDiagrams, false);
     settings.player.playerMode = alphaTab.PlayerMode.EnabledExternalMedia;
     settings.player.enableCursor = true;
     settings.player.enableUserInteraction = true;
@@ -288,11 +294,13 @@ export function AlphaTabSheetViewer({
     };
   }, [pushExternalPosition]);
 
-  // Update zoom / scrollMode settings without destroying AlphaTab instance
+  // Update zoom / scrollMode / chord-display settings without destroying AlphaTab instance
   useEffect(() => {
     const api = apiRef.current;
     if (!api) return;
     api.settings.display.scale = zoom;
+    api.settings.notation.elements.set(alphaTab.NotationElement.EffectChordNames, effectiveShowChords);
+    api.settings.notation.elements.set(alphaTab.NotationElement.ChordDiagrams, false);
     api.settings.player.scrollMode = followCursor
       ? alphaTab.ScrollMode.Continuous
       : alphaTab.ScrollMode.Off;
@@ -300,7 +308,7 @@ export function AlphaTabSheetViewer({
     if (loadedTracksRef.current.length > 0) {
       api.render();
     }
-  }, [zoom, followCursor]);
+  }, [zoom, followCursor, effectiveShowChords]);
 
   // Load and normalize MusicXML / MXL / URL payloads into AlphaTab
   useEffect(() => {
@@ -345,8 +353,11 @@ export function AlphaTabSheetViewer({
         }
 
         if (cancelled || !apiRef.current) return;
+        const enrichedXml = effectiveShowChords
+          ? injectChordsIntoMusicXml(displayXml, chords, notes, tempoBpm)
+          : displayXml;
         setPayloadStatus("ready");
-        const bytes = new TextEncoder().encode(displayXml);
+        const bytes = new TextEncoder().encode(enrichedXml);
         const loaded = apiRef.current.load(bytes);
         if (!loaded) {
           throw new Error("AlphaTab could not parse the MusicXML score.");
@@ -364,7 +375,7 @@ export function AlphaTabSheetViewer({
     return () => {
       cancelled = true;
     };
-  }, [musicxml, effectiveShowChords]);
+  }, [musicxml, effectiveShowChords, chords, notes, tempoBpm]);
 
   // Sync AlphaTab cursor when paused/seeking/stopped
   useEffect(() => {
@@ -406,7 +417,12 @@ export function AlphaTabSheetViewer({
   return (
     <div
       data-testid="alphatab-sheet-music-viewer"
-      className={`space-y-3 w-full min-w-0 ${isFocusMode ? "flex-1 min-h-0 flex flex-col" : ""}`}
+      data-focus-mode={isFocusMode ? "true" : "false"}
+      className={
+        isFocusMode
+          ? "fixed inset-0 z-50 flex flex-col gap-3 bg-[#09090F] p-3 sm:p-4 w-screen h-screen overflow-hidden"
+          : "space-y-3 w-full min-w-0"
+      }
     >
       <style>{`
         .at-cursor-bar { background: rgba(59, 130, 246, 0.08); }

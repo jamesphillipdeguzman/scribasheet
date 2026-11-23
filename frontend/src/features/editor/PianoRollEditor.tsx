@@ -69,6 +69,8 @@ interface PianoRollEditorProps {
   showChordSymbols?: boolean;
   onToggleChordSymbols?: (value: boolean) => void;
   onMusicXmlChange?: (nextXml: string) => void;
+  isFocusMode?: boolean;
+  onToggleFocusMode?: () => void;
 }
 
 const MIN_PITCH = 36; // C2
@@ -128,9 +130,21 @@ export function PianoRollEditor({
   showChordSymbols = true,
   onToggleChordSymbols,
   onMusicXmlChange,
+  isFocusMode: controlledFocusMode,
+  onToggleFocusMode,
 }: PianoRollEditorProps) {
   const [viewMode, setViewMode] = useState<"grid" | "cascade" | "sheet">("grid");
-  const [isFocusMode, setIsFocusMode] = useState(false);
+  const [internalFocusMode, setInternalFocusMode] = useState(false);
+  const isFocusMode = controlledFocusMode !== undefined ? controlledFocusMode : internalFocusMode;
+  const setIsFocusMode = (updater: boolean | ((prev: boolean) => boolean)) => {
+    const next = typeof updater === "function" ? updater(isFocusMode) : updater;
+    if (controlledFocusMode === undefined) {
+      setInternalFocusMode(next);
+    }
+    if (next !== isFocusMode && onToggleFocusMode) {
+      onToggleFocusMode();
+    }
+  };
   const [autoSwitchToCascade, setAutoSwitchToCascade] = useState(false);
   const [internalMetronome, setInternalMetronome] = useState<MetronomeSettings>(() =>
     loadMetronomeSettings(),

@@ -33,6 +33,7 @@ import {
   normalizeScorePayload,
   prepareDisplayMusicXml,
 } from "@/features/editor/musicXmlNormalization";
+import { injectChordsIntoMusicXml } from "@/features/editor/musicXmlChords";
 import {
   buildMusicXmlTimeline,
   findCursorSnapshotIndex,
@@ -44,7 +45,7 @@ import {
 } from "@/features/editor/musicXmlTimeline";
 import { midiToNoteName } from "@/lib/utils";
 import { getStoredTokens } from "@/services/api";
-import type { ScoreNote, ScoreTrack } from "@/types/api";
+import type { ScoreChord, ScoreNote, ScoreTrack } from "@/types/api";
 
 export { cleanDisplayScoreTitle, prepareDisplayMusicXml };
 
@@ -90,6 +91,7 @@ interface RenderedMusicalEvent {
 interface SheetMusicViewerProps {
   musicxml: string | null;
   notes?: ScoreNote[];
+  chords?: ScoreChord[];
   showChordSymbols?: boolean;
   onToggleChordSymbols?: (value: boolean) => void;
   playheadSec?: number;
@@ -125,12 +127,14 @@ function getInitialNotationEngine(defaultEngine?: "alphatab" | "osmd"): "alphata
 }
 
 const EMPTY_NOTES: ScoreNote[] = [];
+const EMPTY_CHORDS: ScoreChord[] = [];
 const EMPTY_TRACKS: ScoreTrack[] = [];
 const EMPTY_MUTED: Record<string, boolean> = {};
 
 export function SheetMusicViewer({
   musicxml,
   notes = EMPTY_NOTES,
+  chords = EMPTY_CHORDS,
   showChordSymbols = true,
   onToggleChordSymbols,
   playheadSec = 0,
@@ -1026,7 +1030,11 @@ export function SheetMusicViewer({
         if (isStale() || !containerRef.current) return;
         const containerEl = containerRef.current;
 
-        setResolvedXml(displayXml);
+        const enrichedXml = effectiveShowChords
+          ? injectChordsIntoMusicXml(displayXml, chords, notes, tempoBpm)
+          : displayXml;
+
+        setResolvedXml(enrichedXml);
         setPayloadStatus("ready");
 
         // If OSMD was previously bound to a different/unmounted DOM node, dispose & recreate
@@ -1057,12 +1065,12 @@ export function SheetMusicViewer({
         if (rules && "RenderChordSymbols" in rules) {
           rules.RenderChordSymbols = effectiveShowChords;
         }
-        await osmd.load(displayXml);
+        await osmd.load(enrichedXml);
         if (isStale()) return;
         osmd.Zoom = zoom;
         osmd.render();
 
-        const localTimeline = buildMusicXmlTimeline(displayXml, tempoBpm);
+        const localTimeline = buildMusicXmlTimeline(enrichedXml, tempoBpm);
         indexRenderedScore(osmd, localTimeline);
 
         lastCursorWholeRef.current = -1;
@@ -1100,7 +1108,7 @@ export function SheetMusicViewer({
       clearNoteheadHighlights();
       clearSelectedHighlight();
     };
-  }, [engine, musicxml, zoom, effectiveShowChords, disposeOsmdInstance]);
+  }, [engine, musicxml, zoom, effectiveShowChords, chords, notes, tempoBpm, disposeOsmdInstance]);
 
   // Clean up OSMD instance and listeners on unmount
   useEffect(() => {
@@ -1280,6 +1288,7 @@ export function SheetMusicViewer({
       <AlphaTabSheetViewer
         musicxml={musicxml}
         notes={notes}
+        chords={chords}
         showChordSymbols={showChordSymbols}
         onToggleChordSymbols={onToggleChordSymbols}
         playheadSec={playheadSec}
@@ -1315,7 +1324,12 @@ export function SheetMusicViewer({
   return (
     <div
       data-testid="sheet-music-viewer"
-      className={`space-y-3 w-full min-w-0 max-w-full ${isFocusMode ? "flex-1 min-h-0 flex flex-col" : ""}`}
+      data-focus-mode={isFocusMode ? "true" : "false"}
+      className={
+        isFocusMode
+          ? "fixed inset-0 z-50 flex flex-col gap-3 bg-[#09090F] p-3 sm:p-4 w-screen h-screen overflow-hidden"
+          : "space-y-3 w-full min-w-0 max-w-full"
+      }
     >
       <div className="flex flex-wrap items-center justify-between gap-2 shrink-0">
         <div className="flex flex-wrap items-center gap-2">

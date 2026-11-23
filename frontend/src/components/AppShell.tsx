@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { LayoutDashboard, LogOut, Menu, Music, Settings, User as UserIcon, X } from "lucide-react";
 import { BrandMark } from "@/components/BrandMark";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/Button";
 import { useAuth } from "@/features/auth/AuthContext";
 import { cn } from "@/lib/utils";
@@ -55,6 +56,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+            <ThemeToggle />
             {usage && (() => {
               const isUnlimited = Boolean(usage.is_unlimited || user?.is_unlimited);
               const planLabel = usage.plan_label || (isUnlimited ? "UNLIMITED" : usage.plan_tier);

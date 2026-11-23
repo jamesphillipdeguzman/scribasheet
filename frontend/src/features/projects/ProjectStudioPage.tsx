@@ -10,6 +10,8 @@ import {
   FileText,
   Guitar,
   Loader2,
+  Maximize2,
+  Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -53,6 +55,16 @@ export function ProjectStudioPage() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeTab, setActiveTab] = useState<StudioTab>("notation");
+  const [isFocusMode, setIsFocusMode] = useState(false);
+
+  useEffect(() => {
+    if (!isFocusMode) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsFocusMode(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isFocusMode]);
   const [showPartMixerOverride, setShowPartMixerOverride] = useState<boolean | null>(null);
   const [playheadSec, setPlayheadSec] = useState(0);
   const [isPlaybackActive, setIsPlaybackActive] = useState(false);
@@ -854,33 +866,49 @@ export function ProjectStudioPage() {
 
             {/* Workspace Tabs */}
             <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-3 sm:p-4 space-y-4 min-w-0">
-              <div className="flex flex-nowrap items-center gap-1 overflow-x-auto border-b border-[#27273A] pb-3" role="tablist">
-                {[
-                  { id: "notation" as const, label: "Sheet Music", icon: FileMusic },
-                  { id: "pianoroll" as const, label: "Piano Roll Editor", icon: Piano },
-                  { id: "chords" as const, label: "Chords & Guitar Tab", icon: Guitar },
-                  { id: "lyrics" as const, label: "Lyrics", icon: FileText },
-                  { id: "exports" as const, label: "Export Center", icon: Download },
-                ].map((t) => {
-                  const Icon = t.icon;
-                  const active = activeTab === t.id;
-                  return (
-                    <button
-                      key={t.id}
-                      role="tab"
-                      aria-selected={active}
-                      onClick={() => setActiveTab(t.id)}
-                      className={`inline-flex shrink-0 min-h-[40px] items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-                        active
-                          ? "bg-[#8B5CF6] text-[#F5F3FF]"
-                          : "text-[#A1A1AA] hover:text-[#F5F3FF] hover:bg-[#181825]"
-                      }`}
-                    >
-                      <Icon className="h-3.5 w-3.5" />
-                      {t.label}
-                    </button>
-                  );
-                })}
+              <div className="flex flex-nowrap items-center justify-between gap-2 overflow-x-auto border-b border-[#27273A] pb-3" role="tablist">
+                <div className="flex flex-nowrap items-center gap-1 min-w-0">
+                  {[
+                    { id: "notation" as const, label: "Sheet Music", icon: FileMusic },
+                    { id: "pianoroll" as const, label: "Piano Roll Editor", icon: Piano },
+                    { id: "chords" as const, label: "Chords & Guitar Tab", icon: Guitar },
+                    { id: "lyrics" as const, label: "Lyrics", icon: FileText },
+                    { id: "exports" as const, label: "Export Center", icon: Download },
+                  ].map((t) => {
+                    const Icon = t.icon;
+                    const active = activeTab === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        role="tab"
+                        aria-selected={active}
+                        onClick={() => setActiveTab(t.id)}
+                        className={`inline-flex shrink-0 min-h-[40px] items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                          active
+                            ? "bg-[#8B5CF6] text-[#F5F3FF]"
+                            : "text-[#A1A1AA] hover:text-[#F5F3FF] hover:bg-[#181825]"
+                        }`}
+                      >
+                        <Icon className="h-3.5 w-3.5" />
+                        {t.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {(activeTab === "notation" || activeTab === "pianoroll") && (
+                  <Button
+                    size="sm"
+                    variant={isFocusMode ? "primary" : "secondary"}
+                    onClick={() => setIsFocusMode((v) => !v)}
+                    title={isFocusMode ? "Exit Focus" : "Maximize"}
+                    aria-label={isFocusMode ? "Exit Focus" : "Maximize"}
+                    data-testid="workspace-focus-toggle"
+                    className="shrink-0 ml-auto"
+                  >
+                    {isFocusMode ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                    <span className="hidden sm:inline">{isFocusMode ? "Exit Focus" : "Maximize"}</span>
+                  </Button>
+                )}
               </div>
 
               {(runtimeBadgeText || (canShowMixer && !isGenuineSatb)) && (
@@ -989,6 +1017,7 @@ export function ProjectStudioPage() {
                   <SheetMusicViewer
                     musicxml={musicxml}
                     notes={scoreData?.notes}
+                    chords={scoreData?.chords}
                     showChordSymbols={showChordSymbols}
                     onToggleChordSymbols={handleToggleChordSymbols}
                     playheadSec={playheadSec}
@@ -1001,6 +1030,8 @@ export function ProjectStudioPage() {
                     onTogglePlay={() => setTogglePlaySignal((n) => n + 1)}
                     onStopPlay={() => setStopPlaySignal((n) => n + 1)}
                     onSeek={(sec) => setSeekRequest({ sec, autoplay: isPlaybackActive, nonce: Date.now() })}
+                    isFocusMode={isFocusMode}
+                    onToggleFocusMode={() => setIsFocusMode((v) => !v)}
                     onMusicXmlChange={handleMusicXmlChange}
                   />
                 ))}
@@ -1045,6 +1076,8 @@ export function ProjectStudioPage() {
                     musicxml={musicxml}
                     showChordSymbols={showChordSymbols}
                     onToggleChordSymbols={handleToggleChordSymbols}
+                    isFocusMode={isFocusMode}
+                    onToggleFocusMode={() => setIsFocusMode((v) => !v)}
                     onMusicXmlChange={handleMusicXmlChange}
                   />
                 ) : (

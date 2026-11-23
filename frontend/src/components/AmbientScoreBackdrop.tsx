@@ -1,9 +1,13 @@
+import { useTheme } from "@/features/theme/ThemeContext";
 import { cn } from "@/lib/utils";
 
 interface AmbientScoreBackdropProps {
   variant?: "hero" | "watermark";
   className?: string;
 }
+
+const FEATHER_MASK =
+  "radial-gradient(ellipse 75% 70% at 50% 45%, black 35%, transparent 85%)";
 
 /**
  * Decorative, non-interactive ambient musical score backdrop using /images/hero1.webp.
@@ -13,11 +17,19 @@ export function AmbientScoreBackdrop({
   variant = "hero",
   className,
 }: AmbientScoreBackdropProps) {
+  const { theme } = useTheme();
   const isHero = variant === "hero";
+  const isLight = theme === "light";
 
-  const maskGradient = isHero
-    ? "radial-gradient(ellipse 78% 72% at 50% 40%, rgba(0, 0, 0, 0.96) 0%, rgba(0, 0, 0, 0.55) 48%, rgba(0, 0, 0, 0) 82%)"
-    : "radial-gradient(ellipse 72% 68% at 78% 28%, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0.35) 45%, rgba(0, 0, 0, 0) 80%)";
+  const opacityClass = isHero
+    ? isLight
+      ? "opacity-[0.35]"
+      : "opacity-[0.22]"
+    : isLight
+      ? "opacity-[0.18]"
+      : "opacity-[0.12]";
+
+  const blendClass = isLight ? "mix-blend-multiply" : "mix-blend-screen";
 
   return (
     <div
@@ -29,14 +41,14 @@ export function AmbientScoreBackdrop({
         className,
       )}
     >
-      {isHero && (
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(124,58,237,0.14),transparent_65%)]" />
+      {isHero && !isLight && (
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(139,92,246,0.18),rgba(245,158,11,0.05)_45%,transparent_72%)]" />
       )}
       <div
         className="absolute inset-0"
         style={{
-          maskImage: maskGradient,
-          WebkitMaskImage: maskGradient,
+          maskImage: FEATHER_MASK,
+          WebkitMaskImage: FEATHER_MASK,
         }}
       >
         <img
@@ -46,15 +58,15 @@ export function AmbientScoreBackdrop({
           loading={isHero ? "eager" : "lazy"}
           decoding="async"
           className={cn(
-            "h-full w-full object-cover object-center mix-blend-luminosity",
-            isHero
-              ? "opacity-[0.11] animate-ambient-breathe"
-              : "opacity-[0.05]",
+            "h-full w-full object-cover object-center",
+            blendClass,
+            opacityClass,
+            isHero && "animate-ambient-breathe",
           )}
           style={{
-            filter: isHero
-              ? "saturate(1.15) hue-rotate(-10deg) contrast(1.06) brightness(0.9)"
-              : "saturate(1.05) hue-rotate(-10deg) contrast(1.02) brightness(0.85)",
+            filter: isLight
+              ? "contrast(1.08) brightness(1.02) saturate(0.95)"
+              : "saturate(1.2) hue-rotate(-8deg) contrast(1.08) brightness(0.92)",
           }}
         />
       </div>

@@ -2,6 +2,7 @@ import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Link, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/features/auth/AuthContext";
+import { ThemeProvider } from "@/features/theme/ThemeContext";
 import { ForgotPasswordPage, LoginPage, RegisterPage } from "@/features/auth/AuthPages";
 import { SettingsPage } from "@/features/auth/SettingsPage";
 import { DashboardPage } from "@/features/dashboard/DashboardPage";
@@ -60,9 +61,10 @@ function NotFoundPage() {
 
 export function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <BrowserRouter>
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <BrowserRouter>
           <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />
@@ -97,6 +99,7 @@ export function App() {
         </BrowserRouter>
       </AuthProvider>
     </QueryClientProvider>
+  </ThemeProvider>
   );
 }
 
