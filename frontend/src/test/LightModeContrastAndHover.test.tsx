@@ -9,6 +9,7 @@ import { WorkerControlPanel } from "@/components/WorkerControlPanel";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { VirtualPianoKeyboard } from "@/features/editor/VirtualPianoKeyboard";
 import { LandingPage } from "@/features/landing/LandingPage";
+import { MetronomeControl } from "@/features/editor/MetronomeControl";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { MediaUploader } from "@/features/uploads/MediaUploader";
 import { setControllerToken, workerController } from "@/services/workerController";
@@ -318,5 +319,50 @@ describe("Light Mode Contrast & Hover-State Fixes", () => {
     expect(checkBadge.className).toContain("border-emerald-300");
     expect(checkBadge.className).toContain("dark:text-emerald-400");
     expect(checkBadge.className).toContain("dark:bg-emerald-500/15");
+  });
+
+  it("renders high-contrast Light Mode Metronome pill, Stop Click button, and unclipped Subdivision select", () => {
+    render(
+      <MetronomeControl
+        tempoBpm={120}
+        scoreTimeSignature="4/4"
+        isPlaybackActive={false}
+        activeBeat={null}
+        settings={{
+          enabled: true,
+          volume: 0.7,
+          countInBars: 1,
+          sound: "woodblock",
+          subdivision: "quarter",
+          accentBeatOne: true,
+          timeSignatureOverride: null,
+        }}
+        onChangeSettings={vi.fn()}
+      />,
+    );
+
+    const metroToggle = screen.getByRole("button", { name: "Metronome" });
+    expect(metroToggle.className).toContain("bg-violet-100");
+    expect(metroToggle.className).toContain("text-violet-900");
+    expect(metroToggle.className).toContain("border-violet-300");
+
+    fireEvent.click(screen.getByRole("button", { name: "Metronome settings" }));
+    const dialog = screen.getByRole("dialog", { name: "Metronome Settings" });
+    expect(dialog.className).toContain("w-80");
+
+    const subdivSelect = screen.getByLabelText("Metronome subdivision");
+    expect(subdivSelect.textContent).toContain("Quarter (1/4)");
+
+    const standaloneBtn = screen.getByRole("button", { name: /Standalone Click/i });
+    expect(standaloneBtn.className).toContain("bg-white");
+    expect(standaloneBtn.className).toContain("text-stone-800");
+    expect(standaloneBtn.className).toContain("border-stone-300");
+
+    fireEvent.click(standaloneBtn);
+    const stopClickBtn = screen.getByRole("button", { name: /Stop Click/i });
+    expect(stopClickBtn.className).toContain("bg-rose-50");
+    expect(stopClickBtn.className).toContain("text-rose-800");
+    expect(stopClickBtn.className).toContain("border-rose-300");
+    expect(stopClickBtn.className).toContain("font-semibold");
   });
 });

@@ -109,7 +109,7 @@ export function MetronomeControl({
           onClick={toggleEnabled}
           className={`px-2 py-1 text-xs rounded-l transition-colors ${
             settings.enabled
-              ? "bg-violet-100 text-violet-900 font-semibold dark:bg-[#181825] dark:text-[#A78BFA] dark:font-medium"
+              ? "bg-violet-100 text-violet-900 border-violet-300 font-semibold dark:bg-violet-500/20 dark:text-violet-300 dark:border-violet-500/40 dark:font-medium"
               : "text-stone-800 hover:bg-stone-100 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-transparent"
           }`}
         >
@@ -165,7 +165,7 @@ export function MetronomeControl({
         <div
           role="dialog"
           aria-label="Metronome Settings"
-          className="absolute right-0 top-full mt-2 z-50 w-72 rounded-xl border border-[#27273A] bg-[#11111B] p-3 shadow-2xl space-y-3 text-xs text-[#F5F3FF]"
+          className="absolute right-0 top-full mt-2 z-50 w-80 rounded-xl border border-[#27273A] bg-[#11111B] p-3 shadow-2xl space-y-3 text-xs text-[#F5F3FF]"
         >
           <div className="flex items-center justify-between border-b border-[#27273A] pb-2">
             <span className="inline-flex items-center gap-1.5 font-semibold">
@@ -234,10 +234,10 @@ export function MetronomeControl({
                     subdivision: e.target.value as MetronomeSubdivision,
                   })
                 }
-                className="w-full h-7 rounded border border-[#27273A] bg-[#09090F] px-2 text-xs text-[#F5F3FF]"
+                className="w-full h-7 rounded border border-[#27273A] bg-[#09090F] px-1.5 pr-5 text-[11px] text-[#F5F3FF]"
               >
-                <option value="quarter">Quarter Notes (1/4)</option>
-                <option value="eighth">Eighth Notes (1/8)</option>
+                <option value="quarter">Quarter (1/4)</option>
+                <option value="eighth">Eighth (1/8)</option>
               </select>
             </label>
 
@@ -306,10 +306,10 @@ export function MetronomeControl({
               <button
                 type="button"
                 onClick={toggleStandalone}
-                className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-[11px] font-medium border ${
+                className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-[11px] border transition-colors ${
                   standaloneActive
-                    ? "border-rose-500/40 bg-rose-500/15 text-rose-200"
-                    : "border-[#8B5CF6]/50 bg-[#8B5CF6]/15 text-[#F5F3FF] hover:bg-[#8B5CF6]/25"
+                    ? "bg-rose-50 hover:bg-rose-100 text-rose-800 border-rose-300 font-semibold dark:bg-rose-500/15 dark:hover:bg-rose-500/25 dark:text-rose-300 dark:border-rose-500/40"
+                    : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:bg-white/5 dark:hover:bg-white/10 dark:text-slate-200 dark:border-white/10"
                 }`}
               >
                 {standaloneActive ? (
