@@ -10,6 +10,28 @@ const SCORE_EXTENSIONS = [".pdf", ".mxl", ".musicxml"];
 const ACCEPTED_EXTENSIONS = [...ACCEPTED_AUDIO_EXTENSIONS, ...SCORE_EXTENSIONS];
 const MAX_SIZE_BYTES = 100 * 1024 * 1024;
 
+export function getUploadedFormatBadge(asset: MediaAsset): { label: string; isScore: boolean } {
+  const filename = (asset.original_filename || "").trim();
+  const isScore = isScoreMediaAsset(asset);
+  if (/^mic-recording-/i.test(filename)) {
+    return { label: "MIC RECORDING", isScore: false };
+  }
+  const extMatch = filename.match(/\.([a-z0-9]+)$/i);
+  if (extMatch) {
+    return { label: extMatch[1].toUpperCase(), isScore };
+  }
+  const mime = (asset.mime_type || "").toLowerCase();
+  if (mime.includes("pdf")) return { label: "PDF", isScore: true };
+  if (mime.includes("musicxml") || mime.includes("xml")) return { label: "MUSICXML", isScore: true };
+  if (mime.includes("mpeg") || mime.includes("mp3")) return { label: "MP3", isScore: false };
+  if (mime.includes("wav")) return { label: "WAV", isScore: false };
+  if (mime.includes("flac")) return { label: "FLAC", isScore: false };
+  if (mime.includes("mp4")) return { label: "MP4", isScore: false };
+  if (mime.includes("webm")) return { label: "WEBM", isScore: false };
+  const sub = mime.split("/")[1]?.split(";")[0]?.toUpperCase();
+  return { label: sub || (isScore ? "SCORE" : "AUDIO"), isScore };
+}
+
 interface MediaUploaderProps {
   projectId: string;
   existingAssets: MediaAsset[];
@@ -270,9 +292,26 @@ export function MediaUploader({
 
       {originalAssets.length > 0 && (
         <div className="space-y-2">
-          <div className="text-xs font-medium text-[#A1A1AA]">
-            {hasScoreAsset ? "Uploaded Score" : "Uploaded Media"}
-          </div>
+          {(() => {
+            const primaryBadge = getUploadedFormatBadge(originalAssets[0]);
+            return (
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-medium text-[#A1A1AA]">
+                  {hasScoreAsset ? "Uploaded Score" : "Uploaded Media"}
+                </span>
+                <span
+                  data-testid="uploaded-format-badge"
+                  className={`border font-semibold text-[11px] px-2 py-0.5 rounded-full uppercase tracking-wide ${
+                    primaryBadge.isScore
+                      ? "bg-sky-100 text-sky-900 border-sky-300 dark:bg-sky-500/15 dark:text-sky-300 dark:border-sky-500/35"
+                      : "bg-violet-100 text-violet-900 border-violet-300 dark:bg-violet-500/15 dark:text-violet-300 dark:border-violet-500/35"
+                  }`}
+                >
+                  {primaryBadge.label}
+                </span>
+              </div>
+            );
+          })()}
           {originalAssets.map((a) => {
             const isDeleting = deletingAssetId === a.id;
             const removeDisabled = isProcessing || uploadProgress !== null || deletingAssetId !== null;

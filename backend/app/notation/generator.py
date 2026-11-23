@@ -334,7 +334,74 @@ def clean_score_title(raw_title: str | None) -> str:
     return text or "ScribaSheet Transcription"
 
 
-def apply_scribasheet_musicxml_branding(xml_str: str, *, title: str | None = None) -> str:
+def upsert_arranger_credit_in_xml(root: "ET.Element", transcribed_by: str | None) -> None:
+    """Upsert XML-aware <creator type='arranger'> and Page 1 'Transcribed by:' credit without duplicates."""
+    import xml.etree.ElementTree as ET
+
+    cleaned = (transcribed_by or "").strip()
+    ident = root.find("identification")
+    if ident is None:
+        ident = ET.SubElement(root, "identification")
+
+    for existing_arr in [c for c in ident.findall("creator") if (c.attrib.get("type") or "").strip().lower() == "arranger"]:
+        ident.remove(existing_arr)
+
+    for existing_credit in list(root.findall("credit")):
+        ctype = (existing_credit.findtext("credit-type") or "").strip().lower()
+        cwords = " ".join((cw.text or "") for cw in existing_credit.findall("credit-words")).strip()
+        if ctype == "arranger" or cwords.lower().startswith("transcribed by:"):
+            root.remove(existing_credit)
+
+    if not cleaned:
+        return
+
+    arr_el = ET.SubElement(ident, "creator", {"type": "arranger"})
+    arr_el.text = cleaned
+
+    # Determine Page 1 placement from MusicXML page-layout if available
+    default_x = "120"
+    default_y = "1445"
+    page_layout = root.find("./defaults/page-layout")
+    if page_layout is not None:
+        left_margin = page_layout.findtext("./page-margins/left-margin")
+        page_height = page_layout.findtext("page-height")
+        top_margin = page_layout.findtext("./page-margins/top-margin")
+        try:
+            if left_margin:
+                default_x = str(int(round(float(left_margin))))
+            if page_height and top_margin:
+                default_y = str(int(round(float(page_height) - float(top_margin) - 70)))
+        except ValueError:
+            pass
+
+    credit_el = ET.Element("credit", {"page": "1"})
+    ct_el = ET.SubElement(credit_el, "credit-type")
+    ct_el.text = "arranger"
+    cw_el = ET.SubElement(
+        credit_el,
+        "credit-words",
+        {
+            "default-x": default_x,
+            "default-y": default_y,
+            "justify": "left",
+            "valign": "top",
+            "font-size": "10",
+        },
+    )
+    cw_el.text = f"Transcribed by: {cleaned}"
+
+    # Insert before the first <part> so MusicXML element ordering stays valid
+    children = list(root)
+    insert_idx = next((i for i, ch in enumerate(children) if ch.tag == "part"), len(children))
+    root.insert(insert_idx, credit_el)
+
+
+def apply_scribasheet_musicxml_branding(
+    xml_str: str,
+    *,
+    title: str | None = None,
+    transcribed_by: str | None = None,
+) -> str:
     """Replace default Music21 attribution with ScribaSheet, strip title extensions, and preserve XML declaration."""
     import xml.etree.ElementTree as ET
 
@@ -422,6 +489,9 @@ def apply_scribasheet_musicxml_branding(xml_str: str, *, title: str | None = Non
             )
             if updated != words_el.text:
                 words_el.text = updated
+
+    if transcribed_by is not None:
+        upsert_arranger_credit_in_xml(root, transcribed_by)
 
     body = ET.tostring(root, encoding="unicode")
     if not body.lstrip().startswith("<?xml"):
@@ -1304,13 +1374,14 @@ def _render_pdf_from_musicxml_via_musescore(
     xml_str: str,
     *,
     title: str | None = None,
+    transcribed_by: str | None = None,
 ) -> bytes | None:
     if os.environ.get("DISABLE_MUSESCORE_PDF", "").lower() in ("1", "true", "yes"):
         return None
     mscore_bin = _find_musescore_binary()
     if not mscore_bin or not xml_str:
         return None
-    xml_str = apply_scribasheet_musicxml_branding(xml_str)
+    xml_str = apply_scribasheet_musicxml_branding(xml_str, title=title, transcribed_by=transcribed_by)
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -1334,14 +1405,23 @@ def _render_pdf_from_musicxml_via_musescore(
     return None
 
 
-def _render_pdf_via_musescore(score: ScoreData, *, include_chords: bool = True) -> bytes | None:
+def _render_pdf_via_musescore(
+    score: ScoreData,
+    *,
+    include_chords: bool = True,
+    transcribed_by: str | None = None,
+) -> bytes | None:
     if os.environ.get("DISABLE_MUSESCORE_PDF", "").lower() in ("1", "true", "yes"):
         return None
     if not _find_musescore_binary():
         return None
     try:
         xml_str = score_data_to_musicxml(score, include_chords=include_chords)
-        return _render_pdf_from_musicxml_via_musescore(xml_str, title=score.title)
+        return _render_pdf_from_musicxml_via_musescore(
+            xml_str,
+            title=score.title,
+            transcribed_by=transcribed_by,
+        )
     except Exception:
         return None
 

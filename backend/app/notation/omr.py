@@ -1090,12 +1090,82 @@ def _strip_artificial_pickup_padding(root: ET.Element) -> bool:
     return changed
 
 
+_KEY_SIGNATURE_TO_FIFTHS: dict[str, int] = {
+    "c major": 0, "c": 0, "a minor": 0, "am": 0,
+    "g major": 1, "g": 1, "e minor": 1, "em": 1,
+    "d major": 2, "d": 2, "b minor": 2, "bm": 2,
+    "a major": 3, "a": 3, "f# minor": 3, "f#m": 3,
+    "e major": 4, "e": 4, "c# minor": 4, "c#m": 4,
+    "b major": 5, "b": 5, "g# minor": 5, "g#m": 5,
+    "f# major": 6, "f#": 6, "d# minor": 6, "d#m": 6,
+    "c# major": 7, "c#": 7, "a# minor": 7, "a#m": 7,
+    "f major": -1, "f": -1, "d minor": -1, "dm": -1,
+    "bb major": -2, "bb": -2, "g minor": -2, "gm": -2,
+    "eb major": -3, "eb": -3, "c minor": -3, "cm": -3,
+    "ab major": -4, "ab": -4, "f minor": -4, "fm": -4,
+    "db major": -5, "db": -5, "bb minor": -5, "bbm": -5,
+    "gb major": -6, "gb": -6, "eb minor": -6, "ebm": -6,
+    "cb major": -7, "cb": -7, "ab minor": -7, "abm": -7,
+}
+
+
+def _key_signature_to_fifths(key_sig: str | None) -> int | None:
+    if not key_sig:
+        return None
+    normalized = " ".join(key_sig.strip().lower().replace("♭", "b").replace("♯", "#").split())
+    return _KEY_SIGNATURE_TO_FIFTHS.get(normalized)
+
+
+def _ensure_key_and_measure1_attributes(
+    root: ET.Element,
+    *,
+    fallback_key_signature: str | None = None,
+) -> None:
+    """Ensure measure 1 of every part has divisions, key/fifths, time, and clef without overwriting valid keys."""
+    fallback_fifths = _key_signature_to_fifths(fallback_key_signature)
+    for part in root.findall("part"):
+        measures = part.findall("measure")
+        if not measures:
+            continue
+        m1 = measures[0]
+        attrs = m1.find("attributes")
+        if attrs is None:
+            attrs = ET.Element("attributes")
+            m1.insert(0, attrs)
+
+        if attrs.find("divisions") is None:
+            div_el = ET.SubElement(attrs, "divisions")
+            div_el.text = "4"
+
+        key_el = attrs.find("key")
+        if key_el is None:
+            key_el = ET.SubElement(attrs, "key")
+        fifths_el = key_el.find("fifths")
+        if fifths_el is None or not (fifths_el.text or "").strip():
+            if fifths_el is None:
+                fifths_el = ET.SubElement(key_el, "fifths")
+            fifths_el.text = str(fallback_fifths if fallback_fifths is not None else 0)
+
+        if attrs.find("time") is None:
+            time_el = ET.SubElement(attrs, "time")
+            ET.SubElement(time_el, "beats").text = "4"
+            ET.SubElement(time_el, "beat-type").text = "4"
+
+        if attrs.find("clef") is None:
+            clef_el = ET.SubElement(attrs, "clef")
+            ET.SubElement(clef_el, "sign").text = "G"
+            ET.SubElement(clef_el, "line").text = "2"
+
+
 def sanitize_omr_musicxml(
     xml_str: str,
     *,
     pdf_path: Path | None = None,
+    fallback_key_signature: str | None = None,
 ) -> tuple[str, list[str]]:
-    """Remove footer/copyright pseudo-lyrics and flag cue/grace notes safely in OMR MusicXML."""
+    """Remove footer/copyright pseudo-lyrics, normalize NFKC ligatures, preserve key/measure1 attrs, and flag cue notes."""
+    import unicodedata
+
     warnings: list[str] = []
     if not xml_str or "<score-" not in xml_str:
         return xml_str, warnings
@@ -1112,6 +1182,9 @@ def sanitize_omr_musicxml(
     for note_el in root.findall(".//note"):
         # Strip individual footer/copyright text mistakenly attached as <lyric>
         for lyr in list(note_el.findall("lyric")):
+            for t in lyr.findall("text"):
+                if t.text:
+                    t.text = unicodedata.normalize("NFKC", t.text)
             txt = "".join(t.text or "" for t in lyr.findall("text")).strip()
             raw_y = lyr.attrib.get("default-y")
             try:
@@ -1145,6 +1218,7 @@ def sanitize_omr_musicxml(
     _sanitize_satb_harmonies(root)
     _consolidate_satb_lyrics_to_soprano(root)
     _strip_artificial_pickup_padding(root)
+    _ensure_key_and_measure1_attributes(root, fallback_key_signature=fallback_key_signature)
 
     # Strip footer <credit-words> / <words> far below the lowest staff if needed
     for dir_el in root.findall(".//direction"):

@@ -186,3 +186,41 @@ def test_musicxml_engraving_rounds_decimal_tempo_markings() -> None:
         assert expected_str in sounds
         assert str(raw_bpm) not in per_mins
         assert str(raw_bpm) not in sounds
+
+
+def test_omr_nfkc_lyrics_key_preservation_and_arranger_credit_upsert() -> None:
+    from app.notation.generator import apply_scribasheet_musicxml_branding
+    from app.notation.omr import sanitize_omr_musicxml
+
+    omr_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <identification>
+    <creator type="composer">John Newton</creator>
+  </identification>
+  <part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <note>
+        <pitch><step>F</step><octave>4</octave></pitch>
+        <duration>4</duration><type>whole</type>
+        <lyric number="1"><text>ﬁrst ﬂight</text></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>"""
+
+    sanitized, _ = sanitize_omr_musicxml(omr_xml, fallback_key_signature="F major")
+    assert "first flight" in sanitized
+    assert "<fifths>-1</fifths>" in sanitized
+
+    # Existing valid non-C key must not be overwritten by C major fallback
+    sanitized_again, _ = sanitize_omr_musicxml(sanitized, fallback_key_signature="C major")
+    assert "<fifths>-1</fifths>" in sanitized_again
+
+    branded = apply_scribasheet_musicxml_branding(sanitized_again, title="Amazing Grace", transcribed_by="Ada Lovelace")
+    assert '<creator type="composer">John Newton</creator>' in branded
+    assert '<creator type="arranger">Ada Lovelace</creator>' in branded
+    assert "Transcribed by: Ada Lovelace" in branded
+
+    branded_twice = apply_scribasheet_musicxml_branding(branded, title="Amazing Grace", transcribed_by="Ada Lovelace")
+    assert branded_twice.count("Transcribed by: Ada Lovelace") == 1

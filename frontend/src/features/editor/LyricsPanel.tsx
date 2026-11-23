@@ -283,7 +283,7 @@ export function LyricsPanel({
               </span>
             )}
             {lyrics?.manually_edited && (
-              <span className="rounded bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300">
+              <span className="rounded border border-emerald-300 bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-950 dark:border-emerald-500/35 dark:bg-emerald-500/15 dark:text-emerald-200">
                 Edited
               </span>
             )}
@@ -358,7 +358,10 @@ export function LyricsPanel({
         </div>
       )}
       {notice && (
-        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-200">
+        <div
+          data-testid="lyrics-status-notice"
+          className="rounded-lg bg-emerald-50 border border-emerald-300 p-3 text-xs text-emerald-950 font-medium dark:bg-emerald-500/10 dark:border-emerald-500/30 dark:text-emerald-200"
+        >
           {notice}
         </div>
       )}
@@ -464,8 +467,8 @@ export function LyricsPanel({
                     onClick={() => setSegmentFilter("needs_review")}
                     className={`rounded-md px-2 py-1 font-medium transition-colors ${
                       segmentFilter === "needs_review"
-                        ? "bg-amber-500/30 text-amber-200"
-                        : "text-[#A1A1AA] hover:text-[#F5F3FF]"
+                        ? "bg-amber-100 text-amber-950 border border-amber-300 font-semibold dark:bg-amber-500/30 dark:text-amber-200 dark:border-transparent"
+                        : "text-stone-700 hover:text-stone-950 dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF]"
                     }`}
                   >
                     Needs Review ({needsReviewCount})
@@ -494,15 +497,15 @@ export function LyricsPanel({
 
                         <div className="flex flex-wrap items-center gap-1.5">
                           {seg.needs_review ? (
-                            <span className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-300">
+                            <span className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] bg-amber-100 text-amber-950 border-amber-300 font-semibold dark:bg-amber-500/15 dark:text-amber-200 dark:border-amber-500/35">
                               <AlertTriangle className="h-3 w-3" /> Needs Review
                             </span>
                           ) : seg.edited ? (
-                            <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-300">
+                            <span className="rounded border border-violet-300 bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold text-violet-900 dark:border-violet-500/35 dark:bg-violet-500/15 dark:text-violet-300">
                               Edited
                             </span>
                           ) : seg.reviewed ? (
-                            <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                            <span className="rounded border px-1.5 py-0.5 text-[10px] bg-emerald-100 text-emerald-950 border-emerald-300 font-semibold dark:bg-emerald-500/15 dark:text-emerald-200 dark:border-emerald-500/35">
                               Reviewed
                             </span>
                           ) : null}
@@ -510,7 +513,7 @@ export function LyricsPanel({
                           <button
                             type="button"
                             onClick={() => toggleSegmentNeedsReview(seg.id)}
-                            className="rounded px-1.5 py-0.5 text-[10px] text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF]"
+                            className="px-2 py-1 rounded-md text-[10px] text-stone-700 hover:bg-stone-100 hover:text-stone-950 font-medium transition-colors dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
                           >
                             {seg.needs_review ? "Mark Reviewed" : "Flag Review"}
                           </button>
@@ -520,7 +523,7 @@ export function LyricsPanel({
                               type="button"
                               aria-label={`Edit segment ${seg.id}`}
                               onClick={() => openInlineEditor(seg)}
-                              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-[#A78BFA] hover:bg-[#181825]"
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] text-violet-700 hover:bg-violet-100 hover:text-violet-900 font-medium transition-colors dark:text-violet-300 dark:hover:bg-violet-500/20 dark:hover:text-violet-100"
                             >
                               <Pencil className="h-3 w-3" /> Edit
                             </button>

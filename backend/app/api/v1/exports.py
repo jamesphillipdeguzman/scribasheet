@@ -18,8 +18,10 @@ from app.models import (
     User,
 )
 from app.notation.generator import (
+    _render_pdf_from_musicxml_via_musescore,
     _render_pdf_via_musescore,
     add_pdf_footer,
+    apply_scribasheet_musicxml_branding,
     clean_score_title,
     count_pdf_pages,
     render_score_pdf,
@@ -27,6 +29,7 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
+from app.notation.omr import sanitize_omr_musicxml
 from app.schemas.export import ExportCreateRequest, ExportResponse
 from app.schemas.score import ScoreData
 from app.storage.service import sanitize_filename, storage_service
@@ -52,9 +55,33 @@ def _resolve_pdf_export_bytes(
     score: ScoreData,
     *,
     include_chords: bool = True,
+    musicxml_path: str | None = None,
+    transcribed_by: str | None = None,
 ) -> bytes:
-    """Prefer MuseScore 4 PDF (local or worker-generated for current score version) over ReportLab fallback."""
-    musescore_local = _render_pdf_via_musescore(score, include_chords=include_chords)
+    """Prefer MuseScore 4 PDF (from saved MusicXML when available, or ScoreData) over ReportLab fallback."""
+    if musicxml_path:
+        try:
+            saved_xml = storage_service.read_bytes(musicxml_path).decode("utf-8-sig", errors="replace")
+            if "<score-" in saved_xml:
+                cleaned_xml, _ = sanitize_omr_musicxml(
+                    saved_xml,
+                    fallback_key_signature=score.key_signature,
+                )
+                musescore_from_xml = _render_pdf_from_musicxml_via_musescore(
+                    cleaned_xml,
+                    title=score.title,
+                    transcribed_by=transcribed_by,
+                )
+                if musescore_from_xml is not None:
+                    return musescore_from_xml
+        except FileNotFoundError:
+            pass
+
+    musescore_local = _render_pdf_via_musescore(
+        score,
+        include_chords=include_chords,
+        transcribed_by=transcribed_by,
+    )
     if musescore_local is not None:
         return musescore_local
 
@@ -150,10 +177,21 @@ def create_export(
         score.title = clean_score_title(project.title)
         mime_type, ext = EXPORT_MIME_TYPES[payload.format]
 
+        effective_transcribed_by = (
+            (payload.transcribed_by or "").strip() if payload.include_transcribed_by else ""
+        ) or None
+
         if payload.format == "midi":
             content = score_data_to_midi_bytes(score)
         elif payload.format == "musicxml":
-            content = score_data_to_musicxml(score, include_chords=payload.include_chords).encode("utf-8")
+            xml_out = score_data_to_musicxml(score, include_chords=payload.include_chords)
+            if effective_transcribed_by:
+                xml_out = apply_scribasheet_musicxml_branding(
+                    xml_out,
+                    title=score.title,
+                    transcribed_by=effective_transcribed_by,
+                )
+            content = xml_out.encode("utf-8")
         elif payload.format == "pdf":
             content = _resolve_pdf_export_bytes(
                 db,
@@ -161,6 +199,8 @@ def create_export(
                 score_row.version,
                 score,
                 include_chords=payload.include_chords,
+                musicxml_path=score_row.musicxml_path,
+                transcribed_by=effective_transcribed_by,
             )
         elif payload.format == "wav":
             content = render_score_wav(score)

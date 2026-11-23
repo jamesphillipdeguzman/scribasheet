@@ -357,12 +357,15 @@ export function SATBMixerPanel({
       </div>
 
       {satbMeta.warnings && satbMeta.warnings.length > 0 && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 space-y-1">
-          <div className="flex items-center gap-1.5 font-medium">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+        <div
+          data-testid="recognition-notes-callout"
+          className="rounded-lg bg-amber-50 border border-amber-300 p-3 text-xs space-y-1 dark:bg-amber-500/10 dark:border-amber-500/30"
+        >
+          <div className="flex items-center gap-1.5 text-amber-950 font-semibold dark:text-amber-200">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-950 dark:text-amber-200" />
             {satbMeta.needs_review ? "SATB Recognition Needs Review" : "Recognition Notes"}
           </div>
-          <ul className="list-disc pl-5 space-y-0.5">
+          <ul className="list-disc pl-5 space-y-0.5 text-amber-900 font-medium dark:text-amber-200/90">
             {satbMeta.warnings.map((w, idx) => (
               <li key={idx}>{w}</li>
             ))}

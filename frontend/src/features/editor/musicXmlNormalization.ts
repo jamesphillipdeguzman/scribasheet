@@ -705,7 +705,170 @@ export function normalizeTempoMarkings(doc: Document): void {
   }
 }
 
-export function prepareDisplayMusicXml(xml: string, showChords: boolean): string {
+const KEY_SIGNATURE_TO_FIFTHS: Record<string, number> = {
+  "c major": 0, c: 0, "a minor": 0, am: 0,
+  "g major": 1, g: 1, "e minor": 1, em: 1,
+  "d major": 2, d: 2, "b minor": 2, bm: 2,
+  "a major": 3, a: 3, "f# minor": 3, "f#m": 3,
+  "e major": 4, e: 4, "c# minor": 4, "c#m": 4,
+  "b major": 5, b: 5, "g# minor": 5, "g#m": 5,
+  "f# major": 6, "f#": 6, "d# minor": 6, "d#m": 6,
+  "c# major": 7, "c#": 7, "a# minor": 7, "a#m": 7,
+  "f major": -1, f: -1, "d minor": -1, dm: -1,
+  "bb major": -2, bb: -2, "g minor": -2, gm: -2,
+  "eb major": -3, eb: -3, "c minor": -3, cm: -3,
+  "ab major": -4, ab: -4, "f minor": -4, fm: -4,
+  "db major": -5, db: -5, "bb minor": -5, bbm: -5,
+  "gb major": -6, gb: -6, "eb minor": -6, ebm: -6,
+  "cb major": -7, cb: -7, "ab minor": -7, abm: -7,
+};
+
+export function normalizeLyricLigaturesNfkc(doc: Document): void {
+  for (const lyrEl of Array.from(doc.getElementsByTagName("lyric"))) {
+    for (const tEl of Array.from(lyrEl.getElementsByTagName("text"))) {
+      if (tEl.textContent) {
+        const nfkc = tEl.textContent.normalize("NFKC");
+        if (nfkc !== tEl.textContent) {
+          tEl.textContent = nfkc;
+        }
+      }
+    }
+  }
+}
+
+export function ensureMeasure1Attributes(
+  doc: Document,
+  fallbackKeySignature?: string | null,
+): void {
+  const normKey = (fallbackKeySignature || "")
+    .trim()
+    .toLowerCase()
+    .replace(/♭/g, "b")
+    .replace(/♯/g, "#")
+    .replace(/\s+/g, " ");
+  const fallbackFifths = normKey in KEY_SIGNATURE_TO_FIFTHS ? KEY_SIGNATURE_TO_FIFTHS[normKey] : null;
+
+  for (const part of Array.from(doc.getElementsByTagName("part"))) {
+    const m1 = part.getElementsByTagName("measure")[0];
+    if (!m1) continue;
+    let attrs = Array.from(m1.children).find((c) => c.tagName.toLowerCase() === "attributes");
+    if (!attrs) {
+      attrs = doc.createElement("attributes");
+      m1.insertBefore(attrs, m1.firstChild);
+    }
+    if (!attrs.getElementsByTagName("divisions")[0]) {
+      const divEl = doc.createElement("divisions");
+      divEl.textContent = "4";
+      attrs.appendChild(divEl);
+    }
+    let keyEl = attrs.getElementsByTagName("key")[0];
+    if (!keyEl) {
+      keyEl = doc.createElement("key");
+      attrs.appendChild(keyEl);
+    }
+    let fifthsEl = keyEl.getElementsByTagName("fifths")[0];
+    if (!fifthsEl || !(fifthsEl.textContent || "").trim()) {
+      if (!fifthsEl) {
+        fifthsEl = doc.createElement("fifths");
+        keyEl.appendChild(fifthsEl);
+      }
+      fifthsEl.textContent = String(fallbackFifths !== null ? fallbackFifths : 0);
+    }
+    if (!attrs.getElementsByTagName("time")[0]) {
+      const timeEl = doc.createElement("time");
+      const beats = doc.createElement("beats");
+      beats.textContent = "4";
+      const beatType = doc.createElement("beat-type");
+      beatType.textContent = "4";
+      timeEl.appendChild(beats);
+      timeEl.appendChild(beatType);
+      attrs.appendChild(timeEl);
+    }
+    if (!attrs.getElementsByTagName("clef")[0]) {
+      const clefEl = doc.createElement("clef");
+      const sign = doc.createElement("sign");
+      sign.textContent = "G";
+      const line = doc.createElement("line");
+      line.textContent = "2";
+      clefEl.appendChild(sign);
+      clefEl.appendChild(line);
+      attrs.appendChild(clefEl);
+    }
+  }
+}
+
+export function upsertArrangerCredit(doc: Document, transcribedBy?: string | null): void {
+  const cleaned = (transcribedBy || "").trim();
+  const root = doc.documentElement;
+  if (!root) return;
+
+  let ident = Array.from(root.children).find((c) => c.tagName.toLowerCase() === "identification");
+  if (!ident) {
+    ident = doc.createElement("identification");
+    root.insertBefore(ident, root.firstChild);
+  }
+  for (const cr of Array.from(ident.getElementsByTagName("creator"))) {
+    if ((cr.getAttribute("type") || "").trim().toLowerCase() === "arranger") {
+      cr.parentNode?.removeChild(cr);
+    }
+  }
+  for (const creditEl of Array.from(root.children).filter((c) => c.tagName.toLowerCase() === "credit")) {
+    const ctype = (creditEl.getElementsByTagName("credit-type")[0]?.textContent || "").trim().toLowerCase();
+    const cwords = Array.from(creditEl.getElementsByTagName("credit-words"))
+      .map((w) => w.textContent || "")
+      .join(" ")
+      .trim()
+      .toLowerCase();
+    if (ctype === "arranger" || cwords.startsWith("transcribed by:")) {
+      creditEl.parentNode?.removeChild(creditEl);
+    }
+  }
+
+  if (!cleaned) return;
+
+  const arrEl = doc.createElement("creator");
+  arrEl.setAttribute("type", "arranger");
+  arrEl.textContent = cleaned;
+  ident.appendChild(arrEl);
+
+  let defaultX = "120";
+  let defaultY = "1445";
+  const pageLayout = root.getElementsByTagName("page-layout")[0];
+  if (pageLayout) {
+    const leftM = Number.parseFloat(pageLayout.getElementsByTagName("left-margin")[0]?.textContent || "");
+    const pageH = Number.parseFloat(pageLayout.getElementsByTagName("page-height")[0]?.textContent || "");
+    const topM = Number.parseFloat(pageLayout.getElementsByTagName("top-margin")[0]?.textContent || "");
+    if (Number.isFinite(leftM)) defaultX = String(Math.round(leftM));
+    if (Number.isFinite(pageH) && Number.isFinite(topM)) defaultY = String(Math.round(pageH - topM - 70));
+  }
+
+  const creditEl = doc.createElement("credit");
+  creditEl.setAttribute("page", "1");
+  const ctEl = doc.createElement("credit-type");
+  ctEl.textContent = "arranger";
+  const cwEl = doc.createElement("credit-words");
+  cwEl.setAttribute("default-x", defaultX);
+  cwEl.setAttribute("default-y", defaultY);
+  cwEl.setAttribute("justify", "left");
+  cwEl.setAttribute("valign", "top");
+  cwEl.setAttribute("font-size", "10");
+  cwEl.textContent = `Transcribed by: ${cleaned}`;
+  creditEl.appendChild(ctEl);
+  creditEl.appendChild(cwEl);
+
+  const firstPart = Array.from(root.children).find((c) => c.tagName.toLowerCase() === "part");
+  if (firstPart) {
+    root.insertBefore(creditEl, firstPart);
+  } else {
+    root.appendChild(creditEl);
+  }
+}
+
+export function prepareDisplayMusicXml(
+  xml: string,
+  showChords: boolean,
+  options?: { fallbackKeySignature?: string | null; transcribedBy?: string | null },
+): string {
   const stripped = xml.replace(/^\uFEFF/, "").trim();
   if (!isMusicXmlDocument(stripped)) {
     return stripped;
@@ -747,10 +910,15 @@ export function prepareDisplayMusicXml(xml: string, showChords: boolean): string
             cw.textContent = "ScribaSheet";
           }
         }
+        normalizeLyricLigaturesNfkc(doc);
         sanitizeDocumentFooterLyrics(doc);
         consolidateSatbLyricsToSoprano(doc);
         stripArtificialPickupPadding(doc);
         normalizeTempoMarkings(doc);
+        ensureMeasure1Attributes(doc, options?.fallbackKeySignature);
+        if (options?.transcribedBy !== undefined) {
+          upsertArrangerCredit(doc, options.transcribedBy);
+        }
 
         const serialized = new XMLSerializer().serializeToString(doc).replace(/^\uFEFF/, "").trim();
         if (serialized.startsWith("<?xml")) {

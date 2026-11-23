@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, FileAudio, FileMusic, FileText, Loader2, Music, Printer } from "lucide-react";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { useAuth } from "@/features/auth/AuthContext";
 import { printScorePdf } from "@/lib/pdfPrint";
 import { formatLocalDateTime } from "@/lib/utils";
 import { api, ApiError } from "@/services/api";
@@ -11,10 +12,15 @@ import type { ExportRecord } from "@/types/api";
 interface ExportCenterProps {
   projectId: string;
   projectTitle: string;
+  scoreTitle?: string | null;
   hasScore: boolean;
   isSatbScore?: boolean;
   showChordSymbols?: boolean;
   onToggleChordSymbols?: (value: boolean) => void;
+  transcribedBy?: string;
+  includeTranscribedBy?: boolean;
+  onTranscribedByChange?: (value: string) => void;
+  onToggleTranscribedBy?: (value: boolean) => void;
 }
 
 type ExportFormatId =
@@ -54,15 +60,52 @@ const FORMATS: Array<{
 export function ExportCenter({
   projectId,
   projectTitle,
+  scoreTitle,
   hasScore,
   isSatbScore = false,
   showChordSymbols,
   onToggleChordSymbols,
+  transcribedBy,
+  includeTranscribedBy,
+  onTranscribedByChange,
+  onToggleTranscribedBy,
 }: ExportCenterProps) {
+  let user: { display_name?: string } | null = null;
+  try {
+    user = useAuth().user;
+  } catch {
+    user = null;
+  }
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [activeFmt, setActiveFmt] = useState<string | null>(null);
   const [localIncludeChords, setLocalIncludeChords] = useState<boolean>(true);
+  const [localTranscribedBy, setLocalTranscribedBy] = useState<string>(() => user?.display_name || "");
+  const [localIncludeTranscribedBy, setLocalIncludeTranscribedBy] = useState<boolean>(true);
+
+  useEffect(() => {
+    if (transcribedBy === undefined && !localTranscribedBy && user?.display_name) {
+      setLocalTranscribedBy(user.display_name);
+    }
+  }, [user?.display_name, transcribedBy, localTranscribedBy]);
+
+  const effectiveTranscribedBy = transcribedBy ?? localTranscribedBy;
+  const setEffectiveTranscribedBy = (val: string) => {
+    if (onTranscribedByChange) {
+      onTranscribedByChange(val);
+    } else {
+      setLocalTranscribedBy(val);
+    }
+  };
+  const effectiveIncludeTranscribedBy = includeTranscribedBy ?? localIncludeTranscribedBy;
+  const setEffectiveIncludeTranscribedBy = (val: boolean) => {
+    if (onToggleTranscribedBy) {
+      onToggleTranscribedBy(val);
+    } else {
+      setLocalIncludeTranscribedBy(val);
+    }
+  };
+
   const includeChords = showChordSymbols ?? localIncludeChords;
   const setIncludeChords = (next: boolean) => {
     if (onToggleChordSymbols) {
@@ -77,11 +120,25 @@ export function ExportCenter({
     queryFn: () => api.listExports(projectId),
   });
 
+  const buildExportOptions = () => {
+    const trimmedCredit = effectiveTranscribedBy.trim();
+    const shouldSendCredit = Boolean(trimmedCredit) || !effectiveIncludeTranscribedBy;
+    return {
+      include_chords: includeChords,
+      ...(shouldSendCredit
+        ? {
+            transcribed_by: effectiveTranscribedBy,
+            include_transcribed_by: effectiveIncludeTranscribedBy,
+          }
+        : {}),
+    };
+  };
+
   const exportMutation = useMutation({
     mutationFn: async (fmt: ExportFormatId) => {
       setError(null);
       setActiveFmt(fmt);
-      const record = await api.createExport(projectId, fmt, { include_chords: includeChords });
+      const record = await api.createExport(projectId, fmt, buildExportOptions());
       if (record.download_url) {
         const satbItem = SATB_MP3_FORMATS.find((s) => s.id === fmt);
         const downloadName = satbItem
@@ -104,8 +161,8 @@ export function ExportCenter({
     mutationFn: async () => {
       setError(null);
       setActiveFmt("print_pdf");
-      const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: includeChords });
-      await printScorePdf(blob);
+      const { blob } = await api.generateScorePdfBlob(projectId, buildExportOptions());
+      await printScorePdf(blob, { title: scoreTitle || projectTitle || "ScribaSheet Score" });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
@@ -130,29 +187,70 @@ export function ExportCenter({
       )}
 
       {/* Export Options */}
-      <div className="rounded-xl border border-[#27273A] bg-[#09090F] p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="space-y-0.5">
-          <div className="text-sm font-medium text-[#FAFAFA]">Show Chord Symbols</div>
-          <p className="text-xs text-[#A1A1AA]">
-            Display automatically detected chord labels above the piano staff in the viewer, MusicXML, and PDF.
-          </p>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={includeChords}
-          aria-label="Show Chord Symbols"
-          onClick={() => setIncludeChords(!includeChords)}
-          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-[#27273A] transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${
-            includeChords ? "bg-[#7C3AED]" : "bg-[#27273A]"
-          }`}
-        >
-          <span
-            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-              includeChords ? "translate-x-6" : "translate-x-1"
+      <div className="rounded-xl border border-[#27273A] bg-[#09090F] p-4 space-y-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-0.5">
+            <div className="text-sm font-medium text-[#FAFAFA]">Show Chord Symbols</div>
+            <p className="text-xs text-[#A1A1AA]">
+              Display automatically detected chord labels above the piano staff in the viewer, MusicXML, and PDF.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={includeChords}
+            aria-label="Show Chord Symbols"
+            onClick={() => setIncludeChords(!includeChords)}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-[#27273A] transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${
+              includeChords ? "bg-[#7C3AED]" : "bg-[#27273A]"
             }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                includeChords ? "translate-x-6" : "translate-x-1"
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="border-t border-[#27273A] pt-3 space-y-2.5">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-0.5">
+              <label htmlFor="export-transcribed-by" className="text-sm font-medium text-[#FAFAFA]">
+                Transcribed by / Arranger Credit
+              </label>
+              <p className="text-xs text-[#A1A1AA]">
+                Included on Page 1 of exported MusicXML and PDF scores when enabled.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={effectiveIncludeTranscribedBy}
+              aria-label="Include Transcribed by credit"
+              onClick={() => setEffectiveIncludeTranscribedBy(!effectiveIncludeTranscribedBy)}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-[#27273A] transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${
+                effectiveIncludeTranscribedBy ? "bg-[#7C3AED]" : "bg-[#27273A]"
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  effectiveIncludeTranscribedBy ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
+          </div>
+          <input
+            id="export-transcribed-by"
+            type="text"
+            aria-label="Transcribed by / Arranger Credit"
+            placeholder="Enter arranger or transcriber name..."
+            value={effectiveTranscribedBy}
+            disabled={!effectiveIncludeTranscribedBy}
+            onChange={(e) => setEffectiveTranscribedBy(e.target.value)}
+            className="w-full h-9 rounded-lg border border-stone-300 bg-white px-3 text-xs text-stone-900 placeholder:text-stone-400 focus:border-violet-500 focus:outline-none disabled:opacity-50 dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#F5F3FF] dark:placeholder:text-[#71717A]"
           />
-        </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 min-w-0">

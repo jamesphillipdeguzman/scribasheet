@@ -1,8 +1,17 @@
 export interface PrintPdfOptions {
+  /** Suggested score/project title for browser Print / Save as PDF dialogs. */
+  title?: string;
   /** Delay after iframe load before invoking print() so the PDF plugin initializes. */
   settleDelayMs?: number;
   /** Fallback cleanup delay if afterprint does not fire. */
   cleanupTimeoutMs?: number;
+}
+
+export function sanitizePrintTitle(scoreTitle?: string | null, projectTitle?: string | null): string {
+  const cleaned = (scoreTitle || projectTitle || "ScribaSheet Score")
+    .replace(/[\\/:*?"<>|]/g, "")
+    .trim();
+  return cleaned || "ScribaSheet Score";
 }
 
 /**
@@ -18,11 +27,14 @@ export async function printScorePdf(pdfBlob: Blob, options: PrintPdfOptions = {}
     throw new Error(`Expected a PDF document, but received "${pdfBlob.type}".`);
   }
 
+  const safeTitle = sanitizePrintTitle(options.title);
   const settleDelayMs = options.settleDelayMs ?? 150;
   const cleanupTimeoutMs = options.cleanupTimeoutMs ?? 60_000;
   const url = URL.createObjectURL(pdfBlob);
+  const originalDocTitle = document.title;
 
   const iframe = document.createElement("iframe");
+  iframe.title = safeTitle;
   iframe.style.position = "fixed";
   iframe.style.width = "1px";
   iframe.style.height = "1px";
@@ -42,6 +54,9 @@ export async function printScorePdf(pdfBlob: Blob, options: PrintPdfOptions = {}
       window.clearTimeout(fallbackTimer);
       fallbackTimer = null;
     }
+    if (document.title !== originalDocTitle) {
+      document.title = originalDocTitle;
+    }
     iframe.remove();
     URL.revokeObjectURL(url);
   };
@@ -54,6 +69,13 @@ export async function printScorePdf(pdfBlob: Blob, options: PrintPdfOptions = {}
       settled = true;
       window.setTimeout(() => {
         try {
+          if (iframe.contentDocument) {
+            iframe.contentDocument.title = safeTitle;
+          }
+        } catch {
+          // Ignore cross-origin / sandboxed PDF viewer document access
+        }
+        try {
           const win = iframe.contentWindow;
           if (!win || typeof win.print !== "function") {
             throw new Error("Embedded PDF printing is unavailable in this browser.");
@@ -61,11 +83,13 @@ export async function printScorePdf(pdfBlob: Blob, options: PrintPdfOptions = {}
           win.addEventListener("afterprint", cleanup, { once: true });
           window.addEventListener("afterprint", cleanup, { once: true });
           fallbackTimer = window.setTimeout(cleanup, cleanupTimeoutMs);
+          document.title = safeTitle;
           win.focus();
           win.print();
           resolve();
         } catch {
           // Fallback: open the generated PDF Blob in a separate tab so the user can print it there
+          document.title = safeTitle;
           const tab = window.open(url, "_blank", "noopener,noreferrer");
           if (tab) {
             fallbackTimer = window.setTimeout(cleanup, cleanupTimeoutMs);

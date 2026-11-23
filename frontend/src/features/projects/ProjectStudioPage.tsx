@@ -132,6 +132,50 @@ export function ProjectStudioPage() {
   const [isPrintingPdf, setIsPrintingPdf] = useState(false);
   const [printError, setPrintError] = useState<string | null>(null);
   const isPrintingPdfRef = useRef<boolean>(false);
+  const projectTitleRef = useRef<string | undefined>(undefined);
+
+  const creditPrefKey = projectId ? `scribasheet:transcribed_by:${projectId}` : null;
+  const creditEnabledKey = projectId ? `scribasheet:include_transcribed_by:${projectId}` : null;
+  const [transcribedBy, setTranscribedBy] = useState<string | undefined>(() => {
+    if (!creditPrefKey) return undefined;
+    try {
+      const saved = window.localStorage.getItem(creditPrefKey);
+      return saved === null ? undefined : saved;
+    } catch {
+      return undefined;
+    }
+  });
+  const [includeTranscribedBy, setIncludeTranscribedBy] = useState<boolean>(() => {
+    if (!creditEnabledKey) return true;
+    try {
+      const saved = window.localStorage.getItem(creditEnabledKey);
+      return saved === null ? true : saved === "true";
+    } catch {
+      return true;
+    }
+  });
+
+  const handleTranscribedByChange = (next: string) => {
+    setTranscribedBy(next);
+    if (creditPrefKey) {
+      try {
+        window.localStorage.setItem(creditPrefKey, next);
+      } catch {
+        // Ignore storage restrictions
+      }
+    }
+  };
+
+  const handleToggleTranscribedBy = (next: boolean) => {
+    setIncludeTranscribedBy(next);
+    if (creditEnabledKey) {
+      try {
+        window.localStorage.setItem(creditEnabledKey, String(next));
+      } catch {
+        // Ignore storage restrictions
+      }
+    }
+  };
 
   const canPrintSheetMusic = Boolean(projectId && scoreData && musicxml && !isStartingJob);
 
@@ -141,15 +185,21 @@ export function ProjectStudioPage() {
     setPrintError(null);
     setIsPrintingPdf(true);
     try {
-      const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: showChordSymbols });
-      await printScorePdf(blob);
+      const { blob } = await api.generateScorePdfBlob(projectId, {
+        include_chords: showChordSymbols,
+        transcribed_by: transcribedBy,
+        include_transcribed_by: includeTranscribedBy,
+      });
+      await printScorePdf(blob, {
+        title: scoreData.title || projectTitleRef.current || "ScribaSheet Score",
+      });
     } catch (err) {
       setPrintError(err instanceof Error ? err.message : "Failed to prepare sheet music PDF for printing.");
     } finally {
       isPrintingPdfRef.current = false;
       setIsPrintingPdf(false);
     }
-  }, [projectId, scoreData, musicxml, showChordSymbols]);
+  }, [projectId, scoreData, musicxml, showChordSymbols, transcribedBy, includeTranscribedBy]);
 
   useEffect(() => {
     if (activeTab !== "notation" || !canPrintSheetMusic) return;
@@ -190,6 +240,7 @@ export function ProjectStudioPage() {
     queryFn: () => api.getProject(projectId),
     enabled: Boolean(projectId),
   });
+  projectTitleRef.current = project?.title;
 
   const { data: workerStatus } = useQuery({
     queryKey: ["worker-status"],
@@ -1202,10 +1253,15 @@ export function ProjectStudioPage() {
                 <ExportCenter
                   projectId={project.id}
                   projectTitle={project.title}
+                  scoreTitle={scoreData?.title}
                   hasScore={Boolean(scoreData)}
                   isSatbScore={isGenuineSatb}
                   showChordSymbols={showChordSymbols}
                   onToggleChordSymbols={handleToggleChordSymbols}
+                  transcribedBy={transcribedBy}
+                  includeTranscribedBy={includeTranscribedBy}
+                  onTranscribedByChange={handleTranscribedByChange}
+                  onToggleTranscribedBy={handleToggleTranscribedBy}
                 />
               )}
             </div>

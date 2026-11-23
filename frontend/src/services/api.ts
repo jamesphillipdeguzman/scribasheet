@@ -434,13 +434,21 @@ export const api = {
   createExport: (
     projectId: string,
     format: "midi" | "musicxml" | "pdf" | "wav" | "soprano_mp3" | "alto_mp3" | "tenor_mp3" | "bass_mp3",
-    options?: { include_chords?: boolean },
+    options?: {
+      include_chords?: boolean;
+      transcribed_by?: string | null;
+      include_transcribed_by?: boolean;
+    },
   ) =>
     request<ExportRecord>(`/projects/${projectId}/exports`, {
       method: "POST",
       body: JSON.stringify({
         format,
         ...(options?.include_chords !== undefined ? { include_chords: options.include_chords } : {}),
+        ...(options?.transcribed_by !== undefined ? { transcribed_by: options.transcribed_by } : {}),
+        ...(options?.include_transcribed_by !== undefined
+          ? { include_transcribed_by: options.include_transcribed_by }
+          : {}),
       }),
     }),
   fetchExportBlob: async (downloadUrl: string): Promise<Blob> => {
@@ -467,7 +475,11 @@ export const api = {
   },
   generateScorePdfBlob: async (
     projectId: string,
-    options?: { include_chords?: boolean },
+    options?: {
+      include_chords?: boolean;
+      transcribed_by?: string | null;
+      include_transcribed_by?: boolean;
+    },
   ): Promise<{ record: ExportRecord; blob: Blob }> => {
     const record = await api.createExport(projectId, "pdf", options);
     if (!record.download_url) {
