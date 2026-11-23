@@ -24,6 +24,7 @@ import { WorkerControlPanel } from "@/components/WorkerControlPanel";
 import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { printScorePdf } from "@/lib/pdfPrint";
 import { ChordAndTabPanel } from "@/features/editor/ChordAndTabPanel";
 import { ExportCenter } from "@/features/editor/ExportCenter";
 import { LyricsPanel } from "@/features/editor/LyricsPanel";
@@ -128,6 +129,49 @@ export function ProjectStudioPage() {
   const [runtimeNowMs, setRuntimeNowMs] = useState<number>(() => Date.now());
   const [isStartingJob, setIsStartingJob] = useState(false);
   const [isRegeneratingArrangement, setIsRegeneratingArrangement] = useState(false);
+  const [isPrintingPdf, setIsPrintingPdf] = useState(false);
+  const [printError, setPrintError] = useState<string | null>(null);
+  const isPrintingPdfRef = useRef<boolean>(false);
+
+  const canPrintSheetMusic = Boolean(projectId && scoreData && musicxml && !isStartingJob);
+
+  const handlePrintPdf = useCallback(async () => {
+    if (!projectId || !scoreData || !musicxml || isPrintingPdfRef.current) return;
+    isPrintingPdfRef.current = true;
+    setPrintError(null);
+    setIsPrintingPdf(true);
+    try {
+      const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: showChordSymbols });
+      await printScorePdf(blob);
+    } catch (err) {
+      setPrintError(err instanceof Error ? err.message : "Failed to prepare sheet music PDF for printing.");
+    } finally {
+      isPrintingPdfRef.current = false;
+      setIsPrintingPdf(false);
+    }
+  }, [projectId, scoreData, musicxml, showChordSymbols]);
+
+  useEffect(() => {
+    if (activeTab !== "notation" || !canPrintSheetMusic) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (e.key.toLowerCase() !== "p") return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+      void handlePrintPdf();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeTab, canPrintSheetMusic, handlePrintPdf]);
 
   // Inline project rename state
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -1053,6 +1097,10 @@ export function ProjectStudioPage() {
                     tempoBpm={scoreData?.tempo_bpm || 120}
                     playbackRate={playbackRate}
                     tracks={scoreData?.tracks || []}
+                    onPrintPdf={() => void handlePrintPdf()}
+                    isPrintingPdf={isPrintingPdf}
+                    canPrintPdf={canPrintSheetMusic}
+                    printError={printError}
                     satbSoloVoice={satbSoloVoice}
                     satbMutedVoices={satbMutedVoices}
                     onTogglePlay={() => setTogglePlaySignal((n) => n + 1)}

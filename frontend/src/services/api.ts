@@ -443,7 +443,7 @@ export const api = {
         ...(options?.include_chords !== undefined ? { include_chords: options.include_chords } : {}),
       }),
     }),
-  downloadExportBlob: async (downloadUrl: string, filename: string) => {
+  fetchExportBlob: async (downloadUrl: string): Promise<Blob> => {
     const { accessToken } = getStoredTokens();
     const fullUrl = downloadUrl.startsWith("http")
       ? downloadUrl
@@ -452,7 +452,10 @@ export const api = {
       headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
     });
     if (!res.ok) throw new ApiError(res.status, "Failed to download export.");
-    const blob = await res.blob();
+    return res.blob();
+  },
+  downloadExportBlob: async (downloadUrl: string, filename: string) => {
+    const blob = await api.fetchExportBlob(downloadUrl);
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -461,6 +464,17 @@ export const api = {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  },
+  generateScorePdfBlob: async (
+    projectId: string,
+    options?: { include_chords?: boolean },
+  ): Promise<{ record: ExportRecord; blob: Blob }> => {
+    const record = await api.createExport(projectId, "pdf", options);
+    if (!record.download_url) {
+      throw new ApiError(500, "PDF export completed without a download URL.");
+    }
+    const blob = await api.fetchExportBlob(record.download_url);
+    return { record, blob };
   },
 
   // Billing & Worker

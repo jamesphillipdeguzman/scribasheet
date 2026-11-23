@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, FileAudio, FileMusic, FileText, Loader2, Music } from "lucide-react";
+import { Download, FileAudio, FileMusic, FileText, Loader2, Music, Printer } from "lucide-react";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { printScorePdf } from "@/lib/pdfPrint";
 import { formatLocalDateTime } from "@/lib/utils";
 import { api, ApiError } from "@/services/api";
 import type { ExportRecord } from "@/types/api";
@@ -99,6 +100,22 @@ export function ExportCenter({
     onSettled: () => setActiveFmt(null),
   });
 
+  const printMutation = useMutation({
+    mutationFn: async () => {
+      setError(null);
+      setActiveFmt("print_pdf");
+      const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: includeChords });
+      await printScorePdf(blob);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Failed to prepare PDF for printing.");
+    },
+    onSettled: () => setActiveFmt(null),
+  });
+
   return (
     <div className="space-y-5">
       {!hasScore && (
@@ -142,7 +159,23 @@ export function ExportCenter({
         {FORMATS.map((f) => {
           const Icon = f.icon;
           const loading = activeFmt === f.id;
-          return (
+          const printMutation = useMutation({
+    mutationFn: async () => {
+      setError(null);
+      setActiveFmt("print_pdf");
+      const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: includeChords });
+      await printScorePdf(blob);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Failed to prepare PDF for printing.");
+    },
+    onSettled: () => setActiveFmt(null),
+  });
+
+  return (
             <div key={f.id} className="min-w-0 rounded-xl border border-[#27273A] bg-[#09090F] p-4 flex flex-col justify-between space-y-3">
               <div>
                 <div className="flex items-center justify-between">
@@ -152,16 +185,34 @@ export function ExportCenter({
                 <div className="mt-2 font-semibold text-sm">{f.label}</div>
                 <div className="text-xs text-[#A1A1AA]">{f.desc}</div>
               </div>
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={!hasScore || loading}
-                onClick={() => exportMutation.mutate(f.id)}
-                className="w-full min-h-[44px]"
-              >
-                {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-                {loading ? "Generating..." : `Export ${f.id.toUpperCase()}`}
-              </Button>
+              <div className="space-y-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={!hasScore || loading || activeFmt === "print_pdf"}
+                  onClick={() => exportMutation.mutate(f.id)}
+                  className="w-full min-h-[44px]"
+                >
+                  {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                  {loading ? "Generating..." : `Export ${f.id.toUpperCase()}`}
+                </Button>
+                {f.id === "pdf" && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!hasScore || loading || activeFmt === "print_pdf"}
+                    onClick={() => printMutation.mutate()}
+                    className="w-full min-h-[40px]"
+                  >
+                    {activeFmt === "print_pdf" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Printer className="h-3.5 w-3.5" />
+                    )}
+                    {activeFmt === "print_pdf" ? "Preparing..." : "Print Sheet Music"}
+                  </Button>
+                )}
+              </div>
             </div>
           );
         })}
@@ -180,7 +231,23 @@ export function ExportCenter({
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 min-w-0">
             {SATB_MP3_FORMATS.map((s) => {
               const loading = activeFmt === s.id;
-              return (
+              const printMutation = useMutation({
+    mutationFn: async () => {
+      setError(null);
+      setActiveFmt("print_pdf");
+      const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: includeChords });
+      await printScorePdf(blob);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Failed to prepare PDF for printing.");
+    },
+    onSettled: () => setActiveFmt(null),
+  });
+
+  return (
                 <div
                   key={s.id}
                   className="min-w-0 rounded-xl border border-[#27273A] bg-[#09090F] p-3 flex flex-col justify-between space-y-2.5"

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as alphaTab from "@coderline/alphatab";
-import { Maximize2, Minimize2, Pause, Play, Square, ZoomIn, ZoomOut } from "lucide-react";
+import { Loader2, Maximize2, Minimize2, Pause, Play, Printer, Square, ZoomIn, ZoomOut } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
 import { midiSynth } from "@/features/editor/midiSynth";
@@ -28,6 +28,10 @@ export interface AlphaTabSheetViewerProps {
   isFocusMode?: boolean;
   onToggleFocusMode?: () => void;
   engineSwitcher?: React.ReactNode;
+  onPrintPdf?: () => void;
+  isPrintingPdf?: boolean;
+  canPrintPdf?: boolean;
+  printError?: string | null;
 }
 
 const SATB_COLORS: Record<string, string> = {
@@ -83,6 +87,10 @@ export function AlphaTabSheetViewer({
   isFocusMode = false,
   onToggleFocusMode,
   engineSwitcher,
+  onPrintPdf,
+  isPrintingPdf = false,
+  canPrintPdf = false,
+  printError = null,
 }: AlphaTabSheetViewerProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -688,6 +696,20 @@ export function AlphaTabSheetViewer({
           >
             <ZoomIn className="h-3.5 w-3.5" />
           </Button>
+          {onPrintPdf && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={onPrintPdf}
+              disabled={!canPrintPdf || isPrintingPdf}
+              title="Print Sheet Music (Ctrl+P / Cmd+P)"
+              aria-label="Print Sheet Music"
+              data-testid="sheet-print-button"
+            >
+              {isPrintingPdf ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Printer className="h-3.5 w-3.5" />}
+              <span className="hidden sm:inline">{isPrintingPdf ? "Preparing..." : "Print"}</span>
+            </Button>
+          )}
           {onToggleFocusMode && (
             <Button
               size="sm"
@@ -705,6 +727,15 @@ export function AlphaTabSheetViewer({
       {isRendering && (
         <div className="rounded-lg border border-[#27273A] bg-[#09090F] px-3 py-2 text-xs text-[#A1A1AA]">
           Rendering sheet music notation with AlphaTab...
+        </div>
+      )}
+
+      {printError && (
+        <div
+          role="alert"
+          className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-900 font-medium dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200"
+        >
+          {printError}
         </div>
       )}
 
