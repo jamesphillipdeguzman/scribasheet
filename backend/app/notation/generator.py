@@ -411,90 +411,10 @@ def _parse_key_to_music21(key_str: str) -> music21.key.Key:
 
 
 def _split_rh_lh_notes(notes: list[ScoreNote]) -> tuple[list[ScoreNote], list[ScoreNote]]:
-    """Assign piano notes to RH (treble) and LH (bass) using pitch, chord voicing, and phrase context."""
-    ordered = sorted(notes, key=lambda x: (x.onset_sec, x.pitch_midi))
-    if not ordered:
-        return [], []
+    """Assign piano notes to RH (treble) and LH (bass) using contextual sequence optimization."""
+    from app.notation.hand_assignment import assign_hands_contextual
 
-    clusters: list[list[ScoreNote]] = [[ordered[0]]]
-    for n in ordered[1:]:
-        if n.onset_sec - clusters[-1][0].onset_sec <= 0.035:
-            clusters[-1].append(n)
-        else:
-            clusters.append([n])
-
-    treble: list[ScoreNote] = []
-    bass: list[ScoreNote] = []
-    last_hand = "treble"
-
-    for cluster in clusters:
-        if len(cluster) == 1:
-            n = cluster[0]
-            if n.pitch_midi >= 57:
-                hand = "treble"
-            elif n.pitch_midi <= 52:
-                hand = "bass"
-            else:
-                # F3-G#3 (53-56): use phrase continuity; >= G3 (55) leans RH unless following LH bass
-                hand = last_hand if (n.pitch_midi >= 55 or last_hand == "treble") else "bass"
-                if n.pitch_midi <= 54 and last_hand == "bass":
-                    hand = "bass"
-            last_hand = hand
-            (treble if hand == "treble" else bass).append(n)
-            continue
-
-        lo = cluster[0].pitch_midi
-        hi = cluster[-1].pitch_midi
-        if lo >= 55 and hi >= 59:
-            treble.extend(cluster)
-            last_hand = "treble"
-            continue
-        if hi <= 53:
-            bass.extend(cluster)
-            last_hand = "bass"
-            continue
-
-        # Compact single-hand chord with no low bass root below E3: keep chord intact
-        if hi - lo <= 7 and lo >= 52:
-            mean_pitch = sum(n.pitch_midi for n in cluster) / len(cluster)
-            hand = "bass" if mean_pitch < 55.0 else ("treble" if mean_pitch >= 56.5 else last_hand)
-            last_hand = hand
-            if hand == "treble":
-                treble.extend(cluster)
-            else:
-                bass.extend(cluster)
-            continue
-
-        # Multi-hand voicing: find the most natural split index between LH (<= F3/G3) and RH (>= G3)
-        best_split = 1
-        best_score = float("-inf")
-        for idx in range(1, len(cluster)):
-            lh_part = cluster[:idx]
-            rh_part = cluster[idx:]
-            lh_span = lh_part[-1].pitch_midi - lh_part[0].pitch_midi
-            rh_span = rh_part[-1].pitch_midi - rh_part[0].pitch_midi
-            gap = rh_part[0].pitch_midi - lh_part[-1].pitch_midi
-            score = gap * 1.5
-            # Prefer RH starting at/above F3-G3 (53-55) and LH staying <= G3 (55)
-            if rh_part[0].pitch_midi >= 55:
-                score += 4.0
-            elif rh_part[0].pitch_midi >= 52:
-                score += 1.5
-            if lh_part[-1].pitch_midi <= 55:
-                score += 2.5
-            if lh_span > 12:
-                score -= (lh_span - 12) * 3.0
-            if rh_span > 12:
-                score -= (rh_span - 12) * 3.0
-            if score > best_score:
-                best_score = score
-                best_split = idx
-
-        bass.extend(cluster[:best_split])
-        treble.extend(cluster[best_split:])
-        last_hand = "treble"
-
-    return treble, bass
+    return assign_hands_contextual(notes)
 
 
 _STANDARD_DURS_EIGHTH = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
