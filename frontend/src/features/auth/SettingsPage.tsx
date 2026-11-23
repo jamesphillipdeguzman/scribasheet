@@ -39,7 +39,7 @@ export function SettingsPage() {
 
   return (
     <AppShell>
-      <div className="mx-auto max-w-3xl px-4 py-8 sm:px-6 space-y-6">
+      <div className="mx-auto max-w-3xl px-4 pt-10 pb-8 sm:px-6 sm:pt-12 space-y-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Account Settings</h1>
           <p className="text-sm text-[#A1A1AA]">Manage your profile, plan usage, and privacy controls.</p>

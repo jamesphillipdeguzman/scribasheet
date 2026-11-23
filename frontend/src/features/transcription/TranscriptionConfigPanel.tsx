@@ -165,7 +165,7 @@ export function TranscriptionConfigPanel({
               id="transcription-mode-select"
               value={settings.mode}
               onChange={(e) => setSettings({ ...settings, mode: e.target.value })}
-              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
+              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2 pr-6 text-[11px] text-[#F5F3FF]"
             >
               {TRANSCRIPTION_MODES.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -186,7 +186,7 @@ export function TranscriptionConfigPanel({
               id="instrument-select"
               value={settings.instrument}
               onChange={(e) => setSettings({ ...settings, instrument: e.target.value })}
-              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
+              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2 pr-6 text-[11px] text-[#F5F3FF]"
             >
               {SUPPORTED_INSTRUMENTS.map((inst) => (
                 <option key={inst.id} value={inst.id}>
@@ -239,7 +239,7 @@ export function TranscriptionConfigPanel({
                   audio_source_type: e.target.value as TranscriptionSettings["audio_source_type"],
                 })
               }
-              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-xs text-[#F5F3FF]"
+              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2 pr-6 text-[11px] text-[#F5F3FF]"
             >
               {AUDIO_SOURCE_TYPES.map((src) => (
                 <option key={src.id} value={src.id}>

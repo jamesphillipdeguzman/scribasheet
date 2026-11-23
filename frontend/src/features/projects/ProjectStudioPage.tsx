@@ -604,7 +604,7 @@ export function ProjectStudioPage() {
 
   return (
     <AppShell>
-      <div className="relative mx-auto max-w-[1600px] px-3 sm:px-4 py-4 space-y-4 min-w-0">
+      <div className="relative mx-auto max-w-[1600px] px-3 sm:px-4 pt-8 pb-4 sm:pt-10 space-y-4 min-w-0">
         <AmbientScoreBackdrop variant="watermark" className="h-44 sm:h-52" />
         {/* Top Studio Toolbar */}
         <div

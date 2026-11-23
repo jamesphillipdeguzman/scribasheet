@@ -147,7 +147,7 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
           </div>
         ) : notConnected ? (
           <div className="rounded-lg border border-[#27273A] bg-[#09090F] p-3 space-y-2 text-xs">
-            <div className="font-medium text-amber-200">Local Controller Not Connected</div>
+            <div className="font-medium text-amber-800 dark:text-amber-200">Local Controller Not Connected</div>
             <p className="text-[#A1A1AA]">
               Start or install the lightweight Windows controller on <code className="text-[#F5F3FF]">127.0.0.1:47832</code> to control your local worker from this browser:
             </p>
@@ -225,14 +225,16 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
                 </span>
               </div>
               {controllerStatus.external_worker_detected && (
-                <div className="text-amber-300">
+                <div className="text-amber-800 font-medium dark:text-amber-300">
                   Worker was started externally and can be stopped or restarted from here.
                 </div>
               )}
               {controllerStatus.last_error && (
-                <div className="text-red-300">Last error: {controllerStatus.last_error}</div>
+                <div className="text-red-800 font-medium dark:text-red-300">Last error: {controllerStatus.last_error}</div>
               )}
-              {actionNotice && <div className="text-emerald-300">{actionNotice}</div>}
+              {actionNotice && (
+                <div className="text-emerald-800 font-medium dark:text-emerald-300">{actionNotice}</div>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-2">

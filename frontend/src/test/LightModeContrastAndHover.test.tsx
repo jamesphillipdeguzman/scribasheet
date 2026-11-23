@@ -1,13 +1,16 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { AppShell } from "@/components/AppShell";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/Button";
+import { WorkerControlPanel } from "@/components/WorkerControlPanel";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { VirtualPianoKeyboard } from "@/features/editor/VirtualPianoKeyboard";
 import { LandingPage } from "@/features/landing/LandingPage";
+import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
+import { setControllerToken, workerController } from "@/services/workerController";
 import type { ScoreNote } from "@/types/api";
 
 vi.mock("@/features/auth/AuthContext", () => ({
@@ -178,5 +181,70 @@ describe("Light Mode Contrast & Hover-State Fixes", () => {
     const shellCopy = screen.getByText(expectedText);
     expect(shellCopy.className).toContain("text-stone-600");
     expect(shellCopy.className).toContain("dark:text-slate-500");
+  });
+
+  it("renders high-contrast Light Mode WorkerControlPanel messages and unclipped Audio Source select", async () => {
+    vi.spyOn(workerController, "checkHealth").mockResolvedValue({ status: "ok" } as any);
+    vi.spyOn(workerController, "getStatus").mockResolvedValue({
+      worker_running: true,
+      managed_by_controller: false,
+      external_worker_detected: true,
+      external_manageable: true,
+      pid: 4321,
+      last_error: null,
+    } as any);
+    vi.spyOn(workerController, "stopWorker").mockResolvedValue({
+      message: "Worker stopped.",
+    } as any);
+    if (!window.localStorage) {
+      const store: Record<string, string> = {};
+      Object.defineProperty(window, "localStorage", {
+        configurable: true,
+        value: {
+          getItem: (k: string) => store[k] ?? null,
+          setItem: (k: string, v: string) => {
+            store[k] = v;
+          },
+          removeItem: (k: string) => {
+            delete store[k];
+          },
+        },
+      });
+    }
+    setControllerToken("tok");
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <WorkerControlPanel />
+        <TranscriptionConfigPanel
+          hasMedia={true}
+          activeJob={null}
+          defaultInstrument="piano"
+          defaultMode="single_instrument"
+          onStart={vi.fn()}
+          onCancel={vi.fn()}
+          onRetry={vi.fn()}
+          isStarting={false}
+        />
+      </QueryClientProvider>,
+    );
+
+    const extMsg = await screen.findByText(/Worker was started externally/i);
+    expect(extMsg.className).toContain("text-amber-800");
+    expect(extMsg.className).toContain("font-medium");
+    expect(extMsg.className).toContain("dark:text-amber-300");
+
+    fireEvent.click(screen.getByRole("button", { name: /Stop Worker/i }));
+    const stoppedNotice = await screen.findByText("Worker stopped.");
+    expect(stoppedNotice.className).toContain("text-emerald-800");
+    expect(stoppedNotice.className).toContain("font-medium");
+    expect(stoppedNotice.className).toContain("dark:text-emerald-300");
+
+    const audioSourceSelect = screen.getByLabelText("Audio Source");
+    expect(audioSourceSelect.className).toContain("text-[11px]");
+    expect(audioSourceSelect.className).toContain("px-2");
+    expect(audioSourceSelect.className).toContain("pr-6");
+    expect(audioSourceSelect.textContent).toContain("Solo Piano");
   });
 });

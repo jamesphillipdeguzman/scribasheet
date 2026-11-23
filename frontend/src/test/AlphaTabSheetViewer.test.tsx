@@ -861,7 +861,19 @@ describe("AlphaTabSheetViewer Reactive Lifecycle", () => {
     });
     expect(api.render).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/Rendering sheet music notation with AlphaTab/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/without producing notation SVG/i)).toBeInTheDocument();
+    const errBanner = screen.getByText(/without producing notation SVG/i);
+    expect(errBanner).toBeInTheDocument();
+    expect(errBanner.className).toContain("bg-red-50");
+    expect(errBanner.className).toContain("text-red-800");
+    expect(errBanner.className).toContain("border-red-300");
+
+    // If SVG is injected later and renderFinished fires, stale false-positive error clears
+    act(() => {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      api.container.appendChild(svg);
+      api.renderFinished.emit();
+    });
+    expect(screen.queryByText(/without producing notation SVG/i)).not.toBeInTheDocument();
   });
 
   it("destroys API and disconnects ResizeObserver and listeners on unmount", async () => {

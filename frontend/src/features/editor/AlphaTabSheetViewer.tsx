@@ -182,7 +182,14 @@ export function AlphaTabSheetViewer({
 
     let disposed = false;
     let resizeObserver: ResizeObserver | null = null;
+    let svgMutationObserver: MutationObserver | null = null;
     let unsubs: Array<() => void> = [];
+
+    const hasRenderedSvg = () =>
+      Boolean(
+        surfaceRef.current?.querySelector("svg, .at-surface svg, .at-main svg") ||
+          scrollContainerRef.current?.querySelector(".at-surface svg, .at-main svg, svg"),
+      );
 
     const initApi = () => {
       if (disposed || apiRef.current) return;
@@ -260,9 +267,9 @@ export function AlphaTabSheetViewer({
       unsubs.push(
         api.renderFinished.on(() => {
           clearSafetyTimer();
-          const hasSvg = Boolean(surfaceRef.current?.querySelector("svg"));
-          if (hasSvg) {
+          if (hasRenderedSvg()) {
             safetyRetriedRef.current = false;
+            setRenderError(null);
             setIsRendering(false);
             setPayloadStatus("ready");
             pushExternalPosition(playheadSecRef.current);
@@ -272,9 +279,9 @@ export function AlphaTabSheetViewer({
           // Bounded 4-second safety check if renderFinished fired before SVG appeared
           safetyTimerRef.current = window.setTimeout(() => {
             if (disposed) return;
-            const svgNow = Boolean(surfaceRef.current?.querySelector("svg"));
-            if (svgNow) {
+            if (hasRenderedSvg()) {
               safetyRetriedRef.current = false;
+              setRenderError(null);
               setIsRendering(false);
               setPayloadStatus("ready");
               pushExternalPosition(playheadSecRef.current);
@@ -289,9 +296,9 @@ export function AlphaTabSheetViewer({
               }
               safetyTimerRef.current = window.setTimeout(() => {
                 if (disposed) return;
-                const svgAfterRetry = Boolean(surfaceRef.current?.querySelector("svg"));
                 setIsRendering(false);
-                if (svgAfterRetry) {
+                if (hasRenderedSvg()) {
+                  setRenderError(null);
                   setPayloadStatus("ready");
                   pushExternalPosition(playheadSecRef.current);
                 } else {
@@ -362,6 +369,20 @@ export function AlphaTabSheetViewer({
         }),
       );
 
+      if (typeof MutationObserver !== "undefined") {
+        svgMutationObserver = new MutationObserver(() => {
+          if (disposed) return;
+          if (hasRenderedSvg()) {
+            clearSafetyTimer();
+            safetyRetriedRef.current = false;
+            setRenderError(null);
+            setIsRendering(false);
+            setPayloadStatus("ready");
+          }
+        });
+        svgMutationObserver.observe(surfaceEl, { childList: true, subtree: true });
+      }
+
       if (pendingXmlRef.current) {
         loadXmlIntoApi(api, pendingXmlRef.current);
       }
@@ -395,6 +416,10 @@ export function AlphaTabSheetViewer({
       if (resizeObserver) {
         resizeObserver.disconnect();
         resizeObserver = null;
+      }
+      if (svgMutationObserver) {
+        svgMutationObserver.disconnect();
+        svgMutationObserver = null;
       }
       for (const u of unsubs) {
         try {
@@ -684,7 +709,7 @@ export function AlphaTabSheetViewer({
       )}
 
       {renderError && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+        <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
           {renderError}
         </div>
       )}
