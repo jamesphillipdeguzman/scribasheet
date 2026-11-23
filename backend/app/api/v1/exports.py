@@ -19,6 +19,7 @@ from app.models import (
 )
 from app.notation.generator import (
     _render_pdf_via_musescore,
+    add_pdf_footer,
     clean_score_title,
     count_pdf_pages,
     render_score_pdf,
@@ -82,7 +83,7 @@ def _resolve_pdf_export_bytes(
                 try:
                     data = storage_service.read_bytes(asset.storage_path)
                     if data.startswith(b"%PDF-") and count_pdf_pages(data) >= 1:
-                        return data
+                        return add_pdf_footer(data, title=score.title)
                 except FileNotFoundError:
                     pass
 

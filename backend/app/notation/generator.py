@@ -15,7 +15,9 @@ import music21
 import numpy as np
 import pretty_midi
 import soundfile as sf
+from pypdf import PdfReader, PdfWriter
 from reportlab.lib.pagesizes import letter
+from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
 from app.notation.analyzer import (
@@ -1161,7 +1163,112 @@ def count_pdf_pages(pdf_bytes: bytes) -> int:
     return len(re.findall(rb"/Type\s*/Page\b(?!s)", pdf_bytes))
 
 
-def _render_pdf_from_musicxml_via_musescore(xml_str: str) -> bytes | None:
+def _extract_title_from_musicxml(xml_str: str) -> str | None:
+    """Extract non-empty movement-title or work-title from MusicXML."""
+    if not xml_str:
+        return None
+    try:
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(xml_str)
+        for tag in ("movement-title", "work/work-title"):
+            el = root.find(tag)
+            if el is not None and el.text and el.text.strip():
+                return el.text.strip()
+    except Exception:
+        return None
+    return None
+
+
+def _truncate_text_to_width(text: str, font_name: str, font_size: float, max_width: float) -> str:
+    """Truncate text with an ellipsis so it fits within max_width points."""
+    if not text or max_width <= 0:
+        return ""
+    if pdfmetrics.stringWidth(text, font_name, font_size) <= max_width:
+        return text
+    ellipsis = "..."
+    ell_w = pdfmetrics.stringWidth(ellipsis, font_name, font_size)
+    if ell_w >= max_width:
+        return ""
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        cand = text[:mid].rstrip() + ellipsis
+        if pdfmetrics.stringWidth(cand, font_name, font_size) <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return (text[:lo].rstrip() + ellipsis) if lo > 0 else ellipsis
+
+
+def add_pdf_footer(pdf_bytes: bytes, title: str | None = None) -> bytes:
+    """Stamp a consistent footer (song title on left, 'Page X of Y' on right) onto every PDF page."""
+    if not pdf_bytes or not pdf_bytes.startswith(b"%PDF-"):
+        return pdf_bytes
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    meta = reader.metadata or {}
+    if meta.get("/ScribaSheetFooter") == "v1":
+        return pdf_bytes
+
+    total_pages = len(reader.pages)
+    if total_pages == 0:
+        return pdf_bytes
+
+    raw_title = (title or "").strip()
+    display_title = clean_score_title(raw_title) if raw_title else ""
+
+    writer = PdfWriter()
+    font_name = "Helvetica"
+    font_size = 8.5
+
+    for page_idx, page in enumerate(reader.pages, start=1):
+        box = page.mediabox
+        left_x = float(box.left)
+        bottom_y = float(box.bottom)
+        page_w = float(box.width)
+        page_h = float(box.height)
+
+        margin_x = max(36.0, min(48.0, page_w * 0.06))
+        footer_y = bottom_y + 18.0
+        page_label = f"Page {page_idx} of {total_pages}"
+        right_w = pdfmetrics.stringWidth(page_label, font_name, font_size)
+        max_title_w = max(40.0, page_w - (2.0 * margin_x) - right_w - 18.0)
+
+        overlay_buf = io.BytesIO()
+        ov = canvas.Canvas(overlay_buf, pagesize=(page_w, page_h))
+        ov.setFont(font_name, font_size)
+        ov.setFillColorRGB(0.28, 0.33, 0.41)
+
+        if display_title:
+            trimmed = _truncate_text_to_width(display_title, font_name, font_size, max_title_w)
+            if trimmed:
+                ov.drawString(left_x + margin_x, footer_y, trimmed)
+
+        ov.drawRightString(left_x + page_w - margin_x, footer_y, page_label)
+        ov.save()
+
+        overlay_reader = PdfReader(io.BytesIO(overlay_buf.getvalue()))
+        attached_page = writer.add_page(page)
+        attached_page.merge_page(overlay_reader.pages[0])
+
+    out_meta: dict[str, str] = {}
+    for k, v in meta.items():
+        if isinstance(k, str) and isinstance(v, str):
+            out_meta[k] = v
+    out_meta["/ScribaSheetFooter"] = "v1"
+    writer.add_metadata(out_meta)
+
+    out_buf = io.BytesIO()
+    writer.write(out_buf)
+    return out_buf.getvalue()
+
+
+def _render_pdf_from_musicxml_via_musescore(
+    xml_str: str,
+    *,
+    title: str | None = None,
+) -> bytes | None:
     if os.environ.get("DISABLE_MUSESCORE_PDF", "").lower() in ("1", "true", "yes"):
         return None
     mscore_bin = _find_musescore_binary()
@@ -1184,7 +1291,8 @@ def _render_pdf_from_musicxml_via_musescore(xml_str: str) -> bytes | None:
             if res.returncode == 0 and pdf_path.exists():
                 pdf_bytes = pdf_path.read_bytes()
                 if pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 500 and count_pdf_pages(pdf_bytes) >= 1:
-                    return pdf_bytes
+                    resolved_title = title if (title and title.strip()) else _extract_title_from_musicxml(xml_str)
+                    return add_pdf_footer(pdf_bytes, title=resolved_title)
     except Exception:
         return None
     return None
@@ -1197,7 +1305,7 @@ def _render_pdf_via_musescore(score: ScoreData, *, include_chords: bool = True) 
         return None
     try:
         xml_str = score_data_to_musicxml(score, include_chords=include_chords)
-        return _render_pdf_from_musicxml_via_musescore(xml_str)
+        return _render_pdf_from_musicxml_via_musescore(xml_str, title=score.title)
     except Exception:
         return None
 
@@ -1249,16 +1357,15 @@ def render_score_pdf(score: ScoreData, *, include_chords: bool = True) -> bytes:
     )
 
     def draw_header(page_num: int) -> float:
-        c.setFont("Helvetica-Bold", 17)
-        c.drawCentredString(width / 2, height - 46, clean_score_title(score.title))
+        if (score.title or "").strip():
+            c.setFont("Helvetica-Bold", 17)
+            c.drawCentredString(width / 2, height - 46, clean_score_title(score.title))
         c.setFont("Helvetica", 9.5)
         meta = (
             f"Tempo: {score.tempo_bpm:.0f} BPM  |  Time: {score.time_signature}  |  "
             f"Key: {score.key_signature}  |  Notes: {len(score.notes)}"
         )
         c.drawCentredString(width / 2, height - 64, meta)
-        c.setFont("Helvetica", 8)
-        c.drawRightString(width - 42, 26, f"ScribaSheet - Page {page_num}")
         return height - 108
 
     def draw_staff_system(y_treble_top: float, measures_in_sys: int) -> None:
@@ -1388,7 +1495,7 @@ def render_score_pdf(score: ScoreData, *, include_chords: bool = True) -> bytes:
         y_cursor -= system_advance
 
     c.save()
-    return buf.getvalue()
+    return add_pdf_footer(buf.getvalue(), title=score.title)
 
 
 def render_score_wav(score: ScoreData, sample_rate: int = 22050) -> bytes:

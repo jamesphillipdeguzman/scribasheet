@@ -337,7 +337,7 @@ class RealTranscriptionHandler:
                 midi_bytes = score_data_to_midi_bytes(score_data)
                 pdf_b64: str | None = None
                 try:
-                    musescore_pdf = _render_pdf_from_musicxml_via_musescore(musicxml_str)
+                    musescore_pdf = _render_pdf_from_musicxml_via_musescore(musicxml_str, title=score_data.title)
                     if musescore_pdf is not None:
                         pdf_b64 = base64.b64encode(musescore_pdf).decode("ascii")
                 except Exception as pdf_exc:
@@ -796,7 +796,7 @@ class RealTranscriptionHandler:
             self._check_cancelled(job_id, cancel_event)
             report_progress("finalizing", 95, "Persisting Score", "Saving MIDI, MusicXML, and score.")
 
-            musescore_pdf = _render_pdf_from_musicxml_via_musescore(musicxml_str)
+            musescore_pdf = _render_pdf_from_musicxml_via_musescore(musicxml_str, title=score_data.title)
             pdf_b64 = base64.b64encode(musescore_pdf).decode("ascii") if musescore_pdf else None
 
             artifact_urls = job.get("artifact_upload_urls") or {}
