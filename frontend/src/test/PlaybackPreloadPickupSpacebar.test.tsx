@@ -84,6 +84,9 @@ vi.mock("opensheetmusicdisplay", () => ({
         next: () => {
           mockOsmdState.idx = Math.min(mockOsmdState.idx + 1, mockOsmdState.steps.length);
         },
+        previous: () => {
+          mockOsmdState.idx = Math.max(mockOsmdState.idx - 1, 0);
+        },
         update: () => {
           const cur = mockOsmdState.steps[mockOsmdState.idx];
           if (cur) {
@@ -743,5 +746,82 @@ describe("Piano Sampler Preloading, Pickup Timing & Spacebar Playback", () => {
     await waitFor(() => {
       expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "120px" });
     });
+  });
+
+  it("interpolates playhead smoothly between consecutive musical timestamps during rAF regardless of wide measure spacing", async () => {
+    const wideMeasureXml = `<?xml version="1.0" encoding="utf-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="8">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+    <measure number="9">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    // Measure 9 is rendered very wide (left: 100px -> 500px), but musical duration is 2.0s @ 120 BPM
+    mockOsmdState.steps = [
+      { realValue: 0.0, measureNumber: 8, measureAbsReal: 0.0, durationReal: 1.0, num: 4, den: 4, offsetLeft: 100 },
+      { realValue: 1.0, measureNumber: 9, measureAbsReal: 1.0, durationReal: 1.0, num: 4, den: 4, offsetLeft: 500 },
+    ];
+
+    let clockSec = 0;
+    let clockPlaying = false;
+    vi.spyOn(midiSynth, "getPlaybackClock").mockImplementation(() => ({
+      isPlaying: clockPlaying,
+      currentSec: clockSec,
+    }));
+
+    const rafCallbacks: FrameRequestCallback[] = [];
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      rafCallbacks.push(cb);
+      return rafCallbacks.length;
+    });
+
+    const { rerender } = render(
+      <SheetMusicViewer
+        musicxml={wideMeasureXml}
+        playheadSec={0}
+        isPlaying={false}
+        tempoBpm={120}
+        tracks={sampleTracks}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "100px" });
+    });
+
+    clockPlaying = true;
+    clockSec = 0;
+    rerender(
+      <SheetMusicViewer
+        musicxml={wideMeasureXml}
+        playheadSec={0}
+        isPlaying={true}
+        tempoBpm={120}
+        tracks={sampleTracks}
+      />,
+    );
+    expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "100px" });
+
+    // Halfway through Measure 8 in musical time (1.0s of 2.0s) -> playhead interpolates halfway (300px)
+    clockSec = 1.0;
+    act(() => {
+      rafCallbacks[rafCallbacks.length - 1]?.(performance.now());
+    });
+    expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "300px" });
+
+    // At Measure 9 downbeat (2.0s) -> playhead arrives at 500px
+    clockSec = 2.0;
+    act(() => {
+      rafCallbacks[rafCallbacks.length - 1]?.(performance.now());
+    });
+    expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "500px" });
   });
 });

@@ -611,5 +611,57 @@ describe("Synchronized Sheet Music Playback View & Timeline", () => {
     expect(passingParts[1].getElementsByTagName("lyric")).toHaveLength(0);
     expect(passingParts[2].getElementsByTagName("lyric")).toHaveLength(0);
     expect(passingParts[3].getElementsByTagName("lyric")).toHaveLength(0);
+
+    const mountainXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+    <score-part id="P3"><part-name>Tenor</part-name></score-part>
+    <score-part id="P4"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="9">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <harmony><root><root-step>C</root-step></root><kind text="sus4">suspended-fourth</kind></harmony>
+      <harmony><root><root-step>C</root-step></root><kind text="sus4">suspended-fourth</kind></harmony>
+      <harmony><root><root-step>C</root-step></root><kind text="Csus4 c">other</kind></harmony>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>Harmony</text></lyric></note>
+      <note><pitch><step>G</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>While</text></lyric><lyric number="2"><text>The</text></lyric></note>
+      <note><pitch><step>G</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><syllabic>begin</syllabic><text>shep</text></lyric><lyric number="2"><syllabic>begin</syllabic><text>shep</text></lyric></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="9">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <harmony><root><root-step>C</root-step></root><kind text="sus4">suspended-fourth</kind></harmony>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>3</duration><type>half</type><dot/></note>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><syllabic>end</syllabic><text>herds</text></lyric><lyric number="2"><syllabic>end</syllabic><text>herds</text></lyric></note>
+    </measure>
+  </part>
+  <part id="P3">
+    <measure number="9"><attributes><divisions>1</divisions></attributes><note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric number="1"><text>Chorus:</text></lyric></note></measure>
+  </part>
+  <part id="P4">
+    <measure number="9"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note></measure>
+  </part>
+</score-partwise>`;
+
+    const preparedMountain = prepareDisplayMusicXml(mountainXml, true);
+    const mDoc = new DOMParser().parseFromString(preparedMountain, "application/xml");
+    const mParts = mDoc.getElementsByTagName("part");
+    const v1 = Array.from(mParts[0].getElementsByTagName("lyric"))
+      .filter((l) => l.getAttribute("number") === "1")
+      .map((l) => l.getElementsByTagName("text")[0]?.textContent);
+    const v2 = Array.from(mParts[0].getElementsByTagName("lyric"))
+      .filter((l) => l.getAttribute("number") === "2")
+      .map((l) => l.getElementsByTagName("text")[0]?.textContent);
+    expect(v1).toEqual(["While", "shep", "herds"]);
+    expect(v2).toEqual(["The", "shep", "herds"]);
+    expect(mParts[0].getElementsByTagName("harmony")).toHaveLength(1);
+    expect(mParts[1].getElementsByTagName("harmony")).toHaveLength(0);
+    expect(mParts[1].getElementsByTagName("lyric")).toHaveLength(0);
+    expect(mParts[2].getElementsByTagName("lyric")).toHaveLength(0);
   });
 });

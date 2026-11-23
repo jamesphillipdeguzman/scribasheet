@@ -36,7 +36,9 @@ import {
   buildMusicXmlTimeline,
   findCursorSnapshotIndex,
   type OsmdCursorSnapshot,
+  quarterNotesToWholeNotes,
   timeSecToWholeNotes,
+  wholeNotesToQuarterNotes,
   wholeNotesToTimeSec,
 } from "@/features/editor/musicXmlTimeline";
 import { midiToNoteName } from "@/lib/utils";
@@ -84,17 +86,21 @@ interface SheetMusicViewerProps {
   onMusicXmlChange?: (nextXml: string) => void;
 }
 
+const EMPTY_NOTES: ScoreNote[] = [];
+const EMPTY_TRACKS: ScoreTrack[] = [];
+const EMPTY_MUTED: Record<string, boolean> = {};
+
 export function SheetMusicViewer({
   musicxml,
-  notes = [],
+  notes = EMPTY_NOTES,
   showChordSymbols = true,
   onToggleChordSymbols,
   playheadSec = 0,
   isPlaying = false,
   tempoBpm = 120,
-  tracks = [],
+  tracks = EMPTY_TRACKS,
   satbSoloVoice = null,
-  satbMutedVoices = {},
+  satbMutedVoices = EMPTY_MUTED,
   onTogglePlay,
   onStopPlay,
   onSeek,
@@ -110,6 +116,9 @@ export function SheetMusicViewer({
   const svgNoteTargetMapRef = useRef<WeakMap<Element, XmlNoteTarget>>(new WeakMap());
   const cursorSnapshotsRef = useRef<OsmdCursorSnapshot[]>([]);
   const lastCursorWholeRef = useRef<number>(-1);
+  const lastSnapshotIdxRef = useRef<number>(-1);
+  const baseGeomRef = useRef<PlayheadRect | null>(null);
+  const nextGeomRef = useRef<PlayheadRect | null>(null);
   const lastFollowedSystemRef = useRef<number>(-1);
   const playheadSecRef = useRef<number>(playheadSec);
   playheadSecRef.current = playheadSec;
@@ -241,85 +250,130 @@ export function SheetMusicViewer({
       // Use O(log N) snapshot lookup when OSMD iterator timeline is populated
       const snapshots = cursorSnapshotsRef.current;
       let targetWhole = timeSecToWholeNotes(timeline, sec, tempoBpm);
+      let snapIdx = -1;
       if (snapshots.length > 1) {
-        const idx = findCursorSnapshotIndex(snapshots, sec);
-        if (idx >= 0) {
-          targetWhole = snapshots[idx].osmdRealValue ?? snapshots[idx].wholeNote;
+        snapIdx = findCursorSnapshotIndex(snapshots, sec);
+        if (snapIdx >= 0) {
+          targetWhole = snapshots[snapIdx].osmdRealValue ?? snapshots[snapIdx].wholeNote;
         }
       }
 
-      if (!force && Math.abs(targetWhole - lastCursorWholeRef.current) < 0.002 && sec > 0) {
-        return;
-      }
+      const stepChanged =
+        force ||
+        sec <= 0.01 ||
+        snapIdx !== lastSnapshotIdxRef.current ||
+        Math.abs(targetWhole - lastCursorWholeRef.current) >= 0.002;
 
       try {
-        if (!cursor.iterator) return;
-        cursor.show();
-        if (cursor.cursorElement) {
-          cursor.cursorElement.style.opacity = "0";
-          cursor.cursorElement.style.pointerEvents = "none";
-        }
+        if (stepChanged) {
+          if (!cursor.iterator) return;
+          cursor.show();
+          if (cursor.cursorElement) {
+            cursor.cursorElement.style.opacity = "0";
+            cursor.cursorElement.style.pointerEvents = "none";
+          }
 
-        const curReal = cursor.iterator.currentTimeStamp?.RealValue ?? 0;
-        if (sec <= 0.01 || targetWhole < curReal - 0.001) {
-          cursor.reset();
-          if (sec <= 0.01) {
-            lastFollowedSystemRef.current = -1;
+          const curReal = cursor.iterator.currentTimeStamp?.RealValue ?? 0;
+          if (sec <= 0.01 || targetWhole < curReal - 0.001) {
+            cursor.reset();
+            if (sec <= 0.01) {
+              lastFollowedSystemRef.current = -1;
+            }
+          }
+
+          let guard = 0;
+          while (
+            !cursor.iterator.EndReached &&
+            (cursor.iterator.currentTimeStamp?.RealValue ?? 0) < targetWhole - 0.004 &&
+            guard < 4000
+          ) {
+            cursor.next();
+            guard++;
+          }
+          cursor.update();
+          lastCursorWholeRef.current = targetWhole;
+          lastSnapshotIdxRef.current = snapIdx;
+
+          // Highlight sounding noteheads with SATB colors respecting Solo/Mute
+          clearNoteheadHighlights();
+          const gNotes = typeof cursor.GNotesUnderCursor === "function" ? cursor.GNotesUnderCursor() : [];
+          for (const gn of gNotes) {
+            const svgEl =
+              typeof (gn as unknown as { getSVGGElement?: () => Element | null }).getSVGGElement === "function"
+                ? (gn as unknown as { getSVGGElement: () => Element | null }).getSVGGElement()
+                : null;
+            if (!svgEl) continue;
+
+            const staffIdx =
+              (gn as unknown as { sourceNote?: { ParentStaffEntry?: { ParentStaff?: { idInMusicSheet?: number } } } })
+                .sourceNote?.ParentStaffEntry?.ParentStaff?.idInMusicSheet ?? 0;
+            const track = tracks[staffIdx];
+            const role = resolveTrackVoiceRole(track);
+            const isMuted = role !== "other" ? Boolean(satbMutedVoices[role]) : Boolean(track?.muted);
+            if (isMuted) continue;
+            if (satbSoloVoice && role !== satbSoloVoice) continue;
+
+            const fillHex = SATB_SHEET_COLORS[role] || SATB_SHEET_COLORS.other;
+            const noteheadTargets = svgEl.querySelectorAll("path, ellipse");
+            const els = noteheadTargets.length > 0 ? Array.from(noteheadTargets) : [svgEl];
+            for (const el of els) {
+              highlightedSvgRef.current.push({ el, origFill: el.getAttribute("fill") });
+              el.setAttribute("fill", fillHex);
+            }
+          }
+
+          const baseGeom = computePlayheadGeometry(osmd);
+          baseGeomRef.current = baseGeom;
+          nextGeomRef.current = null;
+
+          // Peek next cursor position on the same system for smooth musical-time rAF interpolation
+          if (
+            isPlaying &&
+            snapIdx >= 0 &&
+            snapIdx + 1 < snapshots.length &&
+            typeof cursor.previous === "function" &&
+            !cursor.iterator.EndReached
+          ) {
+            cursor.next();
+            if (!cursor.iterator.EndReached) {
+              cursor.update();
+              nextGeomRef.current = computePlayheadGeometry(osmd);
+            }
+            cursor.previous();
+            cursor.update();
           }
         }
 
-        let guard = 0;
-        while (
-          !cursor.iterator.EndReached &&
-          (cursor.iterator.currentTimeStamp?.RealValue ?? 0) < targetWhole - 0.004 &&
-          guard < 4000
+        let displayGeom = baseGeomRef.current ?? computePlayheadGeometry(osmd);
+        if (
+          isPlaying &&
+          allowAutoScroll &&
+          snapIdx >= 0 &&
+          snapIdx + 1 < snapshots.length &&
+          baseGeomRef.current?.visible &&
+          nextGeomRef.current?.visible
         ) {
-          cursor.next();
-          guard++;
-        }
-        cursor.update();
-        lastCursorWholeRef.current = targetWhole;
-
-        // Highlight sounding noteheads with SATB colors respecting Solo/Mute
-        clearNoteheadHighlights();
-        const gNotes = typeof cursor.GNotesUnderCursor === "function" ? cursor.GNotesUnderCursor() : [];
-        for (const gn of gNotes) {
-          const svgEl =
-            typeof (gn as unknown as { getSVGGElement?: () => Element | null }).getSVGGElement === "function"
-              ? (gn as unknown as { getSVGGElement: () => Element | null }).getSVGGElement()
-              : null;
-          if (!svgEl) continue;
-
-          const staffIdx =
-            (gn as unknown as { sourceNote?: { ParentStaffEntry?: { ParentStaff?: { idInMusicSheet?: number } } } })
-              .sourceNote?.ParentStaffEntry?.ParentStaff?.idInMusicSheet ?? 0;
-          const track = tracks[staffIdx];
-          const role = resolveTrackVoiceRole(track);
-          const isMuted = role !== "other" ? Boolean(satbMutedVoices[role]) : Boolean(track?.muted);
-          if (isMuted) continue;
-          if (satbSoloVoice && role !== satbSoloVoice) continue;
-
-          const fillHex = SATB_SHEET_COLORS[role] || SATB_SHEET_COLORS.other;
-          const noteheadTargets = svgEl.querySelectorAll("path, ellipse");
-          const els = noteheadTargets.length > 0 ? Array.from(noteheadTargets) : [svgEl];
-          for (const el of els) {
-            highlightedSvgRef.current.push({ el, origFill: el.getAttribute("fill") });
-            el.setAttribute("fill", fillHex);
+          const s0 = snapshots[snapIdx];
+          const s1 = snapshots[snapIdx + 1];
+          const baseG = baseGeomRef.current;
+          const nextG = nextGeomRef.current;
+          if (s1.sec > s0.sec + 1e-4 && nextG.systemIndex === baseG.systemIndex && nextG.left > baseG.left) {
+            const frac = Math.max(0, Math.min(1, (sec - s0.sec) / (s1.sec - s0.sec)));
+            displayGeom = { ...baseG, left: baseG.left + frac * (nextG.left - baseG.left) };
           }
         }
 
-        const geom = computePlayheadGeometry(osmd);
         setPlayheadRect((prev) =>
-          prev.visible === geom.visible &&
-            prev.left === geom.left &&
-            prev.top === geom.top &&
-            prev.height === geom.height &&
-            prev.systemIndex === geom.systemIndex
+          prev.visible === displayGeom.visible &&
+            prev.left === displayGeom.left &&
+            prev.top === displayGeom.top &&
+            prev.height === displayGeom.height &&
+            prev.systemIndex === displayGeom.systemIndex
             ? prev
-            : geom,
+            : displayGeom,
         );
-        if (allowAutoScroll) {
-          maybeAutoScroll(geom);
+        if (allowAutoScroll && stepChanged) {
+          maybeAutoScroll(displayGeom);
         }
       } catch {
         // Ignore OSMD cursor boundary exceptions during re-render
@@ -430,7 +484,8 @@ export function SheetMusicViewer({
             (mIdx !== undefined ? measureStartByIndex.get(mIdx) : undefined) ??
             activeTimeline.totalWholeNotes;
 
-          const scoreWhole = measureWholeStart + beatOffsetWhole;
+          const scoreQuarter = wholeNotesToQuarterNotes(measureWholeStart + beatOffsetWhole);
+          const scoreWhole = quarterNotesToWholeNotes(scoreQuarter);
           let sec = wholeNotesToTimeSec(activeTimeline, scoreWhole, tempoBpm);
 
           let hasSounding = true;
@@ -620,6 +675,9 @@ export function SheetMusicViewer({
         indexRenderedScore(osmd, localTimeline);
 
         lastCursorWholeRef.current = -1;
+        lastSnapshotIdxRef.current = -1;
+        baseGeomRef.current = null;
+        nextGeomRef.current = null;
         lastFollowedSystemRef.current = -1;
         osmd.cursor?.reset();
         if (osmd.cursor?.cursorElement) {

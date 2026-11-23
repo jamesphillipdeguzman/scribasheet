@@ -605,6 +605,100 @@ def test_satb_lyrics_consolidate_to_soprano_with_verses_and_hyphenation():
     assert len(parts[2].findall(".//lyric")) == 0
     assert len(parts[3].findall(".//lyric")) == 0
 
+
+def test_satb_strips_section_labels_and_malformed_duplicate_harmonies_while_preserving_verse_order():
+    mountain_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+    <score-part id="P3"><part-name>Tenor</part-name></score-part>
+    <score-part id="P4"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="9">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <harmony><root><root-step>C</root-step></root><kind text="sus4">suspended-fourth</kind></harmony>
+      <harmony><root><root-step>C</root-step></root><kind text="sus4">suspended-fourth</kind></harmony>
+      <harmony><root><root-step>C</root-step></root><kind text="Csus4 c">other</kind></harmony>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>single</syllabic><text>Harmony</text></lyric>
+      </note>
+      <note>
+        <pitch><step>G</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>single</syllabic><text>While</text></lyric>
+        <lyric number="2"><syllabic>single</syllabic><text>The</text></lyric>
+      </note>
+      <note>
+        <pitch><step>G</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>begin</syllabic><text>shep</text></lyric>
+        <lyric number="2"><syllabic>begin</syllabic><text>shep</text></lyric>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+      </note>
+    </measure>
+    <measure number="10">
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><type>whole</type>
+        <lyric number="1"><syllabic>single</syllabic><text>harmonious</text></lyric>
+      </note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="9">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <harmony><root><root-step>C</root-step></root><kind text="sus4">suspended-fourth</kind></harmony>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>end</syllabic><text>herds</text></lyric>
+        <lyric number="2"><syllabic>end</syllabic><text>herds</text></lyric>
+      </note>
+    </measure>
+    <measure number="10">
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+  <part id="P3">
+    <measure number="9">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric number="1"><text>Chorus:</text></lyric></note>
+    </measure>
+    <measure number="10">
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+  <part id="P4">
+    <measure number="9">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric number="1"><text>D.C.</text></lyric></note>
+    </measure>
+    <measure number="10">
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>"""
+    cleaned, _ = sanitize_omr_musicxml(mountain_xml)
+    root = ET.fromstring(cleaned)
+    parts = root.findall("part")
+    sop_v1 = [(ly.attrib.get("number"), ly.findtext("text")) for ly in parts[0].findall(".//lyric[@number='1']")]
+    sop_v2 = [(ly.attrib.get("number"), ly.findtext("text")) for ly in parts[0].findall(".//lyric[@number='2']")]
+    # Section label 'Harmony' removed on Measure 9 beat 1, while Verse 1 & Verse 2 stay cleanly aligned
+    assert sop_v1 == [("1", "While"), ("1", "shep"), ("1", "herds"), ("1", "harmonious")]
+    assert sop_v2 == [("2", "The"), ("2", "shep"), ("2", "herds")]
+    # Lower staves have zero lyrics and zero harmonies
+    for lower in parts[1:]:
+        assert len(lower.findall(".//lyric")) == 0
+        assert len(lower.findall(".//harmony")) == 0
+    # Only the single valid Csus4 harmony remains on Soprano (duplicate & malformed 'Csus4 c' removed)
+    sop_harmonies = parts[0].findall(".//harmony")
+    assert len(sop_harmonies) == 1
+    assert sop_harmonies[0].find("kind").attrib.get("text") == "sus4"
+
     lyrics_data = extract_lyrics_data_from_musicxml(cleaned, tempo_bpm=120.0)
     assert lyrics_data is not None
     assert "Amazing grace, how" in lyrics_data["text"]
@@ -690,6 +784,100 @@ def test_satb_transfers_orphaned_passing_tone_lyrics_and_clears_all_lower_staves
     assert len(parts[1].findall(".//lyric")) == 0
     assert len(parts[2].findall(".//lyric")) == 0
     assert len(parts[3].findall(".//lyric")) == 0
+
+
+def test_satb_strips_section_labels_and_malformed_duplicate_harmonies_while_preserving_verse_order():
+    mountain_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+    <score-part id="P3"><part-name>Tenor</part-name></score-part>
+    <score-part id="P4"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="9">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <harmony><root><root-step>C</root-step></root><kind text="sus4">suspended-fourth</kind></harmony>
+      <harmony><root><root-step>C</root-step></root><kind text="sus4">suspended-fourth</kind></harmony>
+      <harmony><root><root-step>C</root-step></root><kind text="Csus4 c">other</kind></harmony>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>single</syllabic><text>Harmony</text></lyric>
+      </note>
+      <note>
+        <pitch><step>G</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>single</syllabic><text>While</text></lyric>
+        <lyric number="2"><syllabic>single</syllabic><text>The</text></lyric>
+      </note>
+      <note>
+        <pitch><step>G</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>begin</syllabic><text>shep</text></lyric>
+        <lyric number="2"><syllabic>begin</syllabic><text>shep</text></lyric>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+      </note>
+    </measure>
+    <measure number="10">
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><type>whole</type>
+        <lyric number="1"><syllabic>single</syllabic><text>harmonious</text></lyric>
+      </note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="9">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <harmony><root><root-step>C</root-step></root><kind text="sus4">suspended-fourth</kind></harmony>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>end</syllabic><text>herds</text></lyric>
+        <lyric number="2"><syllabic>end</syllabic><text>herds</text></lyric>
+      </note>
+    </measure>
+    <measure number="10">
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+  <part id="P3">
+    <measure number="9">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric number="1"><text>Chorus:</text></lyric></note>
+    </measure>
+    <measure number="10">
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+  <part id="P4">
+    <measure number="9">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type><lyric number="1"><text>D.C.</text></lyric></note>
+    </measure>
+    <measure number="10">
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>"""
+    cleaned, _ = sanitize_omr_musicxml(mountain_xml)
+    root = ET.fromstring(cleaned)
+    parts = root.findall("part")
+    sop_v1 = [(ly.attrib.get("number"), ly.findtext("text")) for ly in parts[0].findall(".//lyric[@number='1']")]
+    sop_v2 = [(ly.attrib.get("number"), ly.findtext("text")) for ly in parts[0].findall(".//lyric[@number='2']")]
+    # Section label 'Harmony' removed on Measure 9 beat 1, while Verse 1 & Verse 2 stay cleanly aligned
+    assert sop_v1 == [("1", "While"), ("1", "shep"), ("1", "herds"), ("1", "harmonious")]
+    assert sop_v2 == [("2", "The"), ("2", "shep"), ("2", "herds")]
+    # Lower staves have zero lyrics and zero harmonies
+    for lower in parts[1:]:
+        assert len(lower.findall(".//lyric")) == 0
+        assert len(lower.findall(".//harmony")) == 0
+    # Only the single valid Csus4 harmony remains on Soprano (duplicate & malformed 'Csus4 c' removed)
+    sop_harmonies = parts[0].findall(".//harmony")
+    assert len(sop_harmonies) == 1
+    assert sop_harmonies[0].find("kind").attrib.get("text") == "sus4"
 
 
 def test_put_score_persists_direct_musicxml_edits(client, db_session) -> None:

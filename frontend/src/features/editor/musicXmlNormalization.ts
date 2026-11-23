@@ -14,6 +14,102 @@ const FOOTER_PHRASE_RE =
 
 const CREDIT_BY_NAME_RE = /\bby\s+[A-Z][a-z]{1,24}(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]{1,24}\b/;
 
+const SECTION_LABEL_RE =
+  /^(?:harmony|unison|chorus|refrain|verse(?:\s*\d+)?|solo|duet|tutti|men|women|soprano|alto|tenor|bass|coda|fine|d\.?\s*c\.?(?:\s+al\s+(?:fine|coda))?|d\.?\s*s\.?(?:\s+al\s+(?:fine|coda))?)$/i;
+
+function isSectionLabelText(text: string): boolean {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned) return false;
+  const stripped = cleaned.replace(/^[ \t\r\n:;,\-!?()[\]"']+|[ \t\r\n:;,\-!?()[\]"']+$/g, "");
+  if (!stripped) return false;
+  if (SECTION_LABEL_RE.test(stripped)) return true;
+  const noTrailDot = stripped.replace(/\.+$/, "");
+  return Boolean(noTrailDot && SECTION_LABEL_RE.test(noTrailDot));
+}
+
+const VALID_CHORD_KIND_TEXT_RE =
+  /^(?:N\.?C\.?|[A-Ga-g][#b]?(?:maj|min|dim|aug|sus|add|m|M)?[0-9#b+°øΔ-]*(?:\([^)]+\))?(?:\/[A-Ga-g][#b]?)?|(?:maj|min|dim|aug|sus|add|m|M)?[0-9#b+°øΔ-]*(?:\([^)]+\))?)$/;
+
+function isMalformedHarmony(harmonyEl: Element): boolean {
+  const rootEl = harmonyEl.getElementsByTagName("root")[0];
+  if (!rootEl) return true;
+  const step = (rootEl.getElementsByTagName("root-step")[0]?.textContent || "").trim().toUpperCase();
+  if (!/^[A-G]$/.test(step)) return true;
+  const kindEl = harmonyEl.getElementsByTagName("kind")[0];
+  if (kindEl) {
+    const kindText = (kindEl.getAttribute("text") || "").replace(/\s+/g, " ").trim();
+    if (kindText && /\s/.test(kindText) && !VALID_CHORD_KIND_TEXT_RE.test(kindText)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function sanitizeSatbHarmonies(doc: Document): void {
+  const parts = Array.from(doc.getElementsByTagName("part"));
+  if (parts.length === 0) return;
+
+  const partNames = new Map<string, string>();
+  for (const sp of Array.from(doc.getElementsByTagName("score-part"))) {
+    const id = sp.getAttribute("id") || "";
+    partNames.set(id, (sp.getElementsByTagName("part-name")[0]?.textContent || "").trim().toLowerCase());
+  }
+
+  let sopranoIdx = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const pname = partNames.get(parts[i].getAttribute("id") || "") || "";
+    if (pname.includes("soprano") || pname === "sop") {
+      sopranoIdx = i;
+      break;
+    }
+  }
+
+  for (let pIdx = 0; pIdx < parts.length; pIdx++) {
+    const isSoprano = pIdx === sopranoIdx;
+    for (const mEl of Array.from(parts[pIdx].getElementsByTagName("measure"))) {
+      const seen = new Set<string>();
+      let offsetDiv = 0;
+      for (const child of Array.from(mEl.children)) {
+        const tag = child.tagName.toLowerCase();
+        if (tag === "backup") {
+          const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+          if (Number.isFinite(d) && d > 0) offsetDiv = Math.max(0, offsetDiv - d);
+        } else if (tag === "forward") {
+          const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+          if (Number.isFinite(d) && d > 0) offsetDiv += d;
+        } else if (tag === "note") {
+          const isChord = child.getElementsByTagName("chord").length > 0;
+          const isGrace = child.getElementsByTagName("grace").length > 0;
+          if (!isChord && !isGrace) {
+            const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+            if (Number.isFinite(d) && d > 0) offsetDiv += d;
+          }
+        } else if (tag === "harmony") {
+          if ((parts.length >= 2 && !isSoprano) || isMalformedHarmony(child)) {
+            child.parentNode?.removeChild(child);
+            continue;
+          }
+          const rEl = child.getElementsByTagName("root")[0];
+          const kEl = child.getElementsByTagName("kind")[0];
+          const bEl = child.getElementsByTagName("bass")[0];
+          const sig = [
+            Math.round(offsetDiv * 1000) / 1000,
+            (rEl?.getElementsByTagName("root-step")[0]?.textContent || "").trim().toUpperCase(),
+            (rEl?.getElementsByTagName("root-alter")[0]?.textContent || "").trim(),
+            (kEl?.textContent || "").trim(),
+            (bEl?.getElementsByTagName("bass-step")[0]?.textContent || "").trim().toUpperCase(),
+          ].join("|");
+          if (seen.has(sig)) {
+            child.parentNode?.removeChild(child);
+          } else {
+            seen.add(sig);
+          }
+        }
+      }
+    }
+  }
+}
+
 function sanitizeDocumentFooterLyrics(doc: Document): void {
   const parts = Array.from(doc.getElementsByTagName("part"));
   const numParts = parts.length;
@@ -40,7 +136,7 @@ function sanitizeDocumentFooterLyrics(doc: Document): void {
           const rawY = lyrEl.getAttribute("default-y");
           const dy = rawY !== null ? Number.parseFloat(rawY) : NaN;
 
-          if ((Number.isFinite(dy) && dy < -150) || FOOTER_PHRASE_RE.test(txt)) {
+          if ((Number.isFinite(dy) && dy < -150) || FOOTER_PHRASE_RE.test(txt) || isSectionLabelText(txt) || !txt) {
             lyrEl.parentNode?.removeChild(lyrEl);
             continue;
           }
@@ -379,6 +475,8 @@ export function prepareDisplayMusicXml(xml: string, showChords: boolean): string
           for (const el of harmonies) {
             el.parentNode?.removeChild(el);
           }
+        } else {
+          sanitizeSatbHarmonies(doc);
         }
         for (const tag of ["work-title", "movement-title"]) {
           const el = doc.getElementsByTagName(tag)[0];

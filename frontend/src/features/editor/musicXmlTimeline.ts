@@ -21,6 +21,16 @@ export interface OsmdCursorSnapshot {
   stepIndex: number;
 }
 
+/** Convert MusicXML / OSMD RealValue (whole-note units) to quarter-note units. */
+export function wholeNotesToQuarterNotes(wholeNotes: number): number {
+  return wholeNotes * 4;
+}
+
+/** Convert quarter-note units back to whole-note units for timeline lookup. */
+export function quarterNotesToWholeNotes(quarterNotes: number): number {
+  return quarterNotes / 4;
+}
+
 /**
  * Parse MusicXML divisions, mid-measure and measure-level tempo changes,
  * notes (including tuplets), rests, backups, and forwards into an exact

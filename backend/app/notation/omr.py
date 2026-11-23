@@ -325,6 +325,114 @@ _CREDIT_BY_NAME_RE = re.compile(
     r"\bby\s+[A-Z][a-z]{1,24}(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]{1,24}\b"
 )
 
+_SECTION_LABEL_RE = re.compile(
+    r"^(?:harmony|unison|chorus|refrain|verse(?:\s*\d+)?|solo|duet|tutti|men|women|soprano|alto|tenor|bass|coda|fine|d\.?\s*c\.?(?:\s+al\s+(?:fine|coda))?|d\.?\s*s\.?(?:\s+al\s+(?:fine|coda))?)$",
+    re.IGNORECASE,
+)
+
+
+def _is_section_label_text(text: str) -> bool:
+    """Return True only when text is a standalone section/editorial heading rather than lyric content."""
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return False
+    stripped = cleaned.strip(" \t\r\n:;,-!?()[]\"'")
+    if not stripped:
+        return False
+    if _SECTION_LABEL_RE.match(stripped):
+        return True
+    # Also handle trailing period on non-D.C./D.S. words like "Harmony." or "Chorus."
+    no_trail_dot = stripped.rstrip(".")
+    return bool(no_trail_dot and _SECTION_LABEL_RE.match(no_trail_dot))
+
+
+_VALID_CHORD_KIND_TEXT_RE = re.compile(
+    r"^(?:N\.?C\.?|[A-Ga-g][#b]?(?:maj|min|dim|aug|sus|add|m|M)?[0-9#b+°øΔ-]*(?:\([^)]+\))?(?:/[A-Ga-g][#b]?)?|(?:maj|min|dim|aug|sus|add|m|M)?[0-9#b+°øΔ-]*(?:\([^)]+\))?)$"
+)
+
+
+def _is_malformed_harmony(harmony_el: ET.Element) -> bool:
+    """Return True if a <harmony> element is malformed OMR noise (e.g., 'Csus4 c' or missing root)."""
+    root_el = harmony_el.find("root")
+    if root_el is None:
+        return True
+    step = (root_el.findtext("root-step") or "").strip().upper()
+    if step not in {"A", "B", "C", "D", "E", "F", "G"}:
+        return True
+    kind_el = harmony_el.find("kind")
+    if kind_el is not None:
+        kind_text = re.sub(r"\s+", " ", (kind_el.attrib.get("text") or "")).strip()
+        if kind_text and " " in kind_text:
+            # Stray space-separated token like "Csus4 c" is OMR noise, not a valid chord suffix
+            if not _VALID_CHORD_KIND_TEXT_RE.match(kind_text):
+                return True
+    return False
+
+
+def _sanitize_satb_harmonies(root: ET.Element) -> int:
+    """Keep valid chord symbols on Soprano/top-line only; strip lower-staff duplicates and malformed OMR noise."""
+    parts = list(root.findall("part"))
+    if not parts:
+        return 0
+
+    part_names: dict[str, str] = {}
+    for sp in root.findall("./part-list/score-part"):
+        pid = sp.attrib.get("id", "")
+        part_names[pid] = (sp.findtext("part-name") or "").strip().lower()
+
+    soprano_idx = 0
+    for idx, p in enumerate(parts):
+        pname = part_names.get(p.attrib.get("id", ""), "")
+        if "soprano" in pname or pname == "sop":
+            soprano_idx = idx
+            break
+
+    removed = 0
+    for idx, part_el in enumerate(parts):
+        is_soprano = idx == soprano_idx
+        for m_el in part_el.findall("measure"):
+            seen_sigs: set[tuple[float, str, str, str, str]] = set()
+            offset_div = 0.0
+            for child in list(m_el):
+                tag = child.tag.lower() if isinstance(child.tag, str) else ""
+                if tag == "backup":
+                    try:
+                        offset_div = max(0.0, offset_div - float(child.findtext("duration") or 0.0))
+                    except ValueError:
+                        pass
+                elif tag == "forward":
+                    try:
+                        offset_div += float(child.findtext("duration") or 0.0)
+                    except ValueError:
+                        pass
+                elif tag == "note":
+                    if child.find("chord") is None and child.find("grace") is None:
+                        try:
+                            offset_div += float(child.findtext("duration") or 0.0)
+                        except ValueError:
+                            pass
+                elif tag == "harmony":
+                    if (len(parts) >= 2 and not is_soprano) or _is_malformed_harmony(child):
+                        m_el.remove(child)
+                        removed += 1
+                        continue
+                    r_el = child.find("root")
+                    k_el = child.find("kind")
+                    b_el = child.find("bass")
+                    sig = (
+                        round(offset_div, 3),
+                        (r_el.findtext("root-step") or "").strip().upper() if r_el is not None else "",
+                        (r_el.findtext("root-alter") or "").strip() if r_el is not None else "",
+                        (k_el.text or "").strip() if k_el is not None else "",
+                        (b_el.findtext("bass-step") or "").strip().upper() if b_el is not None else "",
+                    )
+                    if sig in seen_sigs:
+                        m_el.remove(child)
+                        removed += 1
+                    else:
+                        seen_sigs.add(sig)
+    return removed
+
 _FOOTER_CONTEXT_WORDS_RE = re.compile(
     r"\b(?:commercial|permission|reproduced)\b",
     re.IGNORECASE,
@@ -828,7 +936,7 @@ def sanitize_omr_musicxml(
                 dy = float(raw_y) if raw_y is not None else None
             except ValueError:
                 dy = None
-            if _is_footer_or_metadata_text(txt, default_y=dy, pdf_footer_texts=pdf_footers):
+            if _is_footer_or_metadata_text(txt, default_y=dy, pdf_footer_texts=pdf_footers) or _is_section_label_text(txt) or not txt:
                 note_el.remove(lyr)
                 removed_lyrics += 1
 
@@ -852,6 +960,7 @@ def sanitize_omr_musicxml(
     # Reconstruct multi-note lyric phrases & clean sparse bottom-staff pseudo-lyrics
     removed_lyrics += _reconstruct_and_filter_part_lyrics(root, pdf_footer_texts=pdf_footers)
     # Consolidate split/duplicated SATB lyrics onto Soprano
+    _sanitize_satb_harmonies(root)
     _consolidate_satb_lyrics_to_soprano(root)
 
     # Strip footer <credit-words> / <words> far below the lowest staff if needed
