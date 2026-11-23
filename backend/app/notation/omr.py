@@ -919,6 +919,177 @@ def extract_lyrics_data_from_musicxml(xml_str: str, *, tempo_bpm: float = 100.0)
     }
 
 
+def _strip_artificial_pickup_padding(root: ET.Element) -> bool:
+    """Remove artificial trailing rest padding from an incomplete opening pickup measure across all parts."""
+    parts = root.findall("part")
+    if not parts:
+        return False
+
+    def _duration_type_for_divs(divs_val: float, divisions: float) -> tuple[str, bool]:
+        ql = divs_val / max(1.0, divisions)
+        table = [
+            (4.0, "whole", False),
+            (3.0, "half", True),
+            (2.0, "half", False),
+            (1.5, "quarter", True),
+            (1.0, "quarter", False),
+            (0.75, "eighth", True),
+            (0.5, "eighth", False),
+            (0.375, "16th", True),
+            (0.25, "16th", False),
+        ]
+        for target_ql, ntype, dotted in table:
+            if abs(ql - target_ql) <= 0.02:
+                return ntype, dotted
+        return "quarter", False
+
+    part_infos: list[dict] = []
+    has_pickup_marker = False
+    nominal_ql: float | None = None
+
+    for part_el in parts:
+        measures = part_el.findall("measure")
+        if not measures:
+            continue
+        m0 = measures[0]
+        m_num = (m0.attrib.get("number") or "").strip()
+        m_imp = (m0.attrib.get("implicit") or "").strip().lower()
+        if m_num == "0" or m_imp == "yes":
+            has_pickup_marker = True
+
+        divisions = 1.0
+        beats = 4
+        beat_type = 4
+        attr_el = m0.find("attributes")
+        if attr_el is not None:
+            div_el = attr_el.find("divisions")
+            if div_el is not None and div_el.text:
+                try:
+                    divisions = max(1.0, float(div_el.text.strip()))
+                except ValueError:
+                    pass
+            time_el = attr_el.find("time")
+            if time_el is not None:
+                b_el = time_el.find("beats")
+                bt_el = time_el.find("beat-type")
+                try:
+                    if b_el is not None and b_el.text:
+                        beats = max(1, int(b_el.text.strip()))
+                    if bt_el is not None and bt_el.text:
+                        beat_type = max(1, int(bt_el.text.strip()))
+                except ValueError:
+                    pass
+
+        part_nominal_ql = beats * (4.0 / beat_type)
+        if nominal_ql is None:
+            nominal_ql = part_nominal_ql
+
+        cursor = 0.0
+        last_note_start = 0.0
+        last_pitched_end_divs = 0.0
+        max_end_divs = 0.0
+        padding_candidates: list[tuple[ET.Element, float, float, float, bool]] = []
+
+        for child in list(m0):
+            tag = child.tag.split("}")[-1]
+            if tag == "note":
+                if child.find("grace") is not None:
+                    continue
+                dur_el = child.find("duration")
+                dur = 0.0
+                if dur_el is not None and dur_el.text:
+                    try:
+                        dur = max(0.0, float(dur_el.text.strip()))
+                    except ValueError:
+                        dur = 0.0
+                is_chord = child.find("chord") is not None
+                if is_chord:
+                    start = last_note_start
+                    end = start + dur
+                else:
+                    start = cursor
+                    end = start + dur
+                    cursor = end
+                    last_note_start = start
+                max_end_divs = max(max_end_divs, end)
+                if child.find("rest") is not None:
+                    padding_candidates.append((child, start, end, dur, True))
+                else:
+                    last_pitched_end_divs = max(last_pitched_end_divs, end)
+            elif tag == "backup":
+                dur_el = child.find("duration")
+                if dur_el is not None and dur_el.text:
+                    try:
+                        cursor = max(0.0, cursor - float(dur_el.text.strip()))
+                    except ValueError:
+                        pass
+            elif tag == "forward":
+                dur_el = child.find("duration")
+                dur = 0.0
+                if dur_el is not None and dur_el.text:
+                    try:
+                        dur = max(0.0, float(dur_el.text.strip()))
+                    except ValueError:
+                        dur = 0.0
+                start = cursor
+                end = start + dur
+                cursor = end
+                max_end_divs = max(max_end_divs, end)
+                padding_candidates.append((child, start, end, dur, False))
+
+        part_infos.append(
+            {
+                "m0": m0,
+                "divisions": divisions,
+                "last_pitched_end_ql": last_pitched_end_divs / divisions,
+                "total_ql": max_end_divs / divisions,
+                "candidates": padding_candidates,
+            }
+        )
+
+    if not has_pickup_marker or not part_infos or nominal_ql is None:
+        return False
+
+    effective_pickup_ql = max(info["last_pitched_end_ql"] for info in part_infos)
+    if effective_pickup_ql <= 1e-4 or effective_pickup_ql >= nominal_ql - 1e-4:
+        return False
+
+    has_trailing_padding = any(info["total_ql"] > effective_pickup_ql + 1e-4 for info in part_infos)
+    if not has_trailing_padding:
+        return False
+
+    changed = False
+    for info in part_infos:
+        m0: ET.Element = info["m0"]
+        divisions: float = info["divisions"]
+        cutoff_divs = effective_pickup_ql * divisions
+        m0.set("implicit", "yes")
+
+        for el, start, end, _dur, is_rest in info["candidates"]:
+            if start >= cutoff_divs - 1e-4:
+                m0.remove(el)
+                changed = True
+            elif end > cutoff_divs + 1e-4:
+                new_dur = max(0.0, cutoff_divs - start)
+                dur_el = el.find("duration")
+                if dur_el is not None:
+                    rounded = int(round(new_dur))
+                    dur_el.text = str(rounded if abs(new_dur - rounded) < 1e-4 else round(new_dur, 4))
+                if is_rest:
+                    ntype, dotted = _duration_type_for_divs(new_dur, divisions)
+                    type_el = el.find("type")
+                    if type_el is None:
+                        type_el = ET.SubElement(el, "type")
+                    type_el.text = ntype
+                    for d_el in list(el.findall("dot")):
+                        el.remove(d_el)
+                    if dotted:
+                        ET.SubElement(el, "dot")
+                changed = True
+
+    return changed
+
+
 def sanitize_omr_musicxml(
     xml_str: str,
     *,
@@ -973,6 +1144,7 @@ def sanitize_omr_musicxml(
     # Consolidate split/duplicated SATB lyrics onto Soprano
     _sanitize_satb_harmonies(root)
     _consolidate_satb_lyrics_to_soprano(root)
+    _strip_artificial_pickup_padding(root)
 
     # Strip footer <credit-words> / <words> far below the lowest staff if needed
     for dir_el in root.findall(".//direction"):

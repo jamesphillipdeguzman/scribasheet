@@ -486,6 +486,182 @@ export function isMusicXmlDocument(text: string): boolean {
  * Normalize a raw MusicXML string (strip BOM/whitespace, ensure <?xml ...?> header)
  * and apply display options (chord stripping, clean title, ScribaSheet attribution).
  */
+function durationTypeForDivs(divsVal: number, divisions: number): { type: string; dotted: boolean } {
+  const ql = divsVal / Math.max(1, divisions);
+  const table: Array<[number, string, boolean]> = [
+    [4.0, "whole", false],
+    [3.0, "half", true],
+    [2.0, "half", false],
+    [1.5, "quarter", true],
+    [1.0, "quarter", false],
+    [0.75, "eighth", true],
+    [0.5, "eighth", false],
+    [0.375, "16th", true],
+    [0.25, "16th", false],
+  ];
+  for (const [targetQl, noteType, dotted] of table) {
+    if (Math.abs(ql - targetQl) <= 0.02) {
+      return { type: noteType, dotted };
+    }
+  }
+  return { type: "quarter", dotted: false };
+}
+
+/**
+ * Remove artificial trailing rest padding from an incomplete opening pickup measure
+ * across all parts so Measure 1 begins immediately after the actual pickup notes.
+ */
+function stripArtificialPickupPadding(doc: Document): void {
+  const parts = Array.from(doc.getElementsByTagName("part"));
+  if (parts.length === 0) return;
+
+  interface PaddingCandidate {
+    el: Element;
+    start: number;
+    end: number;
+    isRest: boolean;
+  }
+
+  interface PartPickupInfo {
+    m0: Element;
+    divisions: number;
+    lastPitchedEndQl: number;
+    totalQl: number;
+    candidates: PaddingCandidate[];
+  }
+
+  const partInfos: PartPickupInfo[] = [];
+  let hasPickupMarker = false;
+  let nominalQl: number | null = null;
+
+  for (const partEl of parts) {
+    const m0 = partEl.getElementsByTagName("measure")[0];
+    if (!m0) continue;
+
+    const mNum = (m0.getAttribute("number") || "").trim();
+    const mImp = (m0.getAttribute("implicit") || "").trim().toLowerCase();
+    if (mNum === "0" || mImp === "yes") {
+      hasPickupMarker = true;
+    }
+
+    let divisions = 1;
+    let beats = 4;
+    let beatType = 4;
+    const attrEl = m0.getElementsByTagName("attributes")[0];
+    if (attrEl) {
+      const divText = attrEl.getElementsByTagName("divisions")[0]?.textContent?.trim();
+      const parsedDiv = divText ? Number(divText) : NaN;
+      if (Number.isFinite(parsedDiv) && parsedDiv > 0) divisions = parsedDiv;
+
+      const timeEl = attrEl.getElementsByTagName("time")[0];
+      if (timeEl) {
+        const bText = timeEl.getElementsByTagName("beats")[0]?.textContent?.trim();
+        const btText = timeEl.getElementsByTagName("beat-type")[0]?.textContent?.trim();
+        const parsedB = bText ? Number(bText) : NaN;
+        const parsedBt = btText ? Number(btText) : NaN;
+        if (Number.isFinite(parsedB) && parsedB > 0) beats = parsedB;
+        if (Number.isFinite(parsedBt) && parsedBt > 0) beatType = parsedBt;
+      }
+    }
+
+    const partNominalQl = beats * (4 / beatType);
+    if (nominalQl === null) nominalQl = partNominalQl;
+
+    let cursor = 0;
+    let lastNoteStart = 0;
+    let lastPitchedEndDivs = 0;
+    let maxEndDivs = 0;
+    const candidates: PaddingCandidate[] = [];
+
+    for (const child of Array.from(m0.children)) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === "note") {
+        if (child.getElementsByTagName("grace").length > 0) continue;
+        const durText = child.getElementsByTagName("duration")[0]?.textContent?.trim();
+        const parsedDur = durText ? Number(durText) : 0;
+        const dur = Number.isFinite(parsedDur) && parsedDur >= 0 ? parsedDur : 0;
+        const isChord = child.getElementsByTagName("chord").length > 0;
+        const start = isChord ? lastNoteStart : cursor;
+        const end = start + dur;
+        if (!isChord) {
+          cursor = end;
+          lastNoteStart = start;
+        }
+        maxEndDivs = Math.max(maxEndDivs, end);
+        if (child.getElementsByTagName("rest").length > 0) {
+          candidates.push({ el: child, start, end, isRest: true });
+        } else {
+          lastPitchedEndDivs = Math.max(lastPitchedEndDivs, end);
+        }
+      } else if (tag === "backup") {
+        const durText = child.getElementsByTagName("duration")[0]?.textContent?.trim();
+        const parsedDur = durText ? Number(durText) : 0;
+        if (Number.isFinite(parsedDur) && parsedDur > 0) {
+          cursor = Math.max(0, cursor - parsedDur);
+        }
+      } else if (tag === "forward") {
+        const durText = child.getElementsByTagName("duration")[0]?.textContent?.trim();
+        const parsedDur = durText ? Number(durText) : 0;
+        const dur = Number.isFinite(parsedDur) && parsedDur >= 0 ? parsedDur : 0;
+        const start = cursor;
+        const end = start + dur;
+        cursor = end;
+        maxEndDivs = Math.max(maxEndDivs, end);
+        candidates.push({ el: child, start, end, isRest: false });
+      }
+    }
+
+    partInfos.push({
+      m0,
+      divisions,
+      lastPitchedEndQl: lastPitchedEndDivs / divisions,
+      totalQl: maxEndDivs / divisions,
+      candidates,
+    });
+  }
+
+  if (!hasPickupMarker || partInfos.length === 0 || nominalQl === null) return;
+
+  const effectivePickupQl = Math.max(...partInfos.map((p) => p.lastPitchedEndQl));
+  if (effectivePickupQl <= 1e-4 || effectivePickupQl >= nominalQl - 1e-4) return;
+
+  const hasTrailingPadding = partInfos.some((p) => p.totalQl > effectivePickupQl + 1e-4);
+  if (!hasTrailingPadding) return;
+
+  for (const info of partInfos) {
+    const cutoffDivs = effectivePickupQl * info.divisions;
+    info.m0.setAttribute("implicit", "yes");
+
+    for (const cand of info.candidates) {
+      if (cand.start >= cutoffDivs - 1e-4) {
+        cand.el.parentNode?.removeChild(cand.el);
+      } else if (cand.end > cutoffDivs + 1e-4) {
+        const newDur = Math.max(0, cutoffDivs - cand.start);
+        const durEl = cand.el.getElementsByTagName("duration")[0];
+        if (durEl) {
+          const rounded = Math.round(newDur);
+          durEl.textContent = String(Math.abs(newDur - rounded) < 1e-4 ? rounded : Number(newDur.toFixed(4)));
+        }
+        if (cand.isRest) {
+          const { type, dotted } = durationTypeForDivs(newDur, info.divisions);
+          let typeEl = cand.el.getElementsByTagName("type")[0];
+          if (!typeEl) {
+            typeEl = doc.createElement("type");
+            cand.el.appendChild(typeEl);
+          }
+          typeEl.textContent = type;
+          for (const d of Array.from(cand.el.getElementsByTagName("dot"))) {
+            d.parentNode?.removeChild(d);
+          }
+          if (dotted) {
+            cand.el.appendChild(doc.createElement("dot"));
+          }
+        }
+      }
+    }
+  }
+}
+
 export function prepareDisplayMusicXml(xml: string, showChords: boolean): string {
   const stripped = xml.replace(/^\uFEFF/, "").trim();
   if (!isMusicXmlDocument(stripped)) {
@@ -530,6 +706,7 @@ export function prepareDisplayMusicXml(xml: string, showChords: boolean): string
         }
         sanitizeDocumentFooterLyrics(doc);
         consolidateSatbLyricsToSoprano(doc);
+        stripArtificialPickupPadding(doc);
 
         const serialized = new XMLSerializer().serializeToString(doc).replace(/^\uFEFF/, "").trim();
         if (serialized.startsWith("<?xml")) {

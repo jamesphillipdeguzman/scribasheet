@@ -194,6 +194,8 @@ export function SheetMusicViewer({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
+  const osmdContainerElRef = useRef<HTMLDivElement | null>(null);
+  const osmdRenderGenRef = useRef(0);
   const highlightedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
   const selectedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
   const svgNoteTargetMapRef = useRef<WeakMap<Element, XmlNoteTarget>>(new WeakMap());
@@ -909,20 +911,54 @@ export function SheetMusicViewer({
     );
   };
 
+  const disposeOsmdInstance = useCallback(() => {
+    clearNoteheadHighlights();
+    clearSelectedHighlight();
+    try {
+      (osmdRef.current as unknown as { Dispose?: () => void } | null)?.Dispose?.();
+    } catch {
+      // Ignore dispose errors
+    }
+    osmdRef.current = null;
+    osmdContainerElRef.current = null;
+    if (containerRef.current) {
+      containerRef.current.innerHTML = "";
+    }
+    renderedEventsRef.current = [];
+    svgNoteTargetMapRef.current = new Map();
+    cursorSnapshotsRef.current = [];
+    baseGeomRef.current = null;
+    nextGeomRef.current = null;
+    lastCursorWholeRef.current = -1;
+    lastSnapshotIdxRef.current = -1;
+    lastFollowedSystemRef.current = -1;
+  }, []);
+
   useEffect(() => {
-    if (engine === "alphatab") return;
+    const gen = ++osmdRenderGenRef.current;
+
+    if (engine === "alphatab") {
+      disposeOsmdInstance();
+      setIsRendering(false);
+      return;
+    }
+
     const normalized = normalizeScorePayload(musicxml, effectiveShowChords);
     if (normalized.kind === "empty") {
+      disposeOsmdInstance();
       setResolvedXml(null);
       setRenderError(null);
       setPayloadStatus("empty");
+      setIsRendering(false);
       return;
     }
     if (normalized.kind === "compressed_mxl" || normalized.kind === "invalid") {
       console.warn("[SheetMusicViewer] Unsupported score payload:", normalized.kind);
+      disposeOsmdInstance();
       setResolvedXml(null);
       setRenderError(normalized.message);
       setPayloadStatus("error");
+      setIsRendering(false);
       return;
     }
 
@@ -930,6 +966,8 @@ export function SheetMusicViewer({
     setRenderError(null);
     setIsRendering(true);
     setPayloadStatus("loading");
+
+    const isStale = () => cancelled || gen !== osmdRenderGenRef.current;
 
     const renderScore = async () => {
       try {
@@ -962,12 +1000,43 @@ export function SheetMusicViewer({
           displayXml = normalized.xml;
         }
 
-        if (cancelled || !containerRef.current) return;
+        if (isStale() || !containerRef.current) return;
+
+        // Wait briefly for mounted container to acquire a nonzero layout width after engine toggle
+        const isJsdom = typeof navigator !== "undefined" && /jsdom/i.test(navigator.userAgent);
+        if (!isJsdom && containerRef.current.clientWidth === 0) {
+          await new Promise<void>((resolve) => {
+            let frames = 0;
+            const waitWidth = () => {
+              if (isStale() || !containerRef.current) {
+                resolve();
+                return;
+              }
+              if (containerRef.current.clientWidth > 0 || frames >= 10) {
+                resolve();
+                return;
+              }
+              frames += 1;
+              requestAnimationFrame(waitWidth);
+            };
+            requestAnimationFrame(waitWidth);
+          });
+        }
+
+        if (isStale() || !containerRef.current) return;
+        const containerEl = containerRef.current;
+
         setResolvedXml(displayXml);
         setPayloadStatus("ready");
 
-        if (!osmdRef.current && containerRef.current) {
-          osmdRef.current = new OpenSheetMusicDisplay(containerRef.current, {
+        // If OSMD was previously bound to a different/unmounted DOM node, dispose & recreate
+        if (osmdRef.current && osmdContainerElRef.current !== containerEl) {
+          disposeOsmdInstance();
+        }
+
+        if (!osmdRef.current) {
+          containerEl.innerHTML = "";
+          osmdRef.current = new OpenSheetMusicDisplay(containerEl, {
             autoResize: true,
             backend: "svg",
             drawTitle: true,
@@ -980,6 +1049,7 @@ export function SheetMusicViewer({
             pageBackgroundColor: "#F8FAFC",
             followCursor: false, // Controlled manually to prevent scroll shivering
           });
+          osmdContainerElRef.current = containerEl;
         }
         const osmd = osmdRef.current;
         if (!osmd) return;
@@ -988,7 +1058,7 @@ export function SheetMusicViewer({
           rules.RenderChordSymbols = effectiveShowChords;
         }
         await osmd.load(displayXml);
-        if (cancelled) return;
+        if (isStale()) return;
         osmd.Zoom = zoom;
         osmd.render();
 
@@ -1005,7 +1075,7 @@ export function SheetMusicViewer({
           osmd.cursor.cursorElement.style.opacity = "0";
           osmd.cursor.cursorElement.style.pointerEvents = "none";
         }
-        syncCursorToSeconds(playheadSec, false);
+        syncCursorToSeconds(playheadSecRef.current, false);
 
         if (savedScrollRef.current && scrollContainerRef.current) {
           scrollContainerRef.current.scrollTop = savedScrollRef.current.top;
@@ -1013,37 +1083,32 @@ export function SheetMusicViewer({
           savedScrollRef.current = null;
         }
       } catch (err) {
-        if (!cancelled) {
+        if (!isStale()) {
           console.warn("[SheetMusicViewer] Notation load failed:", err instanceof Error ? err.message : "unknown");
           setRenderError(err instanceof Error ? err.message : "Could not render MusicXML notation.");
           setPayloadStatus("error");
         }
       } finally {
-        if (!cancelled) setIsRendering(false);
+        if (!isStale()) setIsRendering(false);
       }
     };
 
     void renderScore();
     return () => {
       cancelled = true;
+      osmdRenderGenRef.current += 1;
       clearNoteheadHighlights();
       clearSelectedHighlight();
     };
-  }, [engine, musicxml, zoom, effectiveShowChords]);
+  }, [engine, musicxml, zoom, effectiveShowChords, disposeOsmdInstance]);
 
   // Clean up OSMD instance and listeners on unmount
   useEffect(() => {
     return () => {
-      clearNoteheadHighlights();
-      clearSelectedHighlight();
-      try {
-        (osmdRef.current as unknown as { Dispose?: () => void } | null)?.Dispose?.();
-      } catch {
-        // Ignore dispose errors
-      }
-      osmdRef.current = null;
+      osmdRenderGenRef.current += 1;
+      disposeOsmdInstance();
     };
-  }, []);
+  }, [disposeOsmdInstance]);
 
   const syncCursorToSecondsRef = useRef(syncCursorToSeconds);
   syncCursorToSecondsRef.current = syncCursorToSeconds;

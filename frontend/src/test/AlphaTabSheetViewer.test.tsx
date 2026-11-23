@@ -1,45 +1,77 @@
-import { act, fireEvent, render as renderUi, screen } from "@testing-library/react";
+import { act, fireEvent, render as renderUi, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as alphaTab from "@coderline/alphatab";
+import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import {
   AlphaTabSheetViewer,
   resolveAlphaTabTrackRole,
 } from "@/features/editor/AlphaTabSheetViewer";
 import { midiSynth } from "@/features/editor/midiSynth";
+import { prepareDisplayMusicXml } from "@/features/editor/musicXmlNormalization";
+import { buildMusicXmlTimeline } from "@/features/editor/musicXmlTimeline";
 import { SheetMusicViewer } from "@/features/editor/SheetMusicViewer";
 import type { ScoreNote, ScoreTrack } from "@/types/api";
 
 vi.mock("opensheetmusicdisplay", () => {
-  const cursorEl = document.createElement("img");
-  Object.defineProperty(cursorEl, "offsetLeft", { value: 64, configurable: true });
-  Object.defineProperty(cursorEl, "offsetTop", { value: 24, configurable: true });
-  Object.defineProperty(cursorEl, "offsetHeight", { value: 120, configurable: true });
-
-  const osmdInst = {
-    load: async () => undefined,
-    render: () => undefined,
-    Dispose: () => undefined,
-    Zoom: 1,
-    EngravingRules: { RenderChordSymbols: true },
-    cursor: {
-      cursorElement: cursorEl,
-      show: () => undefined,
-      hide: () => undefined,
-      reset: () => undefined,
-      next: () => undefined,
-      update: () => undefined,
-      GNotesUnderCursor: () => [],
-      iterator: { EndReached: false, CurrentMeasureIndex: 0, currentTimeStamp: { RealValue: 0 } },
-    },
-    GraphicSheet: { MeasureList: [] },
+  const tracker = {
+    holdNextLoad: false,
+    pendingResolvers: [] as Array<() => void>,
+    instances: [] as Array<{
+      container: HTMLElement;
+      loadCalls: number;
+      renderCalls: number;
+      disposeCalls: number;
+    }>,
   };
 
-  return {
-    OpenSheetMusicDisplay: class {
-      constructor() {
-        return osmdInst;
+  class MockOpenSheetMusicDisplay {
+    static __tracker = tracker;
+    Zoom = 1;
+    EngravingRules = { RenderChordSymbols: true };
+    cursor: Record<string, unknown>;
+    GraphicSheet = { MeasureList: [] };
+    private rec: (typeof tracker.instances)[number];
+
+    constructor(container: HTMLElement) {
+      const cursorEl = document.createElement("img");
+      Object.defineProperty(cursorEl, "offsetLeft", { value: 64, configurable: true });
+      Object.defineProperty(cursorEl, "offsetTop", { value: 24, configurable: true });
+      Object.defineProperty(cursorEl, "offsetHeight", { value: 120, configurable: true });
+      this.cursor = {
+        cursorElement: cursorEl,
+        show: () => undefined,
+        hide: () => undefined,
+        reset: () => undefined,
+        next: () => undefined,
+        update: () => undefined,
+        GNotesUnderCursor: () => [],
+        iterator: { EndReached: false, CurrentMeasureIndex: 0, currentTimeStamp: { RealValue: 0 } },
+      };
+      this.rec = { container, loadCalls: 0, renderCalls: 0, disposeCalls: 0 };
+      tracker.instances.push(this.rec);
+    }
+
+    async load() {
+      this.rec.loadCalls += 1;
+      if (tracker.holdNextLoad) {
+        tracker.holdNextLoad = false;
+        await new Promise<void>((resolve) => {
+          tracker.pendingResolvers.push(resolve);
+        });
       }
-    },
+    }
+
+    render() {
+      this.rec.renderCalls += 1;
+    }
+
+    Dispose() {
+      this.rec.disposeCalls += 1;
+    }
+  }
+
+  return {
+    OpenSheetMusicDisplay: MockOpenSheetMusicDisplay,
   };
 });
 
@@ -123,6 +155,21 @@ const mockApiState = {
     return this.instances[this.instances.length - 1];
   },
 };
+
+const osmdTracker = (
+  OpenSheetMusicDisplay as unknown as {
+    __tracker: {
+      holdNextLoad: boolean;
+      pendingResolvers: Array<() => void>;
+      instances: Array<{
+        container: HTMLElement;
+        loadCalls: number;
+        renderCalls: number;
+        disposeCalls: number;
+      }>;
+    };
+  }
+).__tracker;
 
 function buildAwayInAMangerSatbXml(measureCount = 10): string {
   const parts = [
@@ -255,6 +302,9 @@ function buildTwoPartScoreXml(): string {
 describe("AlphaTab native ScoreLoader & SATB integration", () => {
   beforeEach(() => {
     mockApiState.instances.length = 0;
+    osmdTracker.instances.length = 0;
+    osmdTracker.pendingResolvers.length = 0;
+    osmdTracker.holdNextLoad = false;
     mockClockState.playing = false;
     mockClockState.sec = 0;
     try {
@@ -523,5 +573,152 @@ describe("AlphaTab native ScoreLoader & SATB integration", () => {
       expect(window.localStorage.getItem("scribasheet:notation_engine")).toBe("alphatab");
     }
     expect(screen.getByTestId("alphatab-sheet-music-viewer")).toBeInTheDocument();
+  });
+
+  it("strips artificial trailing half rest from Away in a Manger Measure 0 and aligns AlphaTab + OSMD at ~0.882s (68 BPM)", () => {
+    const parts = [
+      { id: "P1", name: "Soprano", step: "C", octave: "5" },
+      { id: "P2", name: "Alto", step: "A", octave: "4" },
+      { id: "P3", name: "Tenor", step: "F", octave: "4" },
+      { id: "P4", name: "Bass", step: "F", octave: "3" },
+    ];
+    const partList = parts
+      .map((p) => `<score-part id="${p.id}"><part-name>${p.name}</part-name></score-part>`)
+      .join("");
+    const partBodies = parts
+      .map(
+        (p) => `
+      <part id="${p.id}">
+        <measure number="0" implicit="yes">
+          <attributes>
+            <divisions>2</divisions>
+            <time><beats>3</beats><beat-type>4</beat-type></time>
+          </attributes>
+          <direction placement="above">
+            <direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>68</per-minute></metronome></direction-type>
+            <sound tempo="68"/>
+          </direction>
+          <note><pitch><step>${p.step}</step><octave>${p.octave}</octave></pitch><duration>1</duration><type>eighth</type></note>
+          <note><pitch><step>${p.step}</step><octave>${p.octave}</octave></pitch><duration>1</duration><type>eighth</type></note>
+          <note><rest/><duration>4</duration><type>half</type></note>
+        </measure>
+        <measure number="1">
+          <note><pitch><step>${p.step}</step><octave>${p.octave}</octave></pitch><duration>4</duration><type>half</type></note>
+          <note><pitch><step>${p.step}</step><octave>${p.octave}</octave></pitch><duration>2</duration><type>quarter</type></note>
+        </measure>
+        <measure number="2">
+          <note><pitch><step>${p.step}</step><octave>${p.octave}</octave></pitch><duration>4</duration><type>half</type></note>
+          <note><rest/><duration>2</duration><type>quarter</type></note>
+        </measure>
+      </part>`,
+      )
+      .join("");
+    const rawXml = `<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1"><part-list>${partList}</part-list>${partBodies}</score-partwise>`;
+
+    const normalizedXml = prepareDisplayMusicXml(rawXml, true);
+    const parsedDoc = new DOMParser().parseFromString(normalizedXml, "application/xml");
+    for (const partEl of Array.from(parsedDoc.getElementsByTagName("part"))) {
+      const measures = Array.from(partEl.getElementsByTagName("measure"));
+      expect(measures[0].getAttribute("implicit")).toBe("yes");
+      const m0Notes = Array.from(measures[0].getElementsByTagName("note"));
+      expect(m0Notes.length).toBe(2);
+      expect(m0Notes.every((n) => n.getElementsByTagName("rest").length === 0)).toBe(true);
+      // Measure 2 legitimate rest preserved
+      const m2Notes = Array.from(measures[2].getElementsByTagName("note"));
+      expect(m2Notes.length).toBe(2);
+      expect(m2Notes[1].getElementsByTagName("rest").length).toBe(1);
+    }
+
+    // OSMD/MusicXML timeline: Measure 1 begins at 1 quarter-note = 60/68 ~= 0.8824s
+    const timeline = buildMusicXmlTimeline(normalizedXml, 68);
+    expect(timeline.hasPickup).toBe(true);
+    expect(timeline.pickupQuarterBeats).toBeCloseTo(1, 4);
+    expect(timeline.segments[0].wholeNoteEnd).toBeCloseTo(0.25, 4);
+    expect(timeline.segments[1].secStart).toBeCloseTo(60 / 68, 3);
+
+    // AlphaTab ScoreLoader agrees: Measure 0 is 1-beat anacrusis (960 ticks), Measure 1 starts at 960
+    const atScore = alphaTab.importer.ScoreLoader.loadScoreFromBytes(
+      new TextEncoder().encode(normalizedXml),
+    );
+    expect(atScore.masterBars[0].isAnacrusis).toBe(true);
+    expect(atScore.masterBars[0].calculateDuration()).toBe(960);
+    expect(atScore.masterBars[1].start).toBe(960);
+
+    // Non-pickup score with legitimate trailing rest remains untouched
+    const noPickupWithRest = `<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes><note><pitch><step>C</step><octave>5</octave></pitch><duration>2</duration><type>half</type></note><note><rest/><duration>2</duration><type>half</type></note></measure></part></score-partwise>`;
+    const normalizedNoPickup = prepareDisplayMusicXml(noPickupWithRest, true);
+    const noPickupDoc = new DOMParser().parseFromString(normalizedNoPickup, "application/xml");
+    expect(noPickupDoc.getElementsByTagName("rest").length).toBe(1);
+  });
+
+  it("re-initializes and renders a fresh OSMD instance across repeated OSMD -> AlphaTab -> OSMD toggles", async () => {
+    renderUi(
+      <SheetMusicViewer
+        musicxml={buildAwayInAMangerSatbXml(2)}
+        defaultEngine="osmd"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(osmdTracker.instances.length).toBe(1);
+      expect(osmdTracker.instances[0].renderCalls).toBe(1);
+    });
+
+    // Toggle OSMD -> AlphaTab: disposes OSMD instance
+    fireEvent.click(screen.getByRole("button", { name: "AlphaTab" }));
+    expect(osmdTracker.instances[0].disposeCalls).toBe(1);
+    expect(screen.getByTestId("alphatab-sheet-music-viewer")).toBeInTheDocument();
+
+    // Toggle AlphaTab -> OSMD: creates a NEW OSMD instance on the newly mounted DOM container and renders
+    fireEvent.click(screen.getByRole("button", { name: "OSMD" }));
+    await waitFor(() => {
+      expect(osmdTracker.instances.length).toBe(2);
+      expect(osmdTracker.instances[1].loadCalls).toBe(1);
+      expect(osmdTracker.instances[1].renderCalls).toBe(1);
+    });
+    expect(osmdTracker.instances[1].container).not.toBe(osmdTracker.instances[0].container);
+    expect(osmdTracker.instances[1].container.isConnected).toBe(true);
+
+    // Toggle again OSMD -> AlphaTab -> OSMD
+    fireEvent.click(screen.getByRole("button", { name: "AlphaTab" }));
+    expect(osmdTracker.instances[1].disposeCalls).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "OSMD" }));
+    await waitFor(() => {
+      expect(osmdTracker.instances.length).toBe(3);
+      expect(osmdTracker.instances[2].renderCalls).toBe(1);
+    });
+  });
+
+  it("cancels stale async OSMD loads when toggling engines mid-load", async () => {
+    osmdTracker.holdNextLoad = true;
+    renderUi(
+      <SheetMusicViewer
+        musicxml={buildAwayInAMangerSatbXml(2)}
+        defaultEngine="osmd"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(osmdTracker.instances.length).toBe(1);
+      expect(osmdTracker.instances[0].loadCalls).toBe(1);
+      expect(osmdTracker.instances[0].renderCalls).toBe(0);
+    });
+
+    // Switch to AlphaTab and back to OSMD before the first load resolves
+    fireEvent.click(screen.getByRole("button", { name: "AlphaTab" }));
+    fireEvent.click(screen.getByRole("button", { name: "OSMD" }));
+
+    await waitFor(() => {
+      expect(osmdTracker.instances.length).toBe(2);
+      expect(osmdTracker.instances[1].renderCalls).toBe(1);
+    });
+
+    // Now resolve the stale first load; it must NOT call render() on the disposed first instance
+    act(() => {
+      for (const resolve of osmdTracker.pendingResolvers) resolve();
+    });
+    expect(osmdTracker.instances[0].disposeCalls).toBe(1);
+    expect(osmdTracker.instances[0].renderCalls).toBe(0);
+    expect(osmdTracker.instances[1].renderCalls).toBe(1);
   });
 });
