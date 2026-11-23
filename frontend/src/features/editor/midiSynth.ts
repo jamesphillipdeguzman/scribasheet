@@ -55,10 +55,16 @@ export function computePianoEnvelopeParams(
   };
 }
 
+const MAX_VOICES_PER_BURST_WINDOW = 8;
+const BURST_WINDOW_SEC = 0.005;
+const STALE_NOTE_TOLERANCE_SEC = 0.08;
+
 export class MidiSynthesizer {
   private ctx: AudioContext | null = null;
   private dryGain: GainNode | null = null;
   private wetGain: GainNode | null = null;
+  private masterGainBus: GainNode | null = null;
+  private compressor: DynamicsCompressorNode | null = null;
   private convolver: ConvolverNode | null = null;
   private pianoSampler: SplendidGrandPiano | null = null;
   private pianoLoaded = false;
@@ -76,11 +82,15 @@ export class MidiSynthesizer {
   private startOffsetSec = 0;
   private currentPlaybackRate = 1;
   private scheduledNotes = new Set<string>();
+  private activeSortedNotes: ScoreNote[] = [];
+  private nextNoteIndex = 0;
+  private lastScheduledSongTime = 0;
   private lastBeatTick = -1;
   private startToken = 0;
   private sessionAllowPianoSampler = true;
   private sessionAllowSfSamplers = new Set<number>();
   private gestureListenersAttached = false;
+  private visibilityListenerAttached = false;
 
   public getPlaybackClock(): { isPlaying: boolean; currentSec: number } {
     if (!this.isPlaying) {
@@ -92,9 +102,32 @@ export class MidiSynthesizer {
 
   private setupOutputBus(ctx: AudioContext) {
     if (this.dryGain) return;
+
+    const masterBus = ctx.createGain();
+    masterBus.gain.value = 1.0;
+    this.masterGainBus = masterBus;
+
+    if (typeof ctx.createDynamicsCompressor === "function") {
+      try {
+        const comp = ctx.createDynamicsCompressor();
+        comp.threshold.value = -6;
+        comp.knee.value = 6;
+        comp.ratio.value = 12;
+        comp.attack.value = 0.002;
+        comp.release.value = 0.15;
+        masterBus.connect(comp);
+        comp.connect(ctx.destination);
+        this.compressor = comp;
+      } catch {
+        masterBus.connect(ctx.destination);
+      }
+    } else {
+      masterBus.connect(ctx.destination);
+    }
+
     const dry = ctx.createGain();
     dry.gain.value = 0.88;
-    dry.connect(ctx.destination);
+    dry.connect(masterBus);
     this.dryGain = dry;
 
     if (typeof ctx.createConvolver === "function" && typeof ctx.createBuffer === "function") {
@@ -113,7 +146,7 @@ export class MidiSynthesizer {
         const wet = ctx.createGain();
         wet.gain.value = 0.16;
         conv.connect(wet);
-        wet.connect(ctx.destination);
+        wet.connect(masterBus);
         this.convolver = conv;
         this.wetGain = wet;
       } catch {
@@ -224,6 +257,43 @@ export class MidiSynthesizer {
     }
   }
 
+  private handleVisibilityChange = () => {
+    if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+    if (!this.isPlaying || !this.ctx) return;
+
+    const { currentSec } = this.getPlaybackClock();
+    const rate = this.currentPlaybackRate || 1;
+    const ctxNow = this.ctx.currentTime;
+
+    while (this.nextNoteIndex < this.activeSortedNotes.length) {
+      const note = this.activeSortedNotes[this.nextNoteIndex];
+      const noteStartAudioTime = ctxNow + (note.onset_sec - currentSec) / rate;
+      if (noteStartAudioTime < ctxNow - STALE_NOTE_TOLERANCE_SEC) {
+        this.scheduledNotes.add(note.id);
+        this.nextNoteIndex += 1;
+      } else {
+        break;
+      }
+    }
+    this.lastScheduledSongTime = Math.max(this.lastScheduledSongTime, currentSec);
+
+    if (this.ctx.state === "suspended") {
+      this.attachGestureResumeListeners();
+    }
+  };
+
+  private attachVisibilityListener() {
+    if (this.visibilityListenerAttached || typeof document === "undefined") return;
+    this.visibilityListenerAttached = true;
+    document.addEventListener("visibilitychange", this.handleVisibilityChange);
+  }
+
+  private detachVisibilityListener() {
+    if (!this.visibilityListenerAttached || typeof document === "undefined") return;
+    document.removeEventListener("visibilitychange", this.handleVisibilityChange);
+    this.visibilityListenerAttached = false;
+  }
+
   private ensureContext(): AudioContext {
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -233,6 +303,7 @@ export class MidiSynthesizer {
       void this.ctx.resume().catch(() => {});
     }
     this.attachGestureResumeListeners();
+    this.attachVisibilityListener();
     this.setupOutputBus(this.ctx);
     this.ensureSampler(this.ctx, 0);
     return this.ctx;
@@ -597,17 +668,27 @@ export class MidiSynthesizer {
     this.currentPlaybackRate = options.playbackRate || 1;
     this.scheduledNotes.clear();
     this.lastBeatTick = -1;
+    this.activeSortedNotes = [...options.notes].sort((a, b) => a.onset_sec - b.onset_sec);
+    this.nextNoteIndex = 0;
+    while (
+      this.nextNoteIndex < this.activeSortedNotes.length &&
+      this.activeSortedNotes[this.nextNoteIndex].onset_sec < options.fromSec - 0.01
+    ) {
+      this.nextNoteIndex += 1;
+    }
+    this.lastScheduledSongTime = options.fromSec;
+    this.attachVisibilityListener();
     options.onPosition(options.fromSec);
 
     const totalDur = Math.max(
       options.durationSec,
       options.notes.reduce((m, n) => Math.max(m, n.offset_sec), 0) + 0.35
     );
-    let prevSec = options.fromSec - 0.01;
 
     const tick = () => {
       if (!this.isPlaying) return;
-      const elapsedSec = ((performance.now() - this.startPerfMs) / 1000) * options.playbackRate;
+      const rate = options.playbackRate || 1;
+      const elapsedSec = ((performance.now() - this.startPerfMs) / 1000) * rate;
       let currentSec = this.startOffsetSec + elapsedSec;
 
       if (currentSec >= totalDur) {
@@ -616,7 +697,8 @@ export class MidiSynthesizer {
           this.startOffsetSec = 0;
           this.scheduledNotes.clear();
           this.lastBeatTick = -1;
-          prevSec = -0.01;
+          this.nextNoteIndex = 0;
+          this.lastScheduledSongTime = 0;
           currentSec = 0;
         } else {
           this.stop();
@@ -628,23 +710,54 @@ export class MidiSynthesizer {
 
       options.onPosition(currentSec);
 
-      // Schedule notes in [prevSec, currentSec + 0.05] with sub-frame AudioContext offset
+      const ctxNow = this.ctx ? this.ctx.currentTime : 0;
       const lookaheadSec = currentSec + 0.05;
-      for (const note of options.notes) {
-        if (
-          !this.scheduledNotes.has(note.id) &&
-          note.onset_sec >= prevSec &&
-          note.onset_sec <= lookaheadSec
-        ) {
-          this.scheduledNotes.add(note.id);
-          const dur = Math.max(0.05, (note.offset_sec - note.onset_sec) / options.playbackRate);
-          const delay = Math.max(0, (note.onset_sec - currentSec) / options.playbackRate);
-          const prog = options.trackPrograms?.[note.track_index] ?? 0;
-          const tVol = options.trackVolumes?.[note.track_index] ?? 1.0;
-          this.triggerNote(note.pitch_midi, dur, note.velocity, options.volume * tVol, delay, prog);
+      let windowStartAudioTime: number | null = null;
+      let voicesInWindow = 0;
+
+      while (this.nextNoteIndex < this.activeSortedNotes.length) {
+        const note = this.activeSortedNotes[this.nextNoteIndex];
+        if (note.onset_sec > lookaheadSec) {
+          break;
         }
+        if (this.scheduledNotes.has(note.id)) {
+          this.nextNoteIndex += 1;
+          continue;
+        }
+
+        const audioOffsetSec = (note.onset_sec - currentSec) / rate;
+        const noteStartAudioTime = ctxNow + audioOffsetSec;
+
+        // Skip overdue notes from background-tab throttling instead of firing a burst
+        if (noteStartAudioTime < ctxNow - STALE_NOTE_TOLERANCE_SEC) {
+          this.scheduledNotes.add(note.id);
+          this.nextNoteIndex += 1;
+          continue;
+        }
+
+        // Bound simultaneous voices within a 5ms scheduling window
+        if (
+          windowStartAudioTime === null ||
+          Math.abs(noteStartAudioTime - windowStartAudioTime) > BURST_WINDOW_SEC
+        ) {
+          windowStartAudioTime = noteStartAudioTime;
+          voicesInWindow = 0;
+        }
+        if (voicesInWindow >= MAX_VOICES_PER_BURST_WINDOW) {
+          break;
+        }
+
+        this.scheduledNotes.add(note.id);
+        this.nextNoteIndex += 1;
+        voicesInWindow += 1;
+        this.lastScheduledSongTime = Math.max(this.lastScheduledSongTime, note.onset_sec);
+
+        const dur = Math.max(0.05, (note.offset_sec - note.onset_sec) / rate);
+        const delay = Math.max(0, audioOffsetSec);
+        const prog = options.trackPrograms?.[note.track_index] ?? 0;
+        const tVol = options.trackVolumes?.[note.track_index] ?? 1.0;
+        this.triggerNote(note.pitch_midi, dur, note.velocity, options.volume * tVol, delay, prog);
       }
-      prevSec = currentSec;
 
       this.rafId = requestAnimationFrame(tick);
     };
@@ -665,6 +778,24 @@ export class MidiSynthesizer {
   public stop() {
     this.startToken++;
     this.stopPlaybackOnly();
+  }
+
+  public dispose() {
+    this.stop();
+    this.stopAllSustainedNotes();
+    this.detachVisibilityListener();
+    for (const node of [this.dryGain, this.wetGain, this.convolver, this.masterGainBus, this.compressor]) {
+      try {
+        node?.disconnect();
+      } catch {
+        // ignore
+      }
+    }
+    this.dryGain = null;
+    this.wetGain = null;
+    this.convolver = null;
+    this.masterGainBus = null;
+    this.compressor = null;
   }
 }
 

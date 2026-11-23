@@ -1,5 +1,5 @@
 import { act, fireEvent, render as renderUi, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as alphaTab from "@coderline/alphatab";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import {
@@ -95,6 +95,7 @@ vi.mock("@coderline/alphatab", async (importOriginal) => {
   function makeEvent<T = unknown>() {
     const listeners = new Set<(arg: T) => void>();
     return {
+      listeners,
       on(fn: (arg: T) => void) {
         listeners.add(fn);
         return () => listeners.delete(fn);
@@ -114,6 +115,7 @@ vi.mock("@coderline/alphatab", async (importOriginal) => {
 
   class MockAlphaTabApi {
     static instances = instances;
+    container: HTMLElement;
     settings: Record<string, unknown>;
     load = v.fn(() => true);
     render = v.fn();
@@ -133,7 +135,8 @@ vi.mock("@coderline/alphatab", async (importOriginal) => {
     beatMouseDown = makeEvent<{ playbackStart?: number }>();
     error = makeEvent<unknown>();
 
-    constructor(_container: HTMLElement, settings: Record<string, unknown>) {
+    constructor(container: HTMLElement, settings: Record<string, unknown>) {
+      this.container = container;
       this.settings = settings;
       instances.push(this);
     }
@@ -720,5 +723,173 @@ describe("AlphaTab native ScoreLoader & SATB integration", () => {
     expect(osmdTracker.instances[0].disposeCalls).toBe(1);
     expect(osmdTracker.instances[0].renderCalls).toBe(0);
     expect(osmdTracker.instances[1].renderCalls).toBe(1);
+  });
+});
+
+describe("AlphaTabSheetViewer Reactive Lifecycle", () => {
+  const originalResizeObserver = globalThis.ResizeObserver;
+  const sampleXmlA = buildAwayInAMangerSatbXml(2);
+  const sampleXmlB = buildAwayInAMangerSatbXml(3);
+
+  beforeEach(() => {
+    mockApiState.instances.length = 0;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    globalThis.ResizeObserver = originalResizeObserver;
+    vi.restoreAllMocks();
+  });
+
+  it("mounts with empty MusicXML, then initializes and loads automatically when valid XML arrives", async () => {
+    const { rerender } = renderUi(<AlphaTabSheetViewer musicxml={null} />);
+    expect(screen.getByTestId("sheet-music-empty")).toBeInTheDocument();
+    expect(mockApiState.instances).toHaveLength(0);
+
+    await act(async () => {
+      rerender(<AlphaTabSheetViewer musicxml={sampleXmlA} />);
+    });
+
+    expect(mockApiState.instances).toHaveLength(1);
+    const api = mockApiState.lastInstance();
+    expect(api.load).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Rendering sheet music notation with AlphaTab/i)).toBeInTheDocument();
+
+    act(() => {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      api.container.appendChild(svg);
+      api.renderFinished.emit();
+    });
+
+    expect(screen.queryByText(/Rendering sheet music notation with AlphaTab/i)).not.toBeInTheDocument();
+  });
+
+  it("waits for container width via ResizeObserver and flushes pending XML when API becomes ready", async () => {
+    let roCallback: ResizeObserverCallback | null = null;
+    const disconnectSpy = vi.fn();
+    const observeSpy = vi.fn();
+
+    globalThis.ResizeObserver = class MockResizeObserver {
+      constructor(cb: ResizeObserverCallback) {
+        roCallback = cb;
+      }
+      observe = observeSpy;
+      unobserve = vi.fn();
+      disconnect = disconnectSpy;
+    } as unknown as typeof ResizeObserver;
+
+    await act(async () => {
+      renderUi(<AlphaTabSheetViewer musicxml={sampleXmlA} />);
+    });
+
+    expect(mockApiState.instances).toHaveLength(0);
+    expect(observeSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      roCallback?.(
+        [{ contentRect: { width: 820, height: 400 } } as ResizeObserverEntry],
+        {} as ResizeObserver,
+      );
+    });
+
+    expect(disconnectSpy).toHaveBeenCalledTimes(1);
+    expect(mockApiState.instances).toHaveLength(1);
+    expect(mockApiState.lastInstance().load).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads on updated XML, skips redundant loads for unchanged XML, and reloads after empty job reset", async () => {
+    const { rerender } = renderUi(<AlphaTabSheetViewer musicxml={sampleXmlA} />);
+    const api = mockApiState.lastInstance();
+    expect(api.load).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      rerender(<AlphaTabSheetViewer musicxml={sampleXmlA} />);
+    });
+    expect(api.load).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      rerender(<AlphaTabSheetViewer musicxml={sampleXmlB} />);
+    });
+    expect(api.load).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      rerender(<AlphaTabSheetViewer musicxml={null} />);
+    });
+    expect(screen.getByTestId("sheet-music-empty")).toBeInTheDocument();
+
+    await act(async () => {
+      rerender(<AlphaTabSheetViewer musicxml={sampleXmlB} />);
+    });
+    const newApi = mockApiState.lastInstance();
+    expect(newApi.load).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears loading state and exposes error when api.error fires", async () => {
+    await act(async () => {
+      renderUi(<AlphaTabSheetViewer musicxml={sampleXmlA} />);
+    });
+    const api = mockApiState.lastInstance();
+    expect(screen.getByText(/Rendering sheet music notation with AlphaTab/i)).toBeInTheDocument();
+
+    act(() => {
+      api.error.emit(new Error("Invalid measure divisions"));
+    });
+
+    expect(screen.queryByText(/Rendering sheet music notation with AlphaTab/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Invalid measure divisions/i)).toBeInTheDocument();
+  });
+
+  it("handles missing SVG via bounded 4-second safety check without infinite reload loops", async () => {
+    await act(async () => {
+      renderUi(<AlphaTabSheetViewer musicxml={sampleXmlA} />);
+    });
+    const api = mockApiState.lastInstance();
+
+    act(() => {
+      api.renderFinished.emit();
+    });
+    expect(screen.getByText(/Rendering sheet music notation with AlphaTab/i)).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(4000);
+    });
+    expect(api.render).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(4000);
+    });
+    expect(api.render).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Rendering sheet music notation with AlphaTab/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/without producing notation SVG/i)).toBeInTheDocument();
+  });
+
+  it("destroys API and disconnects ResizeObserver and listeners on unmount", async () => {
+    const disconnectSpy = vi.fn();
+    let roCallback: ResizeObserverCallback | null = null;
+    globalThis.ResizeObserver = class MockResizeObserver {
+      constructor(cb: ResizeObserverCallback) {
+        roCallback = cb;
+      }
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = disconnectSpy;
+    } as unknown as typeof ResizeObserver;
+
+    const { unmount } = renderUi(<AlphaTabSheetViewer musicxml={sampleXmlA} />);
+    await act(async () => {
+      roCallback?.(
+        [{ contentRect: { width: 640, height: 300 } } as ResizeObserverEntry],
+        {} as ResizeObserver,
+      );
+    });
+    const api = mockApiState.lastInstance();
+    expect(api.renderFinished.listeners.size).toBe(1);
+    expect(api.error.listeners.size).toBe(1);
+
+    unmount();
+    expect(api.destroy).toHaveBeenCalledTimes(1);
+    expect(api.renderFinished.listeners.size).toBe(0);
+    expect(api.error.listeners.size).toBe(0);
   });
 });

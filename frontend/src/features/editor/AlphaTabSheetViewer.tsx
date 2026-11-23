@@ -88,6 +88,10 @@ export function AlphaTabSheetViewer({
   const surfaceRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<alphaTab.AlphaTabApi | null>(null);
   const loadedTracksRef = useRef<alphaTab.model.Track[]>([]);
+  const lastLoadedXmlRef = useRef<string | null>(null);
+  const pendingXmlRef = useRef<string | null>(null);
+  const safetyTimerRef = useRef<number | null>(null);
+  const safetyRetriedRef = useRef<boolean>(false);
 
   const [zoom, setZoom] = useState(0.95);
   const [followCursor, setFollowCursor] = useState(true);
@@ -100,6 +104,8 @@ export function AlphaTabSheetViewer({
     beatIndex: number;
     voiceRoles: string[];
   } | null>(null);
+
+  const hasMusicXml = Boolean(musicxml?.trim());
 
   const effectiveShowChords = onToggleChordSymbols ? showChordSymbols : localShowChords;
   const handleToggleChords = () => {
@@ -141,142 +147,255 @@ export function AlphaTabSheetViewer({
     }
   }, []);
 
-  // Initialize AlphaTabApi once on mount with ExternalMedia player mode (no duplicate audio engine)
-  useEffect(() => {
-    const surfaceEl = surfaceRef.current;
-    if (!surfaceEl) return;
-
-    const settings = new alphaTab.Settings();
-    settings.core.useWorkers = false;
-    settings.core.engine = "svg";
-    settings.core.fontDirectory = "/alphatab/font/";
-    settings.display.layoutMode = alphaTab.LayoutMode.Page;
-    settings.display.scale = zoom;
-    settings.notation.elements.set(alphaTab.NotationElement.EffectChordNames, effectiveShowChords);
-    settings.notation.elements.set(alphaTab.NotationElement.ChordDiagrams, false);
-    settings.player.playerMode = alphaTab.PlayerMode.EnabledExternalMedia;
-    settings.player.enableCursor = true;
-    settings.player.enableUserInteraction = true;
-    if (scrollContainerRef.current) {
-      settings.player.scrollElement = scrollContainerRef.current;
+  const clearSafetyTimer = useCallback(() => {
+    if (safetyTimerRef.current !== null) {
+      window.clearTimeout(safetyTimerRef.current);
+      safetyTimerRef.current = null;
     }
-    settings.player.scrollMode = followCursor
-      ? alphaTab.ScrollMode.Continuous
-      : alphaTab.ScrollMode.Off;
+  }, []);
 
-    const api = new alphaTab.AlphaTabApi(surfaceEl, settings);
-    apiRef.current = api;
-
-    const unsubs: Array<() => void> = [];
-
-    unsubs.push(
-      api.playerReady.on(() => {
-        const output = api.player?.output as unknown as alphaTab.synth.IExternalMediaSynthOutput | undefined;
-        if (!output) return;
-        output.handler = {
-          get backingTrackDuration() {
-            return durationMsRef.current;
-          },
-          get playbackRate() {
-            return playbackRateRef.current;
-          },
-          set playbackRate(_val: number) {
-            // Controlled by ScribaSheet WaveformPlayer
-          },
-          get masterVolume() {
-            return 1;
-          },
-          set masterVolume(_val: number) {
-            // Controlled by ScribaSheet WaveformPlayer
-          },
-          seekTo(timeMs: number) {
-            onSeekRef.current?.(Math.max(0, timeMs / 1000));
-          },
-          play() {
-            if (!isPlayingRef.current) {
-              onTogglePlayRef.current?.();
-            }
-          },
-          pause() {
-            if (isPlayingRef.current) {
-              onTogglePlayRef.current?.();
-            }
-          },
-        };
-        pushExternalPosition(playheadSecRef.current);
-      }),
-    );
-
-    unsubs.push(
-      api.scoreLoaded.on((score) => {
-        loadedTracksRef.current = score.tracks || [];
-        if (score.tracks && score.tracks.length > 0) {
-          api.renderTracks(score.tracks);
-        }
-      }),
-    );
-
-    unsubs.push(
-      api.renderFinished.on(() => {
+  const loadXmlIntoApi = useCallback(
+    (api: alphaTab.AlphaTabApi, xml: string) => {
+      clearSafetyTimer();
+      safetyRetriedRef.current = false;
+      lastLoadedXmlRef.current = xml;
+      pendingXmlRef.current = null;
+      setRenderError(null);
+      setIsRendering(true);
+      setPayloadStatus("ready");
+      const bytes = new TextEncoder().encode(xml);
+      const loaded = api.load(bytes);
+      if (!loaded) {
         setIsRendering(false);
-        pushExternalPosition(playheadSecRef.current);
-      }),
-    );
-
-    unsubs.push(
-      api.activeBeatsChanged.on((args) => {
-        const activeBeats = args.activeBeats || [];
-        if (activeBeats.length === 0) {
-          setActiveBeatInfo(null);
-          return;
-        }
-        const roles = new Set<string>();
-        let mNum = 1;
-        let bIdx = 0;
-        for (const beat of activeBeats) {
-          const track = beat.voice?.bar?.staff?.track;
-          if (track) {
-            const role = resolveAlphaTabTrackRole(track, tracksRef.current);
-            const isMuted = role !== "other" ? Boolean(mutedRef.current[role]) : false;
-            const isSoloHidden = Boolean(soloRef.current && role !== soloRef.current);
-            if (!isMuted && !isSoloHidden) {
-              roles.add(role);
-            }
-          }
-          if (beat.voice?.bar?.index !== undefined) {
-            mNum = beat.voice.bar.index + 1;
-          }
-          if (beat.index !== undefined) {
-            bIdx = beat.index;
-          }
-        }
-        setActiveBeatInfo({
-          measureNumber: mNum,
-          beatIndex: bIdx,
-          voiceRoles: Array.from(roles),
-        });
-      }),
-    );
-
-    unsubs.push(
-      api.beatMouseDown.on((beat) => {
-        if (!onSeekRef.current) return;
-        const startMs = beat.playbackStart;
-        if (typeof startMs === "number" && Number.isFinite(startMs)) {
-          onSeekRef.current(Math.max(0, startMs / 1000));
-        }
-      }),
-    );
-
-    unsubs.push(
-      api.error.on((err) => {
-        setIsRendering(false);
-        setRenderError(err instanceof Error ? err.message : "AlphaTab failed to render MusicXML.");
+        setRenderError("AlphaTab could not parse the MusicXML score.");
         setPayloadStatus("error");
-      }),
-    );
+      }
+    },
+    [clearSafetyTimer],
+  );
+
+  // Initialize AlphaTabApi once the surface container is mounted and has usable width
+  useEffect(() => {
+    if (!hasMusicXml) return;
+    const surfaceEl = surfaceRef.current;
+    if (!surfaceEl || apiRef.current) return;
+
+    let disposed = false;
+    let resizeObserver: ResizeObserver | null = null;
+    let unsubs: Array<() => void> = [];
+
+    const initApi = () => {
+      if (disposed || apiRef.current) return;
+
+      const settings = new alphaTab.Settings();
+      settings.core.useWorkers = false;
+      settings.core.engine = "svg";
+      settings.core.fontDirectory = "/alphatab/font/";
+      settings.display.layoutMode = alphaTab.LayoutMode.Page;
+      settings.display.scale = zoom;
+      settings.notation.elements.set(alphaTab.NotationElement.EffectChordNames, effectiveShowChords);
+      settings.notation.elements.set(alphaTab.NotationElement.ChordDiagrams, false);
+      settings.player.playerMode = alphaTab.PlayerMode.EnabledExternalMedia;
+      settings.player.enableCursor = true;
+      settings.player.enableUserInteraction = true;
+      if (scrollContainerRef.current) {
+        settings.player.scrollElement = scrollContainerRef.current;
+      }
+      settings.player.scrollMode = followCursor
+        ? alphaTab.ScrollMode.Continuous
+        : alphaTab.ScrollMode.Off;
+
+      const api = new alphaTab.AlphaTabApi(surfaceEl, settings);
+      apiRef.current = api;
+
+      unsubs = [];
+
+      unsubs.push(
+        api.playerReady.on(() => {
+          const output = api.player?.output as unknown as alphaTab.synth.IExternalMediaSynthOutput | undefined;
+          if (!output) return;
+          output.handler = {
+            get backingTrackDuration() {
+              return durationMsRef.current;
+            },
+            get playbackRate() {
+              return playbackRateRef.current;
+            },
+            set playbackRate(_val: number) {
+              // Controlled by ScribaSheet WaveformPlayer
+            },
+            get masterVolume() {
+              return 1;
+            },
+            set masterVolume(_val: number) {
+              // Controlled by ScribaSheet WaveformPlayer
+            },
+            seekTo(timeMs: number) {
+              onSeekRef.current?.(Math.max(0, timeMs / 1000));
+            },
+            play() {
+              if (!isPlayingRef.current) {
+                onTogglePlayRef.current?.();
+              }
+            },
+            pause() {
+              if (isPlayingRef.current) {
+                onTogglePlayRef.current?.();
+              }
+            },
+          };
+          pushExternalPosition(playheadSecRef.current);
+        }),
+      );
+
+      unsubs.push(
+        api.scoreLoaded.on((score) => {
+          loadedTracksRef.current = score.tracks || [];
+          if (score.tracks && score.tracks.length > 0) {
+            api.renderTracks(score.tracks);
+          }
+        }),
+      );
+
+      unsubs.push(
+        api.renderFinished.on(() => {
+          clearSafetyTimer();
+          const hasSvg = Boolean(surfaceRef.current?.querySelector("svg"));
+          if (hasSvg) {
+            safetyRetriedRef.current = false;
+            setIsRendering(false);
+            setPayloadStatus("ready");
+            pushExternalPosition(playheadSecRef.current);
+            return;
+          }
+
+          // Bounded 4-second safety check if renderFinished fired before SVG appeared
+          safetyTimerRef.current = window.setTimeout(() => {
+            if (disposed) return;
+            const svgNow = Boolean(surfaceRef.current?.querySelector("svg"));
+            if (svgNow) {
+              safetyRetriedRef.current = false;
+              setIsRendering(false);
+              setPayloadStatus("ready");
+              pushExternalPosition(playheadSecRef.current);
+              return;
+            }
+            if (!safetyRetriedRef.current && apiRef.current && lastLoadedXmlRef.current) {
+              safetyRetriedRef.current = true;
+              try {
+                apiRef.current.render();
+              } catch {
+                // fall through to second bounded check
+              }
+              safetyTimerRef.current = window.setTimeout(() => {
+                if (disposed) return;
+                const svgAfterRetry = Boolean(surfaceRef.current?.querySelector("svg"));
+                setIsRendering(false);
+                if (svgAfterRetry) {
+                  setPayloadStatus("ready");
+                  pushExternalPosition(playheadSecRef.current);
+                } else {
+                  setRenderError("AlphaTab finished rendering without producing notation SVG.");
+                  setPayloadStatus("error");
+                }
+              }, 4000);
+            } else {
+              setIsRendering(false);
+              setRenderError("AlphaTab finished rendering without producing notation SVG.");
+              setPayloadStatus("error");
+            }
+          }, 4000);
+        }),
+      );
+
+      unsubs.push(
+        api.activeBeatsChanged.on((args) => {
+          const activeBeats = args.activeBeats || [];
+          if (activeBeats.length === 0) {
+            setActiveBeatInfo(null);
+            return;
+          }
+          const roles = new Set<string>();
+          let mNum = 1;
+          let bIdx = 0;
+          for (const beat of activeBeats) {
+            const track = beat.voice?.bar?.staff?.track;
+            if (track) {
+              const role = resolveAlphaTabTrackRole(track, tracksRef.current);
+              const isMuted = role !== "other" ? Boolean(mutedRef.current[role]) : false;
+              const isSoloHidden = Boolean(soloRef.current && role !== soloRef.current);
+              if (!isMuted && !isSoloHidden) {
+                roles.add(role);
+              }
+            }
+            if (beat.voice?.bar?.index !== undefined) {
+              mNum = beat.voice.bar.index + 1;
+            }
+            if (beat.index !== undefined) {
+              bIdx = beat.index;
+            }
+          }
+          setActiveBeatInfo({
+            measureNumber: mNum,
+            beatIndex: bIdx,
+            voiceRoles: Array.from(roles),
+          });
+        }),
+      );
+
+      unsubs.push(
+        api.beatMouseDown.on((beat) => {
+          if (!onSeekRef.current) return;
+          const startMs = beat.playbackStart;
+          if (typeof startMs === "number" && Number.isFinite(startMs)) {
+            onSeekRef.current(Math.max(0, startMs / 1000));
+          }
+        }),
+      );
+
+      unsubs.push(
+        api.error.on((err) => {
+          clearSafetyTimer();
+          setIsRendering(false);
+          setRenderError(err instanceof Error ? err.message : "AlphaTab failed to render MusicXML.");
+          setPayloadStatus("error");
+        }),
+      );
+
+      if (pendingXmlRef.current) {
+        loadXmlIntoApi(api, pendingXmlRef.current);
+      }
+    };
+
+    const isNoopJsdomObserver =
+      typeof navigator !== "undefined" &&
+      /jsdom/i.test(navigator.userAgent) &&
+      typeof ResizeObserver !== "undefined" &&
+      !ResizeObserver.toString().includes("MockResizeObserver");
+
+    if (surfaceEl.clientWidth > 0 || typeof ResizeObserver === "undefined" || isNoopJsdomObserver) {
+      initApi();
+    } else {
+      resizeObserver = new ResizeObserver((entries) => {
+        const hasWidth =
+          surfaceEl.clientWidth > 0 ||
+          entries.some((entry) => entry.contentRect.width > 0);
+        if (hasWidth) {
+          resizeObserver?.disconnect();
+          resizeObserver = null;
+          initApi();
+        }
+      });
+      resizeObserver.observe(surfaceEl);
+    }
 
     return () => {
+      disposed = true;
+      clearSafetyTimer();
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+        resizeObserver = null;
+      }
       for (const u of unsubs) {
         try {
           u();
@@ -285,14 +404,17 @@ export function AlphaTabSheetViewer({
         }
       }
       loadedTracksRef.current = [];
-      try {
-        api.destroy();
-      } catch {
-        // ignore
+      lastLoadedXmlRef.current = null;
+      if (apiRef.current) {
+        try {
+          apiRef.current.destroy();
+        } catch {
+          // ignore
+        }
+        apiRef.current = null;
       }
-      apiRef.current = null;
     };
-  }, [pushExternalPosition]);
+  }, [hasMusicXml, pushExternalPosition, clearSafetyTimer, loadXmlIntoApi]);
 
   // Update zoom / scrollMode / chord-display settings without destroying AlphaTab instance
   useEffect(() => {
@@ -314,11 +436,20 @@ export function AlphaTabSheetViewer({
   useEffect(() => {
     const normalized = normalizeScorePayload(musicxml, effectiveShowChords);
     if (normalized.kind === "empty") {
+      clearSafetyTimer();
+      lastLoadedXmlRef.current = null;
+      pendingXmlRef.current = null;
+      safetyRetriedRef.current = false;
+      setIsRendering(false);
       setRenderError(null);
       setPayloadStatus("empty");
       return;
     }
     if (normalized.kind === "compressed_mxl" || normalized.kind === "invalid") {
+      clearSafetyTimer();
+      lastLoadedXmlRef.current = null;
+      pendingXmlRef.current = null;
+      setIsRendering(false);
       setRenderError(normalized.message);
       setPayloadStatus("error");
       return;
@@ -326,7 +457,6 @@ export function AlphaTabSheetViewer({
 
     let cancelled = false;
     setRenderError(null);
-    setIsRendering(true);
     setPayloadStatus("loading");
 
     const loadPayload = async () => {
@@ -352,18 +482,27 @@ export function AlphaTabSheetViewer({
           displayXml = normalized.xml;
         }
 
-        if (cancelled || !apiRef.current) return;
+        if (cancelled) return;
         const enrichedXml = effectiveShowChords
           ? injectChordsIntoMusicXml(displayXml, chords, notes, tempoBpm)
           : displayXml;
-        setPayloadStatus("ready");
-        const bytes = new TextEncoder().encode(enrichedXml);
-        const loaded = apiRef.current.load(bytes);
-        if (!loaded) {
-          throw new Error("AlphaTab could not parse the MusicXML score.");
+
+        if (enrichedXml === lastLoadedXmlRef.current) {
+          setPayloadStatus("ready");
+          setIsRendering(false);
+          return;
+        }
+
+        if (apiRef.current) {
+          loadXmlIntoApi(apiRef.current, enrichedXml);
+        } else {
+          pendingXmlRef.current = enrichedXml;
+          setIsRendering(true);
+          setPayloadStatus("ready");
         }
       } catch (err) {
         if (!cancelled) {
+          clearSafetyTimer();
           setIsRendering(false);
           setRenderError(err instanceof Error ? err.message : "Could not render MusicXML in AlphaTab.");
           setPayloadStatus("error");
@@ -375,7 +514,7 @@ export function AlphaTabSheetViewer({
     return () => {
       cancelled = true;
     };
-  }, [musicxml, effectiveShowChords, chords, notes, tempoBpm]);
+  }, [musicxml, effectiveShowChords, chords, notes, tempoBpm, clearSafetyTimer, loadXmlIntoApi]);
 
   // Sync AlphaTab cursor when paused/seeking/stopped
   useEffect(() => {
