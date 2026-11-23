@@ -27,6 +27,8 @@ import { ChordAndTabPanel } from "@/features/editor/ChordAndTabPanel";
 import { ExportCenter } from "@/features/editor/ExportCenter";
 import { LyricsPanel } from "@/features/editor/LyricsPanel";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
+import { metronomeEngine } from "@/features/editor/metronome";
+import { midiSynth } from "@/features/editor/midiSynth";
 import { musicXmlToScoreNotes } from "@/features/editor/musicXmlEditor";
 import {
   loadMetronomeSettings,
@@ -107,6 +109,10 @@ export function ProjectStudioPage() {
 
   // Job tracking
   const [activeJob, setActiveJob] = useState<TranscriptionJob | null>(null);
+  const activeJobIdRef = useRef<string | null>(null);
+  const processingGenerationRef = useRef<number>(0);
+  const scoreLoadTokenRef = useRef<number>(0);
+  activeJobIdRef.current = activeJob?.id ?? null;
   const [runtimeNowMs, setRuntimeNowMs] = useState<number>(() => Date.now());
   const [isStartingJob, setIsStartingJob] = useState(false);
   const [isRegeneratingArrangement, setIsRegeneratingArrangement] = useState(false);
@@ -136,12 +142,56 @@ export function ProjectStudioPage() {
     staleTime: 0,
   });
 
-  const loadScore = useCallback(async () => {
+  const clearWorkspaceForNewProcessing = useCallback(() => {
+    // 1. Stop active audio/MIDI playback & reset playhead immediately
+    midiSynth.stop();
+    if (metronomeEngine.getMode() !== "standalone") {
+      metronomeEngine.stop();
+    }
+    setStopPlaySignal((n) => n + 1);
+    setIsPlaybackActive(false);
+    setPlayheadSec(0);
+    setSeekRequest(null);
+
+    // 2. Clear previous score, SATB mixer, notes, chords, MusicXML, and undo/redo state
+    setScoreData(null);
+    setMusicxml(null);
+    setScoreVersion(1);
+    setUndoStack([]);
+    setRedoStack([]);
+    setSelectedNoteId(null);
+    setSatbSoloVoice(null);
+    setSatbMutedVoices({});
+    setShowPartMixerOverride(null);
+    setSaveStatus("saved");
+    setSaveError(null);
+    setScoreLoadError(null);
+    setScoreLoadState("loading");
+
+    // 3. Cancel & invalidate stale React Query cache entries
+    if (projectId) {
+      void queryClient.cancelQueries({ queryKey: ["project", projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["score", projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["lyrics", projectId] });
+    }
+    void queryClient.invalidateQueries({ queryKey: ["projects"] });
+  }, [projectId, queryClient]);
+
+  const loadScore = useCallback(async (expectedJobId?: string | null) => {
     if (!projectId) return;
+    const token = ++scoreLoadTokenRef.current;
+    const targetJobId = expectedJobId !== undefined ? expectedJobId : activeJobIdRef.current;
     setScoreLoadState("loading");
     setScoreLoadError(null);
     try {
       const res = await api.getScore(projectId);
+      if (token !== scoreLoadTokenRef.current) return;
+      if (targetJobId && activeJobIdRef.current && targetJobId !== activeJobIdRef.current) return;
+      const resJobId = (res.score_json?.analysis as Record<string, unknown> | undefined)?.job_id;
+      if (targetJobId && typeof resJobId === "string" && resJobId !== targetJobId) {
+        return;
+      }
       setScoreData(res.score_json);
       setMusicxml(res.musicxml);
       setScoreVersion(res.version);
@@ -150,6 +200,7 @@ export function ProjectStudioPage() {
       setSaveStatus("saved");
       setScoreLoadState(res.musicxml ? "ready" : "missing_file");
     } catch (err) {
+      if (token !== scoreLoadTokenRef.current) return;
       setScoreData(null);
       setMusicxml(null);
       if (err instanceof ApiError) {
@@ -177,8 +228,13 @@ export function ProjectStudioPage() {
 
   useEffect(() => {
     if (!projectId) return;
+    const gen = processingGenerationRef.current;
     api.listTranscriptions(projectId).then((jobs) => {
-      if (jobs.length > 0) setActiveJob(jobs[0]);
+      if (gen !== processingGenerationRef.current) return;
+      if (jobs.length > 0 && !activeJobIdRef.current) {
+        activeJobIdRef.current = jobs[0].id;
+        setActiveJob(jobs[0]);
+      }
     });
   }, [projectId]);
 
@@ -187,15 +243,22 @@ export function ProjectStudioPage() {
     if (!activeJob) return;
     if (["completed", "failed", "cancelled"].includes(activeJob.status)) return;
 
+    const trackedJobId = activeJob.id;
+    const trackedGen = processingGenerationRef.current;
+    const isStaleTracker = () =>
+      trackedJobId !== activeJobIdRef.current || trackedGen !== processingGenerationRef.current;
+
     let ws: WebSocket | null = null;
     const { accessToken } = getStoredTokens();
     if (accessToken) {
       try {
-        ws = new WebSocket(`${WS_BASE_URL}/ws/jobs/${activeJob.id}?token=${encodeURIComponent(accessToken)}`);
+        ws = new WebSocket(`${WS_BASE_URL}/ws/jobs/${trackedJobId}?token=${encodeURIComponent(accessToken)}`);
         ws.onmessage = (ev) => {
+          if (isStaleTracker()) return;
           const msg = JSON.parse(ev.data);
+          if (msg.job_id && msg.job_id !== trackedJobId) return;
           setActiveJob((prev) =>
-            prev
+            prev && prev.id === trackedJobId
               ? {
                   ...prev,
                   status: msg.status,
@@ -207,7 +270,12 @@ export function ProjectStudioPage() {
           );
           if (msg.status === "completed") {
             queryClient.invalidateQueries({ queryKey: ["project", projectId] });
-            loadScore();
+            void loadScore(trackedJobId);
+          } else if (msg.status === "failed" || msg.status === "cancelled") {
+            setScoreData(null);
+            setMusicxml(null);
+            setScoreLoadState("error");
+            setScoreLoadError(msg.error_message || "Score processing failed.");
           }
         };
       } catch {
@@ -221,16 +289,25 @@ export function ProjectStudioPage() {
         : 1500;
 
     const pollInterval = window.setInterval(async () => {
+      if (isStaleTracker()) {
+        clearInterval(pollInterval);
+        return;
+      }
       try {
-        const latest = await api.getJob(activeJob.id);
+        const latest = await api.getJob(trackedJobId);
+        if (isStaleTracker() || latest.id !== trackedJobId) return;
         setActiveJob(latest);
         if (latest.status === "completed") {
           clearInterval(pollInterval);
           queryClient.invalidateQueries({ queryKey: ["project", projectId] });
-          loadScore();
+          void loadScore(trackedJobId);
         } else if (latest.status === "failed" || latest.status === "cancelled") {
           clearInterval(pollInterval);
           queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+          setScoreData(null);
+          setMusicxml(null);
+          setScoreLoadState("error");
+          setScoreLoadError(latest.error_message || "Score processing failed.");
         }
       } catch {
         // ignore transient poll errors
@@ -445,13 +522,26 @@ export function ProjectStudioPage() {
 
   const handleStartTranscription = async (settings: TranscriptionSettings) => {
     if (!project) return;
+    const gen = ++processingGenerationRef.current;
+    scoreLoadTokenRef.current++;
+    activeJobIdRef.current = null;
+    clearWorkspaceForNewProcessing();
     setIsStartingJob(true);
     try {
       const orig = project.media_assets.find((a) => a.asset_type === "original");
       const job = await api.startTranscription(project.id, orig?.id || null, settings);
+      if (gen !== processingGenerationRef.current) return;
+      activeJobIdRef.current = job.id;
       setActiveJob(job);
+    } catch (err) {
+      if (gen !== processingGenerationRef.current) return;
+      setScoreLoadState("error");
+      setScoreLoadError(err instanceof ApiError ? err.message : "Failed to start score processing.");
+      throw err;
     } finally {
-      setIsStartingJob(false);
+      if (gen === processingGenerationRef.current) {
+        setIsStartingJob(false);
+      }
     }
   };
 
@@ -686,8 +776,21 @@ export function ProjectStudioPage() {
                     setActiveJob(updated);
                   }}
                   onRetry={async (jobId) => {
-                    const retried = await api.retryJob(jobId);
-                    setActiveJob(retried);
+                    const gen = ++processingGenerationRef.current;
+                    scoreLoadTokenRef.current++;
+                    activeJobIdRef.current = null;
+                    clearWorkspaceForNewProcessing();
+                    setIsStartingJob(true);
+                    try {
+                      const retried = await api.retryJob(jobId);
+                      if (gen !== processingGenerationRef.current) return;
+                      activeJobIdRef.current = retried.id;
+                      setActiveJob(retried);
+                    } finally {
+                      if (gen === processingGenerationRef.current) {
+                        setIsStartingJob(false);
+                      }
+                    }
                   }}
                   onRegenerateArrangement={async (arrangementDetail, quantization, mode) => {
                     if (!projectId) return;
@@ -803,7 +906,7 @@ export function ProjectStudioPage() {
                 </div>
               )}
 
-              {canShowMixer && scoreData && mixerOpen && (
+              {canShowMixer && scoreData && mixerOpen && !isJobRunning && !isStartingJob && (
                 <SATBMixerPanel
                   projectId={project.id}
                   projectTitle={project.title}
@@ -823,9 +926,12 @@ export function ProjectStudioPage() {
               )}
 
               {activeTab === "notation" &&
-                (activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status) ? (
-                  <div className="flex min-h-[16rem] flex-col items-center justify-center rounded-xl border border-[#27273A] bg-[#09090F] p-6 text-center space-y-3">
-                    {activeJob.status === "queued" && (workerStatus?.worker_online === false || activeJob.worker_online === false) ? (
+                (isStartingJob || (activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status)) ? (
+                  <div
+                    data-testid="notation-processing-state"
+                    className="flex min-h-[16rem] flex-col items-center justify-center rounded-xl border border-[#27273A] bg-[#09090F] p-6 text-center space-y-3"
+                  >
+                    {activeJob?.status === "queued" && (workerStatus?.worker_online === false || activeJob?.worker_online === false) ? (
                       <>
                         <div className="text-sm font-semibold text-amber-200">
                           Waiting for Desktop Worker
@@ -838,10 +944,10 @@ export function ProjectStudioPage() {
                       <>
                         <Loader2 className="h-6 w-6 animate-spin text-[#A78BFA]" />
                         <div className="text-sm font-medium text-[#F5F3FF]">
-                          {isScoreProject || activeJob.settings_json?.mode === "satb_pdf"
+                          {isScoreProject || activeJob?.settings_json?.mode === "satb_pdf"
                             ? "Score Processing in Progress"
                             : "Transcription in progress"}
-                          : {activeJob.current_stage} ({activeJob.progress}%)
+                          : {activeJob?.current_stage || "Starting"} ({activeJob?.progress ?? 0}%)
                         </div>
                         <p className="text-xs text-[#A1A1AA]">
                           Sheet music will appear here automatically once a valid score is generated.
@@ -863,7 +969,7 @@ export function ProjectStudioPage() {
                 ) : scoreLoadState === "error" ? (
                   <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-6 text-center space-y-3">
                     <div className="text-xs text-red-300">{scoreLoadError || "Failed to load score."}</div>
-                    <Button size="sm" variant="secondary" onClick={loadScore}>
+                    <Button size="sm" variant="secondary" onClick={() => void loadScore()}>
                       Retry Loading Score
                     </Button>
                   </div>
@@ -897,7 +1003,17 @@ export function ProjectStudioPage() {
                 ))}
 
               {activeTab === "pianoroll" &&
-                (scoreData ? (
+                (isJobRunning || isStartingJob ? (
+                  <div
+                    data-testid="pianoroll-processing-state"
+                    className="flex min-h-[16rem] flex-col items-center justify-center rounded-xl border border-[#27273A] bg-[#09090F] p-6 text-center space-y-3"
+                  >
+                    <Loader2 className="h-6 w-6 animate-spin text-[#A78BFA]" />
+                    <div className="text-sm font-medium text-[#F5F3FF]">
+                      Processing: {activeJob?.current_stage || "Starting"} ({activeJob?.progress ?? 0}%)
+                    </div>
+                  </div>
+                ) : scoreData ? (
                   <PianoRollEditor
                     notes={scoreData.notes}
                     tracks={scoreData.tracks}
@@ -935,7 +1051,17 @@ export function ProjectStudioPage() {
                 ))}
 
               {activeTab === "chords" &&
-                (scoreData ? (
+                (isJobRunning || isStartingJob ? (
+                  <div
+                    data-testid="chords-processing-state"
+                    className="flex min-h-[16rem] flex-col items-center justify-center rounded-xl border border-[#27273A] bg-[#09090F] p-6 text-center space-y-3"
+                  >
+                    <Loader2 className="h-6 w-6 animate-spin text-[#A78BFA]" />
+                    <div className="text-sm font-medium text-[#F5F3FF]">
+                      Processing: {activeJob?.current_stage || "Starting"} ({activeJob?.progress ?? 0}%)
+                    </div>
+                  </div>
+                ) : scoreData ? (
                   <ChordAndTabPanel
                     chords={scoreData.chords}
                     notes={scoreData.notes}

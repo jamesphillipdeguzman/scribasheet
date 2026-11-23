@@ -732,6 +732,71 @@ def test_satb_places_passing_tone_lyric_on_preceding_sustaining_soprano_note():
     assert sop_texts == ["bright", "looked"]
     assert len(parts[1].findall(".//lyric")) == 0
 
+
+def test_start_transcription_supersedes_previous_score_and_preserves_history(monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.api.deps import get_current_user, get_owned_project
+    from app.db.session import Base, get_db
+    from app.main import app
+    from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob, TranscriptionResult, User
+
+    # Build a minimal sqlite in-memory session for transcription superseding
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+
+    user = User(id="u1", email="u1@example.com", password_hash="x", display_name="User One", plan_tier="pro")
+    proj = Project(id="p1", user_id="u1", title="Hymn", status="completed", instrument="piano", transcription_mode="satb_pdf")
+    asset = MediaAsset(id="a1", project_id="p1", user_id="u1", asset_type="original", storage_path="p1/orig.pdf", original_filename="hymn.pdf", mime_type="application/pdf", size_bytes=100)
+    old_job = TranscriptionJob(id="j1", project_id="p1", user_id="u1", source_asset_id="a1", status="completed", progress=100, current_stage="Completed", settings_json={"mode": "satb_pdf"})
+    old_res = TranscriptionResult(id="r1", job_id="j1", metadata_json={"is_active": True, "job_id": "j1"})
+    old_score = ProjectScore(
+        id="s1",
+        project_id="p1",
+        version=1,
+        score_json={"title": "Hymn", "tracks": [{"index": 0, "name": "Soprano"}], "notes": [], "chords": [], "analysis": {"is_active": True, "job_id": "j1"}},
+    )
+    db.add_all([user, proj, asset, old_job, old_res, old_score])
+    db.commit()
+
+    monkeypatch.setattr("app.api.v1.transcriptions.enqueue_transcription_job", lambda _jid: "celery-1")
+
+    def override_db():
+        yield db
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_owned_project] = lambda: proj
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/projects/p1/transcriptions",
+            json={"source_asset_id": "a1", "settings": {"mode": "melody_only", "instrument": "piano"}},
+        )
+        assert resp.status_code == 202
+        new_job_id = resp.json()["id"]
+
+        # Previous score is superseded -> GET /score returns 404 while processing
+        score_resp = client.get("/api/v1/projects/p1/score")
+        assert score_resp.status_code == 404
+
+        # Historical TranscriptionResult row is preserved and marked inactive
+        db.refresh(old_res)
+        assert old_res.metadata_json["is_active"] is False
+        assert old_res.metadata_json["superseded_by_job_id"] == new_job_id
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+
     lyrics_data = extract_lyrics_data_from_musicxml(cleaned, tempo_bpm=120.0)
     assert lyrics_data is not None
     assert "Amazing grace, how" in lyrics_data["text"]
@@ -944,6 +1009,71 @@ def test_satb_places_passing_tone_lyric_on_preceding_sustaining_soprano_note():
     sop_texts = [t.text for t in parts[0].findall(".//lyric/text")]
     assert sop_texts == ["bright", "looked"]
     assert len(parts[1].findall(".//lyric")) == 0
+
+
+def test_start_transcription_supersedes_previous_score_and_preserves_history(monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.api.deps import get_current_user, get_owned_project
+    from app.db.session import Base, get_db
+    from app.main import app
+    from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob, TranscriptionResult, User
+
+    # Build a minimal sqlite in-memory session for transcription superseding
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+
+    user = User(id="u1", email="u1@example.com", password_hash="x", display_name="User One", plan_tier="pro")
+    proj = Project(id="p1", user_id="u1", title="Hymn", status="completed", instrument="piano", transcription_mode="satb_pdf")
+    asset = MediaAsset(id="a1", project_id="p1", user_id="u1", asset_type="original", storage_path="p1/orig.pdf", original_filename="hymn.pdf", mime_type="application/pdf", size_bytes=100)
+    old_job = TranscriptionJob(id="j1", project_id="p1", user_id="u1", source_asset_id="a1", status="completed", progress=100, current_stage="Completed", settings_json={"mode": "satb_pdf"})
+    old_res = TranscriptionResult(id="r1", job_id="j1", metadata_json={"is_active": True, "job_id": "j1"})
+    old_score = ProjectScore(
+        id="s1",
+        project_id="p1",
+        version=1,
+        score_json={"title": "Hymn", "tracks": [{"index": 0, "name": "Soprano"}], "notes": [], "chords": [], "analysis": {"is_active": True, "job_id": "j1"}},
+    )
+    db.add_all([user, proj, asset, old_job, old_res, old_score])
+    db.commit()
+
+    monkeypatch.setattr("app.api.v1.transcriptions.enqueue_transcription_job", lambda _jid: "celery-1")
+
+    def override_db():
+        yield db
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_owned_project] = lambda: proj
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/projects/p1/transcriptions",
+            json={"source_asset_id": "a1", "settings": {"mode": "melody_only", "instrument": "piano"}},
+        )
+        assert resp.status_code == 202
+        new_job_id = resp.json()["id"]
+
+        # Previous score is superseded -> GET /score returns 404 while processing
+        score_resp = client.get("/api/v1/projects/p1/score")
+        assert score_resp.status_code == 404
+
+        # Historical TranscriptionResult row is preserved and marked inactive
+        db.refresh(old_res)
+        assert old_res.metadata_json["is_active"] is False
+        assert old_res.metadata_json["superseded_by_job_id"] == new_job_id
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
 
 
 def test_put_score_persists_direct_musicxml_edits(client, db_session) -> None:

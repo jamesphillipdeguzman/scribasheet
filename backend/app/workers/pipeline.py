@@ -318,10 +318,17 @@ def run_transcription_pipeline(job_id: str) -> None:
             db.add(xml_asset)
             db.flush()
 
+            score_payload = score_data.model_dump()
+            score_analysis = dict(score_payload.get("analysis") or {})
+            score_analysis["is_active"] = True
+            score_analysis["job_id"] = job.id
+            score_analysis.pop("superseded_by_job_id", None)
+            score_payload["analysis"] = score_analysis
+
             existing_score = db.query(ProjectScore).filter(ProjectScore.project_id == project.id).first()
             if existing_score:
                 existing_score.version += 1
-                existing_score.score_json = score_data.model_dump()
+                existing_score.score_json = score_payload
                 existing_score.musicxml_path = xml_key
                 existing_score.midi_path = midi_key
             else:
@@ -329,7 +336,7 @@ def run_transcription_pipeline(job_id: str) -> None:
                     ProjectScore(
                         project_id=project.id,
                         version=1,
-                        score_json=score_data.model_dump(),
+                        score_json=score_payload,
                         musicxml_path=xml_key,
                         midi_path=midi_key,
                     )
@@ -341,6 +348,8 @@ def run_transcription_pipeline(job_id: str) -> None:
                     midi_asset_id=midi_asset.id,
                     musicxml_asset_id=xml_asset.id,
                     metadata_json={
+                        "is_active": True,
+                        "job_id": job.id,
                         "note_count": len(score_data.notes),
                         "chord_count": len(score_data.chords),
                         "tempo_bpm": tempo_bpm,

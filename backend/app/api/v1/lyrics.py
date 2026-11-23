@@ -34,7 +34,7 @@ def _load_project_lyrics(db: Session, project_id: str) -> LyricsData:
     score_row = db.query(ProjectScore).filter(ProjectScore.project_id == project_id).first()
     if score_row and isinstance(score_row.score_json, dict):
         analysis = score_row.score_json.get("analysis") or {}
-        if isinstance(analysis, dict) and isinstance(analysis.get("lyrics"), dict):
+        if isinstance(analysis, dict) and analysis.get("is_active") is not False and isinstance(analysis.get("lyrics"), dict):
             return LyricsData(**analysis["lyrics"])
 
     results = (
@@ -46,6 +46,8 @@ def _load_project_lyrics(db: Session, project_id: str) -> LyricsData:
     )
     for res in results:
         meta = res.metadata_json or {}
+        if meta.get("is_active") is False:
+            continue
         if isinstance(meta.get("lyrics"), dict):
             return LyricsData(**meta["lyrics"])
 

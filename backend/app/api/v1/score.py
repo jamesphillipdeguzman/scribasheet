@@ -46,6 +46,12 @@ def get_project_score(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No transcription score exists yet for this project.",
         )
+    analysis = (score.score_json or {}).get("analysis") if isinstance(score.score_json, dict) else None
+    if isinstance(analysis, dict) and analysis.get("is_active") is False:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Score processing is in progress or previous score was superseded.",
+        )
 
     clean_title = clean_score_title(project.title)
     musicxml_str = None

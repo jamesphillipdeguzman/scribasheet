@@ -5,7 +5,7 @@ from app.api.deps import get_current_user, get_owned_project, get_user_usage_met
 from app.api.v1.worker import get_worker_availability
 from app.core.security import decode_token
 from app.db.session import SessionLocal, get_db
-from app.models import MediaAsset, Project, TranscriptionJob, User
+from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob, TranscriptionResult, User
 from app.schemas.transcription import TranscriptionCreateRequest, TranscriptionJobResponse
 from app.workers.job_runner import enqueue_transcription_job
 from app.workers.ws_manager import job_ws_manager
@@ -17,6 +17,43 @@ def _serialize_job(job: TranscriptionJob, worker_online: bool) -> TranscriptionJ
     resp = TranscriptionJobResponse.model_validate(job)
     resp.worker_online = worker_online
     return resp
+
+
+def _supersede_previous_project_results(db: Session, project_id: str, new_job_id: str) -> None:
+    """Mark any in-flight jobs as superseded and deactivate previous active score/results without deleting history."""
+    in_flight = (
+        db.query(TranscriptionJob)
+        .filter(
+            TranscriptionJob.project_id == project_id,
+            TranscriptionJob.id != new_job_id,
+            TranscriptionJob.status.in_(("queued", "processing", "running")),
+        )
+        .all()
+    )
+    for old in in_flight:
+        old.status = "cancelled"
+        old.current_stage = "Superseded"
+
+    prev_results = (
+        db.query(TranscriptionResult)
+        .join(TranscriptionJob, TranscriptionJob.id == TranscriptionResult.job_id)
+        .filter(TranscriptionJob.project_id == project_id, TranscriptionJob.id != new_job_id)
+        .all()
+    )
+    for res in prev_results:
+        meta = dict(res.metadata_json or {})
+        meta["is_active"] = False
+        meta["superseded_by_job_id"] = new_job_id
+        res.metadata_json = meta
+
+    score_row = db.query(ProjectScore).filter(ProjectScore.project_id == project_id).first()
+    if score_row:
+        score_json = dict(score_row.score_json or {})
+        analysis = dict(score_json.get("analysis") or {})
+        analysis["is_active"] = False
+        analysis["superseded_by_job_id"] = new_job_id
+        score_json["analysis"] = analysis
+        score_row.score_json = score_json
 
 
 @router.post(
@@ -78,6 +115,8 @@ def start_transcription(
     project.transcription_mode = payload.settings.mode
     project.instrument = payload.settings.instrument
     db.add(job)
+    db.flush()
+    _supersede_previous_project_results(db, project.id, job.id)
     db.commit()
     db.refresh(job)
 
@@ -168,6 +207,9 @@ def retry_transcription_job(
         settings_json=old_job.settings_json,
     )
     db.add(new_job)
+    db.flush()
+    if (old_job.settings_json or {}).get("mode") != "lyrics_only":
+        _supersede_previous_project_results(db, old_job.project_id, new_job.id)
     db.commit()
     db.refresh(new_job)
 

@@ -617,14 +617,17 @@ def complete_job(
             persisted_score_version = existing_score.version if existing_score else None
     elif not is_simulated and validated_score is not None:
         score_dict = validated_score.model_dump()
+        new_analysis = dict(score_dict.get("analysis") or {})
+        new_analysis["is_active"] = True
+        new_analysis["job_id"] = job.id
+        new_analysis.pop("superseded_by_job_id", None)
         existing_score = db.query(ProjectScore).filter(ProjectScore.project_id == job.project_id).first()
         if existing_score:
             # Preserve existing recognized/edited lyrics across music re-transcription
             old_analysis = (existing_score.score_json or {}).get("analysis") or {}
             if isinstance(old_analysis, dict) and isinstance(old_analysis.get("lyrics"), dict):
-                new_analysis = dict(score_dict.get("analysis") or {})
                 new_analysis.setdefault("lyrics", old_analysis["lyrics"])
-                score_dict["analysis"] = new_analysis
+            score_dict["analysis"] = new_analysis
             existing_score.version += 1
             existing_score.score_json = score_dict
             if xml_key:
