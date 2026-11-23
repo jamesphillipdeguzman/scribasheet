@@ -177,8 +177,9 @@ def create_export(
         score.title = clean_score_title(project.title)
         mime_type, ext = EXPORT_MIME_TYPES[payload.format]
 
+        raw_credit = payload.transcribed_by if payload.transcribed_by is not None else current_user.display_name
         effective_transcribed_by = (
-            (payload.transcribed_by or "").strip() if payload.include_transcribed_by else ""
+            (raw_credit or "").strip() if payload.include_transcribed_by else ""
         ) or None
 
         if payload.format == "midi":

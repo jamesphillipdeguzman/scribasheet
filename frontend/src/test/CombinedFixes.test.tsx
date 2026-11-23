@@ -307,4 +307,40 @@ describe("Combined UI, OMR Normalization, Print Title, Arranger Credit & Format 
     expect(badge.textContent).toBe("MIC RECORDING");
     expect(badge.className).toContain("bg-violet-100");
   });
+
+  it("renders high-contrast Light Mode amber notice and toggle headings/subtitles in ExportCenter", () => {
+    vi.spyOn(api, "listExports").mockResolvedValue([]);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <ExportCenter projectId="proj-1" projectTitle="Test Score" hasScore={false} />
+      </QueryClientProvider>,
+    );
+
+    const notice = screen.getByTestId("export-center-amber-notice");
+    expect(notice.className).toContain("bg-amber-50");
+    expect(notice.className).toContain("border-amber-300");
+    expect(notice.className).toContain("text-amber-950");
+    expect(notice.className).toContain("font-medium");
+    expect(notice.className).toContain("dark:bg-amber-500/10");
+    expect(notice.className).toContain("dark:text-amber-200");
+
+    const chordsHeading = screen.getByText("Show Chord Symbols");
+    expect(chordsHeading.className).toContain("text-stone-900");
+    expect(chordsHeading.className).toContain("font-semibold");
+    expect(chordsHeading.className).toContain("dark:text-white");
+
+    const chordsSub = screen.getByText(/Display automatically detected chord labels/i);
+    expect(chordsSub.className).toContain("text-stone-600");
+    expect(chordsSub.className).toContain("dark:text-slate-400");
+
+    const creditHeading = screen.getByText("Transcribed by / Arranger Credit");
+    expect(creditHeading.className).toContain("text-stone-900");
+    expect(creditHeading.className).toContain("font-semibold");
+    expect(creditHeading.className).toContain("dark:text-white");
+
+    const creditSub = screen.getByText(/Included on Page 1 of exported MusicXML and PDF scores/i);
+    expect(creditSub.className).toContain("text-stone-600");
+    expect(creditSub.className).toContain("dark:text-slate-400");
+  });
 });

@@ -38,11 +38,11 @@ const SATB_MP3_FORMATS: Array<{
   label: string;
   filename: string;
 }> = [
-  { id: "soprano_mp3", label: "Soprano", filename: "Soprano.mp3" },
-  { id: "alto_mp3", label: "Alto", filename: "Alto.mp3" },
-  { id: "tenor_mp3", label: "Tenor", filename: "Tenor.mp3" },
-  { id: "bass_mp3", label: "Bass", filename: "Bass.mp3" },
-];
+    { id: "soprano_mp3", label: "Soprano", filename: "Soprano.mp3" },
+    { id: "alto_mp3", label: "Alto", filename: "Alto.mp3" },
+    { id: "tenor_mp3", label: "Tenor", filename: "Tenor.mp3" },
+    { id: "bass_mp3", label: "Bass", filename: "Bass.mp3" },
+  ];
 
 const FORMATS: Array<{
   id: "midi" | "musicxml" | "pdf" | "wav";
@@ -51,11 +51,11 @@ const FORMATS: Array<{
   desc: string;
   icon: typeof Music;
 }> = [
-  { id: "midi", label: "MIDI File", ext: ".mid", desc: "Standard MIDI for any DAW", icon: Music },
-  { id: "musicxml", label: "MusicXML", ext: ".musicxml", desc: "MuseScore, Finale, Sibelius, Dorico", icon: FileMusic },
-  { id: "pdf", label: "PDF Sheet Music", ext: ".pdf", desc: "Printable multi-page score", icon: FileText },
-  { id: "wav", label: "WAV Audio", ext: ".wav", desc: "Synthesized playback render", icon: FileAudio },
-];
+    { id: "midi", label: "MIDI File", ext: ".mid", desc: "Standard MIDI for any DAW", icon: Music },
+    { id: "musicxml", label: "MusicXML", ext: ".musicxml", desc: "MuseScore, Finale, Sibelius, Dorico", icon: FileMusic },
+    { id: "pdf", label: "PDF Sheet Music", ext: ".pdf", desc: "Printable multi-page score", icon: FileText },
+    { id: "wav", label: "WAV Audio", ext: ".wav", desc: "Synthesized playback render", icon: FileAudio },
+  ];
 
 export function ExportCenter({
   projectId,
@@ -82,6 +82,7 @@ export function ExportCenter({
   const [localIncludeChords, setLocalIncludeChords] = useState<boolean>(true);
   const [localTranscribedBy, setLocalTranscribedBy] = useState<string>(() => user?.display_name || "");
   const [localIncludeTranscribedBy, setLocalIncludeTranscribedBy] = useState<boolean>(true);
+  const [creditInteracted, setCreditInteracted] = useState<boolean>(false);
 
   useEffect(() => {
     if (transcribedBy === undefined && !localTranscribedBy && user?.display_name) {
@@ -91,6 +92,7 @@ export function ExportCenter({
 
   const effectiveTranscribedBy = transcribedBy ?? localTranscribedBy;
   const setEffectiveTranscribedBy = (val: string) => {
+    setCreditInteracted(true);
     if (onTranscribedByChange) {
       onTranscribedByChange(val);
     } else {
@@ -99,6 +101,7 @@ export function ExportCenter({
   };
   const effectiveIncludeTranscribedBy = includeTranscribedBy ?? localIncludeTranscribedBy;
   const setEffectiveIncludeTranscribedBy = (val: boolean) => {
+    setCreditInteracted(true);
     if (onToggleTranscribedBy) {
       onToggleTranscribedBy(val);
     } else {
@@ -121,15 +124,14 @@ export function ExportCenter({
   });
 
   const buildExportOptions = () => {
-    const trimmedCredit = effectiveTranscribedBy.trim();
-    const shouldSendCredit = Boolean(trimmedCredit) || !effectiveIncludeTranscribedBy;
+    const shouldSendCredit = creditInteracted || transcribedBy !== undefined || includeTranscribedBy === false;
     return {
       include_chords: includeChords,
       ...(shouldSendCredit
         ? {
-            transcribed_by: effectiveTranscribedBy,
-            include_transcribed_by: effectiveIncludeTranscribedBy,
-          }
+          transcribed_by: effectiveTranscribedBy,
+          include_transcribed_by: effectiveIncludeTranscribedBy,
+        }
         : {}),
     };
   };
@@ -176,12 +178,18 @@ export function ExportCenter({
   return (
     <div className="space-y-5">
       {!hasScore && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+        <div
+          data-testid="export-center-amber-notice"
+          className="rounded-lg bg-amber-50 border border-amber-300 p-3 text-xs text-amber-950 font-medium dark:bg-amber-500/10 dark:border-amber-500/30 dark:text-amber-200"
+        >
           Complete a transcription first to enable MIDI, MusicXML, PDF, and WAV exports.
         </div>
       )}
       {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300" role="alert">
+        <div
+          className="rounded-lg bg-red-50 border border-red-300 p-3 text-xs text-red-900 font-medium dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300"
+          role="alert"
+        >
           {error}
         </div>
       )}
@@ -190,8 +198,8 @@ export function ExportCenter({
       <div className="rounded-xl border border-[#27273A] bg-[#09090F] p-4 space-y-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="space-y-0.5">
-            <div className="text-sm font-medium text-[#FAFAFA]">Show Chord Symbols</div>
-            <p className="text-xs text-[#A1A1AA]">
+            <div className="text-sm text-stone-900 font-semibold dark:text-white">Show Chord Symbols</div>
+            <p className="text-xs text-stone-600 dark:text-slate-400">
               Display automatically detected chord labels above the piano staff in the viewer, MusicXML, and PDF.
             </p>
           </div>
@@ -201,14 +209,12 @@ export function ExportCenter({
             aria-checked={includeChords}
             aria-label="Show Chord Symbols"
             onClick={() => setIncludeChords(!includeChords)}
-            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-[#27273A] transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${
-              includeChords ? "bg-[#7C3AED]" : "bg-[#27273A]"
-            }`}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-[#27273A] transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${includeChords ? "bg-[#7C3AED]" : "bg-[#27273A]"
+              }`}
           >
             <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                includeChords ? "translate-x-6" : "translate-x-1"
-              }`}
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${includeChords ? "translate-x-6" : "translate-x-1"
+                }`}
             />
           </button>
         </div>
@@ -216,10 +222,10 @@ export function ExportCenter({
         <div className="border-t border-[#27273A] pt-3 space-y-2.5">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="space-y-0.5">
-              <label htmlFor="export-transcribed-by" className="text-sm font-medium text-[#FAFAFA]">
+              <label htmlFor="export-transcribed-by" className="text-sm text-stone-900 font-semibold dark:text-white">
                 Transcribed by / Arranger Credit
               </label>
-              <p className="text-xs text-[#A1A1AA]">
+              <p className="text-xs text-stone-600 dark:text-slate-400">
                 Included on Page 1 of exported MusicXML and PDF scores when enabled.
               </p>
             </div>
@@ -229,14 +235,12 @@ export function ExportCenter({
               aria-checked={effectiveIncludeTranscribedBy}
               aria-label="Include Transcribed by credit"
               onClick={() => setEffectiveIncludeTranscribedBy(!effectiveIncludeTranscribedBy)}
-              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-[#27273A] transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${
-                effectiveIncludeTranscribedBy ? "bg-[#7C3AED]" : "bg-[#27273A]"
-              }`}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-[#27273A] transition-colors focus:outline-none focus:ring-2 focus:ring-[#A78BFA]/60 ${effectiveIncludeTranscribedBy ? "bg-[#7C3AED]" : "bg-[#27273A]"
+                }`}
             >
               <span
-                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                  effectiveIncludeTranscribedBy ? "translate-x-6" : "translate-x-1"
-                }`}
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${effectiveIncludeTranscribedBy ? "translate-x-6" : "translate-x-1"
+                  }`}
               />
             </button>
           </div>
@@ -258,22 +262,22 @@ export function ExportCenter({
           const Icon = f.icon;
           const loading = activeFmt === f.id;
           const printMutation = useMutation({
-    mutationFn: async () => {
-      setError(null);
-      setActiveFmt("print_pdf");
-      const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: includeChords });
-      await printScorePdf(blob);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
-    },
-    onError: (err) => {
-      setError(err instanceof Error ? err.message : "Failed to prepare PDF for printing.");
-    },
-    onSettled: () => setActiveFmt(null),
-  });
+            mutationFn: async () => {
+              setError(null);
+              setActiveFmt("print_pdf");
+              const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: includeChords });
+              await printScorePdf(blob);
+            },
+            onSuccess: () => {
+              queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
+            },
+            onError: (err) => {
+              setError(err instanceof Error ? err.message : "Failed to prepare PDF for printing.");
+            },
+            onSettled: () => setActiveFmt(null),
+          });
 
-  return (
+          return (
             <div key={f.id} className="min-w-0 rounded-xl border border-[#27273A] bg-[#09090F] p-4 flex flex-col justify-between space-y-3">
               <div>
                 <div className="flex items-center justify-between">
@@ -330,22 +334,22 @@ export function ExportCenter({
             {SATB_MP3_FORMATS.map((s) => {
               const loading = activeFmt === s.id;
               const printMutation = useMutation({
-    mutationFn: async () => {
-      setError(null);
-      setActiveFmt("print_pdf");
-      const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: includeChords });
-      await printScorePdf(blob);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
-    },
-    onError: (err) => {
-      setError(err instanceof Error ? err.message : "Failed to prepare PDF for printing.");
-    },
-    onSettled: () => setActiveFmt(null),
-  });
+                mutationFn: async () => {
+                  setError(null);
+                  setActiveFmt("print_pdf");
+                  const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: includeChords });
+                  await printScorePdf(blob);
+                },
+                onSuccess: () => {
+                  queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
+                },
+                onError: (err) => {
+                  setError(err instanceof Error ? err.message : "Failed to prepare PDF for printing.");
+                },
+                onSettled: () => setActiveFmt(null),
+              });
 
-  return (
+              return (
                 <div
                   key={s.id}
                   className="min-w-0 rounded-xl border border-[#27273A] bg-[#09090F] p-3 flex flex-col justify-between space-y-2.5"
