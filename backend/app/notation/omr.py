@@ -616,9 +616,9 @@ def _reconstruct_and_filter_part_lyrics(
 
 def _collect_part_note_positions(
     part_el: ET.Element,
-) -> list[tuple[int, float, ET.Element, bool]]:
-    """Return [(measure_idx, onset_whole, note_el, is_rest)] in musical order for a part."""
-    items: list[tuple[int, float, ET.Element, bool]] = []
+) -> list[tuple[int, float, float, ET.Element, bool]]:
+    """Return [(measure_idx, onset_whole, end_whole, note_el, is_rest)] in musical order for a part."""
+    items: list[tuple[int, float, float, ET.Element, bool]] = []
     divisions = 1.0
     for m_idx, m_el in enumerate(part_el.findall("measure")):
         offset_div = 0.0
@@ -653,15 +653,17 @@ def _collect_part_note_positions(
                 is_grace = child.find("grace") is not None
                 is_rest = child.find("rest") is not None
                 start_div = last_start_div if is_chord else offset_div
-                onset_whole = round(start_div / (divisions * 4.0), 4)
-                if not is_chord:
-                    items.append((m_idx, onset_whole, child, is_rest))
-                if not is_chord and not is_grace:
-                    dur_txt = child.findtext("duration")
+                dur_div = 0.0
+                if not is_grace:
                     try:
-                        dur_div = float(dur_txt or 0.0)
+                        dur_div = max(0.0, float(child.findtext("duration") or 0.0))
                     except ValueError:
                         dur_div = 0.0
+                onset_whole = round(start_div / (divisions * 4.0), 4)
+                end_whole = round((start_div + dur_div) / (divisions * 4.0), 4)
+                if not is_chord:
+                    items.append((m_idx, onset_whole, end_whole, child, is_rest))
+                if not is_chord and not is_grace:
                     last_start_div = offset_div
                     if dur_div > 0:
                         offset_div += dur_div
@@ -701,12 +703,12 @@ def _consolidate_satb_lyrics_to_soprano(root: ET.Element) -> int:
     sop_items = _collect_part_note_positions(parts[soprano_idx])
     sop_non_rest: list[tuple[int, float, float, ET.Element]] = []
     sop_notes_by_pos: dict[tuple[int, float], ET.Element] = {}
-    sop_notes_by_measure: dict[int, list[tuple[float, ET.Element]]] = {}
-    for m_idx, onset, n_el, is_rest in sop_items:
+    sop_notes_by_measure: dict[int, list[tuple[float, float, ET.Element]]] = {}
+    for m_idx, onset, end_w, n_el, is_rest in sop_items:
         if not is_rest:
             sop_non_rest.append((m_idx, onset, m_idx + onset, n_el))
             sop_notes_by_pos[(m_idx, onset)] = n_el
-            sop_notes_by_measure.setdefault(m_idx, []).append((onset, n_el))
+            sop_notes_by_measure.setdefault(m_idx, []).append((onset, end_w, n_el))
 
     if not sop_non_rest:
         return 0
@@ -718,13 +720,22 @@ def _consolidate_satb_lyrics_to_soprano(root: ET.Element) -> int:
         if (m_idx, onset) in sop_notes_by_pos:
             return sop_notes_by_pos[(m_idx, onset)], True
         measure_notes = sop_notes_by_measure.get(m_idx, [])
-        for s_onset, n_el in measure_notes:
+        for s_onset, _, n_el in measure_notes:
             if abs(s_onset - onset) <= 0.025:
                 return n_el, True
-        # Nearest note in same measure without this verse (handles passing-tone offsets)
+        # Immediately preceding Soprano note still sustaining through passing-tone onset with empty lyric slot
+        sustaining = [
+            (s_onset, n_el)
+            for s_onset, s_end, n_el in measure_notes
+            if s_onset < onset - 1e-4 and onset < s_end - 1e-4 and not _has_verse_on_note(n_el, v_num)
+        ]
+        if sustaining:
+            sustaining.sort(key=lambda x: x[0], reverse=True)
+            return sustaining[0][1], False
+        # Nearest note in same measure without this verse
         free_in_measure = [
             (abs(s_onset - onset), n_el)
-            for s_onset, n_el in measure_notes
+            for s_onset, _, n_el in measure_notes
             if not _has_verse_on_note(n_el, v_num)
         ]
         if free_in_measure:
@@ -743,13 +754,13 @@ def _consolidate_satb_lyrics_to_soprano(root: ET.Element) -> int:
         # Fallback: nearest Soprano note in same measure or globally
         if measure_notes:
             closest = min(measure_notes, key=lambda x: abs(x[0] - onset))
-            return closest[1], False
+            return closest[2], False
         closest_global = min(sop_non_rest, key=lambda x: abs(x[2] - target_global))
         return closest_global[3], False
 
     # Gather all lyrics per part & verse
     sop_lyrics_by_verse: dict[str, dict[tuple[int, float], str]] = {}
-    for m_idx, onset, n_el, _ in sop_items:
+    for m_idx, onset, _, n_el, _ in sop_items:
         for lyr in n_el.findall("lyric"):
             v_num = lyr.attrib.get("number") or "1"
             txt = "".join(t.text or "" for t in lyr.findall("text")).strip()
@@ -759,7 +770,7 @@ def _consolidate_satb_lyrics_to_soprano(root: ET.Element) -> int:
     for other_idx in other_indices:
         other_items = _collect_part_note_positions(parts[other_idx])
         other_by_verse: dict[str, list[tuple[int, float, ET.Element, ET.Element, str]]] = {}
-        for m_idx, onset, n_el, _ in other_items:
+        for m_idx, onset, _, n_el, _ in other_items:
             for lyr in n_el.findall("lyric"):
                 v_num = lyr.attrib.get("number") or "1"
                 txt = "".join(t.text or "" for t in lyr.findall("text")).strip()
@@ -813,7 +824,7 @@ def _consolidate_satb_lyrics_to_soprano(root: ET.Element) -> int:
                 n_el.remove(lyr)
 
     # Sort <lyric> elements by verse number on Soprano notes
-    for _, _, n_el, _ in sop_items:
+    for _, _, _, n_el, _ in sop_items:
         lyrs = list(n_el.findall("lyric"))
         if len(lyrs) > 1:
             for lyr in lyrs:

@@ -699,6 +699,39 @@ def test_satb_strips_section_labels_and_malformed_duplicate_harmonies_while_pres
     assert len(sop_harmonies) == 1
     assert sop_harmonies[0].find("kind").attrib.get("text") == "sus4"
 
+
+def test_satb_places_passing_tone_lyric_on_preceding_sustaining_soprano_note():
+    # Preceding Soprano half note sustains through beat 2 where Alto has passing-tone 'bright';
+    # later Soprano note at beat 3 already has 'looked' and must NOT be merged with 'bright'.
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="10">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>half</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><type>half</type><lyric number="1"><text>looked</text></lyric></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="10">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>3</duration><type>quarter</type><dot/></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>eighth</type><lyric number="1"><text>bright</text></lyric></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>4</duration><type>half</type><lyric number="1"><text>looked</text></lyric></note>
+    </measure>
+  </part>
+</score-partwise>"""
+    cleaned, _ = sanitize_omr_musicxml(xml)
+    root = ET.fromstring(cleaned)
+    parts = root.findall("part")
+    sop_texts = [t.text for t in parts[0].findall(".//lyric/text")]
+    assert sop_texts == ["bright", "looked"]
+    assert len(parts[1].findall(".//lyric")) == 0
+
     lyrics_data = extract_lyrics_data_from_musicxml(cleaned, tempo_bpm=120.0)
     assert lyrics_data is not None
     assert "Amazing grace, how" in lyrics_data["text"]
@@ -878,6 +911,39 @@ def test_satb_strips_section_labels_and_malformed_duplicate_harmonies_while_pres
     sop_harmonies = parts[0].findall(".//harmony")
     assert len(sop_harmonies) == 1
     assert sop_harmonies[0].find("kind").attrib.get("text") == "sus4"
+
+
+def test_satb_places_passing_tone_lyric_on_preceding_sustaining_soprano_note():
+    # Preceding Soprano half note sustains through beat 2 where Alto has passing-tone 'bright';
+    # later Soprano note at beat 3 already has 'looked' and must NOT be merged with 'bright'.
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="10">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>half</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><type>half</type><lyric number="1"><text>looked</text></lyric></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="10">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>3</duration><type>quarter</type><dot/></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>eighth</type><lyric number="1"><text>bright</text></lyric></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>4</duration><type>half</type><lyric number="1"><text>looked</text></lyric></note>
+    </measure>
+  </part>
+</score-partwise>"""
+    cleaned, _ = sanitize_omr_musicxml(xml)
+    root = ET.fromstring(cleaned)
+    parts = root.findall("part")
+    sop_texts = [t.text for t in parts[0].findall(".//lyric/text")]
+    assert sop_texts == ["bright", "looked"]
+    assert len(parts[1].findall(".//lyric")) == 0
 
 
 def test_put_score_persists_direct_musicxml_edits(client, db_session) -> None:

@@ -203,8 +203,10 @@ function sanitizeDocumentFooterLyrics(doc: Document): void {
   }
 }
 
-function collectPartNotePositions(partEl: Element): Array<{ mIdx: number; onsetWhole: number; noteEl: Element; isRest: boolean }> {
-  const items: Array<{ mIdx: number; onsetWhole: number; noteEl: Element; isRest: boolean }> = [];
+function collectPartNotePositions(
+  partEl: Element,
+): Array<{ mIdx: number; onsetWhole: number; endWhole: number; noteEl: Element; isRest: boolean }> {
+  const items: Array<{ mIdx: number; onsetWhole: number; endWhole: number; noteEl: Element; isRest: boolean }> = [];
   let divisions = 1;
   const measures = Array.from(partEl.getElementsByTagName("measure"));
   for (let mIdx = 0; mIdx < measures.length; mIdx++) {
@@ -226,14 +228,18 @@ function collectPartNotePositions(partEl: Element): Array<{ mIdx: number; onsetW
         const isGrace = child.getElementsByTagName("grace").length > 0;
         const isRest = child.getElementsByTagName("rest").length > 0;
         const startDiv = isChord ? lastStartDiv : offsetDiv;
+        const dur = !isGrace
+          ? Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0")
+          : 0;
+        const safeDur = Number.isFinite(dur) && dur > 0 ? dur : 0;
         const onsetWhole = Math.round((startDiv / (divisions * 4)) * 10000) / 10000;
+        const endWhole = Math.round(((startDiv + safeDur) / (divisions * 4)) * 10000) / 10000;
         if (!isChord) {
-          items.push({ mIdx, onsetWhole, noteEl: child, isRest });
+          items.push({ mIdx, onsetWhole, endWhole, noteEl: child, isRest });
         }
         if (!isChord && !isGrace) {
-          const dur = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
           lastStartDiv = offsetDiv;
-          if (Number.isFinite(dur) && dur > 0) offsetDiv += dur;
+          if (safeDur > 0) offsetDiv += safeDur;
         }
       }
     }
@@ -271,18 +277,25 @@ function consolidateSatbLyricsToSoprano(doc: Document): void {
   if (otherIndices.length === 0) return;
 
   const sopItems = collectPartNotePositions(parts[sopranoIdx]);
-  const sopNonRestNotes: Array<{ mIdx: number; onsetWhole: number; globalWhole: number; noteEl: Element }> = [];
-  const sopByMeasure = new Map<number, Array<{ onsetWhole: number; noteEl: Element }>>();
+  const sopNonRestNotes: Array<{
+    mIdx: number;
+    onsetWhole: number;
+    endWhole: number;
+    globalWhole: number;
+    noteEl: Element;
+  }> = [];
+  const sopByMeasure = new Map<number, Array<{ onsetWhole: number; endWhole: number; noteEl: Element }>>();
   for (const it of sopItems) {
     if (!it.isRest) {
       sopNonRestNotes.push({
         mIdx: it.mIdx,
         onsetWhole: it.onsetWhole,
+        endWhole: it.endWhole,
         globalWhole: it.mIdx + it.onsetWhole,
         noteEl: it.noteEl,
       });
       if (!sopByMeasure.has(it.mIdx)) sopByMeasure.set(it.mIdx, []);
-      sopByMeasure.get(it.mIdx)!.push({ onsetWhole: it.onsetWhole, noteEl: it.noteEl });
+      sopByMeasure.get(it.mIdx)!.push({ onsetWhole: it.onsetWhole, endWhole: it.endWhole, noteEl: it.noteEl });
     }
   }
   if (sopNonRestNotes.length === 0) return;
@@ -304,8 +317,24 @@ function consolidateSatbLyricsToSoprano(doc: Document): void {
         return { noteEl: s.noteEl, exactMatch: true };
       }
     }
-    // 2. Nearest note in same measure without this verse (handles passing-tone offsets)
-    let bestInMeasure: { onsetWhole: number; noteEl: Element } | null = null;
+    // 2. Immediately preceding Soprano note still sustaining through the passing-tone onset with an empty lyric slot
+    let sustainingCandidate: { onsetWhole: number; endWhole: number; noteEl: Element } | null = null;
+    for (const s of measureNotes) {
+      if (
+        s.onsetWhole < onset - 1e-4 &&
+        onset < s.endWhole - 1e-4 &&
+        !hasVerseOnNote(s.noteEl, vNum)
+      ) {
+        if (!sustainingCandidate || s.onsetWhole > sustainingCandidate.onsetWhole) {
+          sustainingCandidate = s;
+        }
+      }
+    }
+    if (sustainingCandidate) {
+      return { noteEl: sustainingCandidate.noteEl, exactMatch: false };
+    }
+    // 3. Nearest note in same measure without this verse
+    let bestInMeasure: { onsetWhole: number; endWhole: number; noteEl: Element } | null = null;
     let bestInMeasureDist = Infinity;
     for (const s of measureNotes) {
       if (!hasVerseOnNote(s.noteEl, vNum)) {

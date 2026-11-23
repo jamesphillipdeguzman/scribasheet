@@ -664,4 +664,118 @@ describe("Synchronized Sheet Music Playback View & Timeline", () => {
     expect(mParts[1].getElementsByTagName("lyric")).toHaveLength(0);
     expect(mParts[2].getElementsByTagName("lyric")).toHaveLength(0);
   });
+
+  it("builds conductor-aware timeline for 3/4, 6/8, pickups, backup/forward, tempo changes, and places passing-tone lyrics on sustaining Soprano note", () => {
+    // 1) 1-beat pickup in 3/4 at 68 BPM
+    const waltzPickupXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>1</divisions><time><beats>3</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="1">
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>3</duration><type>half</type><dot/></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>3</duration><type>half</type><dot/></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>1</divisions><time><beats>3</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="1">
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>3</duration><type>half</type><dot/></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>3</duration><type>half</type><dot/></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const tlWaltz = buildMusicXmlTimeline(waltzPickupXml, 68);
+    expect(tlWaltz.hasPickup).toBe(true);
+    expect(tlWaltz.pickupQuarterBeats).toBeCloseTo(1.0, 3);
+    expect(tlWaltz.segments[0].secStart).toBeCloseTo(0.0, 3);
+    expect(tlWaltz.segments[1].secStart).toBeCloseTo(60 / 68, 3); // 0.882s
+    expect(tlWaltz.segments[2].secStart).toBeCloseTo(4 * (60 / 68), 3); // 3.529s
+
+    // 2) 1-eighth-note pickup (0.5 quarter beats)
+    const eighthPickupXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>eighth</type></note>
+    </measure>
+    <measure number="1">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>8</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const tlEighth = buildMusicXmlTimeline(eighthPickupXml, 120);
+    expect(tlEighth.hasPickup).toBe(true);
+    expect(tlEighth.pickupQuarterBeats).toBeCloseTo(0.5, 3);
+    expect(tlEighth.segments[1].secStart).toBeCloseTo(0.25, 3);
+
+    // 3) 6/8 compound meter with dotted-quarter metronome & backup/chord multi-voice
+    const sixEightXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions><time><beats>6</beats><beat-type>8</beat-type></time></attributes>
+      <direction><direction-type><metronome><beat-unit>quarter</beat-unit><beat-unit-dot/><per-minute>60</per-minute></metronome></direction-type></direction>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>3</duration><type>quarter</type><dot/></note>
+      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>3</duration><type>quarter</type><dot/></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>3</duration><type>quarter</type><dot/></note>
+      <backup><duration>6</duration></backup>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>6</duration><type>half</type><dot/></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const tl68 = buildMusicXmlTimeline(sixEightXml, 120);
+    expect(tl68.hasPickup).toBe(false);
+    // 6/8 = 3 quarter beats; dotted-quarter=60 -> 90 quarter-BPM -> 3 * (60/90) = 2.0s
+    expect(tl68.totalQuarterBeats).toBeCloseTo(3.0, 3);
+    expect(tl68.totalSec).toBeCloseTo(2.0, 3);
+
+    // 4) Passing-tone lyric 'bright' placed on preceding sustaining Soprano note, not merged with 'looked'
+    const passingXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="10">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>half</type></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><type>half</type><lyric number="1"><text>looked</text></lyric></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="10">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>3</duration><type>quarter</type><dot/></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>eighth</type><lyric number="1"><text>bright</text></lyric></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>4</duration><type>half</type><lyric number="1"><text>looked</text></lyric></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const preparedPassing = prepareDisplayMusicXml(passingXml, true);
+    const pDoc = new DOMParser().parseFromString(preparedPassing, "application/xml");
+    const pParts = pDoc.getElementsByTagName("part");
+    expect(Array.from(pParts[0].getElementsByTagName("text")).map((n) => n.textContent)).toEqual([
+      "bright",
+      "looked",
+    ]);
+    expect(pParts[1].getElementsByTagName("lyric")).toHaveLength(0);
+  });
 });
