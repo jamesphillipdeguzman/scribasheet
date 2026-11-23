@@ -67,6 +67,25 @@ interface PlayheadRect {
   systemIndex: number;
 }
 
+interface RenderedNoteheadRef {
+  svgEl: Element;
+  role: string;
+  trackIndex: number;
+  pitchMidi: number | null;
+  noteId: string | null;
+}
+
+interface RenderedMusicalEvent {
+  onsetSec: number;
+  endSec: number;
+  systemIndex: number;
+  top: number;
+  height: number;
+  noteheads: RenderedNoteheadRef[];
+  noteIds: Set<string>;
+  cachedLeft: number | null;
+}
+
 interface SheetMusicViewerProps {
   musicxml: string | null;
   notes?: ScoreNote[];
@@ -114,6 +133,7 @@ export function SheetMusicViewer({
   const highlightedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
   const selectedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
   const svgNoteTargetMapRef = useRef<WeakMap<Element, XmlNoteTarget>>(new WeakMap());
+  const renderedEventsRef = useRef<RenderedMusicalEvent[]>([]);
   const cursorSnapshotsRef = useRef<OsmdCursorSnapshot[]>([]);
   const lastCursorWholeRef = useRef<number>(-1);
   const lastSnapshotIdxRef = useRef<number>(-1);
@@ -241,13 +261,148 @@ export function SheetMusicViewer({
     }
   };
 
+  const highlightNoteheadElement = (svgEl: Element, role: string, isMuted: boolean) => {
+    if (isMuted) return;
+    if (satbSoloVoice && role !== satbSoloVoice) return;
+    const fillHex = SATB_SHEET_COLORS[role] || SATB_SHEET_COLORS.other;
+    const noteheadTargets = svgEl.querySelectorAll("path, ellipse");
+    const els = noteheadTargets.length > 0 ? Array.from(noteheadTargets) : [svgEl];
+    for (const el of els) {
+      highlightedSvgRef.current.push({ el, origFill: el.getAttribute("fill") });
+      el.setAttribute("fill", fillHex);
+    }
+  };
+
+  const resolveEventLeft = (ev: RenderedMusicalEvent): number | null => {
+    if (ev.cachedLeft !== null) return ev.cachedLeft;
+    const containerEl = containerRef.current;
+    if (!containerEl) return null;
+    const cRect = containerEl.getBoundingClientRect();
+    if (cRect.width <= 0) return null;
+    const xs: number[] = [];
+    for (const nh of ev.noteheads) {
+      const r = nh.svgEl.getBoundingClientRect();
+      if (r.width > 0 || r.height > 0 || r.left > 0) {
+        xs.push(r.left - cRect.left);
+      }
+    }
+    if (xs.length === 0) return null;
+    xs.sort((a, b) => a - b);
+    // Shared musical X-position across simultaneous SATB noteheads (median avoids outlier accidentals/stems)
+    const sharedX = xs[Math.floor(xs.length / 2)];
+    ev.cachedLeft = sharedX;
+    return sharedX;
+  };
+
+  const findRenderedEventIndex = (events: RenderedMusicalEvent[], sec: number): number => {
+    if (events.length === 0) return -1;
+    let lo = 0;
+    let hi = events.length - 1;
+    let best = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (events[mid].onsetSec <= sec + 0.004) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return best;
+  };
+
   const syncCursorToSeconds = useCallback(
     (sec: number, allowAutoScroll: boolean, force = false) => {
       const osmd = osmdRef.current;
-      if (!osmd || !osmd.cursor) return;
+      if (!osmd) return;
+
+      // Primary path: drive both SATB notehead highlighting and vertical playhead from canonical rendered events
+      const renderedEvents = renderedEventsRef.current;
+      if (renderedEvents.length > 0) {
+        if (osmd.cursor?.cursorElement) {
+          osmd.cursor.cursorElement.style.opacity = "0";
+          osmd.cursor.cursorElement.style.pointerEvents = "none";
+        }
+
+        // Canonical active notes at `sec` (shared source of truth with MIDI playback)
+        const activeNotes = notes.filter((n) => sec >= n.onset_sec - 0.004 && sec < n.offset_sec);
+        const activeNoteIds = new Set(activeNotes.map((n) => n.id));
+        const evIdx = findRenderedEventIndex(renderedEvents, sec);
+        const ev0 = evIdx >= 0 ? renderedEvents[evIdx] : renderedEvents[0];
+
+        if (force || sec <= 0.01 || evIdx !== lastSnapshotIdxRef.current || activeNoteIds.size > 0) {
+          clearNoteheadHighlights();
+          if (activeNoteIds.size > 0) {
+            // Highlight all currently sounding SATB noteheads (including sustained notes across beats)
+            const highlightedEls = new Set<Element>();
+            for (const ev of renderedEvents) {
+              if (ev.onsetSec > sec + 0.02) break;
+              if (ev.endSec < sec - 0.02) continue;
+              for (const nh of ev.noteheads) {
+                if (nh.noteId && activeNoteIds.has(nh.noteId) && !highlightedEls.has(nh.svgEl)) {
+                  highlightedEls.add(nh.svgEl);
+                  const track = tracks[nh.trackIndex];
+                  const isMuted =
+                    nh.role !== "other" ? Boolean(satbMutedVoices[nh.role]) : Boolean(track?.muted);
+                  highlightNoteheadElement(nh.svgEl, nh.role, isMuted);
+                }
+              }
+            }
+          } else if (isPlaying && ev0 && sec < ev0.endSec) {
+            for (const nh of ev0.noteheads) {
+              const track = tracks[nh.trackIndex];
+              const isMuted =
+                nh.role !== "other" ? Boolean(satbMutedVoices[nh.role]) : Boolean(track?.muted);
+              highlightNoteheadElement(nh.svgEl, nh.role, isMuted);
+            }
+          }
+          lastSnapshotIdxRef.current = evIdx;
+        }
+
+        const baseLeft = resolveEventLeft(ev0);
+        if (baseLeft !== null) {
+          let displayLeft = baseLeft;
+          if (isPlaying && evIdx >= 0 && evIdx + 1 < renderedEvents.length) {
+            const ev1 = renderedEvents[evIdx + 1];
+            const nextLeft = resolveEventLeft(ev1);
+            if (
+              nextLeft !== null &&
+              ev1.systemIndex === ev0.systemIndex &&
+              nextLeft > baseLeft &&
+              ev1.onsetSec > ev0.onsetSec + 1e-4
+            ) {
+              const frac = Math.max(0, Math.min(1, (sec - ev0.onsetSec) / (ev1.onsetSec - ev0.onsetSec)));
+              displayLeft = baseLeft + frac * (nextLeft - baseLeft);
+            }
+          }
+
+          const geom: PlayheadRect = {
+            visible: true,
+            left: displayLeft,
+            top: ev0.top,
+            height: ev0.height,
+            systemIndex: ev0.systemIndex,
+          };
+          setPlayheadRect((prev) =>
+            prev.visible === geom.visible &&
+              prev.left === geom.left &&
+              prev.top === geom.top &&
+              prev.height === geom.height &&
+              prev.systemIndex === geom.systemIndex
+              ? prev
+              : geom,
+          );
+          if (allowAutoScroll) {
+            maybeAutoScroll(geom);
+          }
+          return;
+        }
+      }
+
+      // Fallback path when GraphicSheet.MeasureList has no rendered SVG entries (e.g. lightweight mocked OSMD tests)
+      if (!osmd.cursor) return;
       const cursor = osmd.cursor;
 
-      // Use O(log N) snapshot lookup when OSMD iterator timeline is populated
       const snapshots = cursorSnapshotsRef.current;
       let targetWhole = timeSecToWholeNotes(timeline, sec, tempoBpm);
       let snapIdx = -1;
@@ -294,7 +449,6 @@ export function SheetMusicViewer({
           lastCursorWholeRef.current = targetWhole;
           lastSnapshotIdxRef.current = snapIdx;
 
-          // Highlight sounding noteheads with SATB colors respecting Solo/Mute
           clearNoteheadHighlights();
           const gNotes = typeof cursor.GNotesUnderCursor === "function" ? cursor.GNotesUnderCursor() : [];
           for (const gn of gNotes) {
@@ -310,23 +464,13 @@ export function SheetMusicViewer({
             const track = tracks[staffIdx];
             const role = resolveTrackVoiceRole(track);
             const isMuted = role !== "other" ? Boolean(satbMutedVoices[role]) : Boolean(track?.muted);
-            if (isMuted) continue;
-            if (satbSoloVoice && role !== satbSoloVoice) continue;
-
-            const fillHex = SATB_SHEET_COLORS[role] || SATB_SHEET_COLORS.other;
-            const noteheadTargets = svgEl.querySelectorAll("path, ellipse");
-            const els = noteheadTargets.length > 0 ? Array.from(noteheadTargets) : [svgEl];
-            for (const el of els) {
-              highlightedSvgRef.current.push({ el, origFill: el.getAttribute("fill") });
-              el.setAttribute("fill", fillHex);
-            }
+            highlightNoteheadElement(svgEl, role, isMuted);
           }
 
           const baseGeom = computePlayheadGeometry(osmd);
           baseGeomRef.current = baseGeom;
           nextGeomRef.current = null;
 
-          // Peek next cursor position on the same system for smooth musical-time rAF interpolation
           if (
             isPlaying &&
             snapIdx >= 0 &&
@@ -379,7 +523,7 @@ export function SheetMusicViewer({
         // Ignore OSMD cursor boundary exceptions during re-render
       }
     },
-    [timeline, tempoBpm, tracks, satbMutedVoices, satbSoloVoice, followCursor, isPlaying],
+    [notes, timeline, tempoBpm, tracks, satbMutedVoices, satbSoloVoice, followCursor, isPlaying],
   );
 
   // Build OSMD iterator timeline & SVG notehead -> XmlNoteTarget map after render
@@ -537,46 +681,155 @@ export function SheetMusicViewer({
     }
     cursorSnapshotsRef.current = snapshots;
 
-    // Map rendered SVG notehead elements to XmlNoteTarget for direct editing
+    // Map rendered SVG notehead elements to XmlNoteTarget AND build canonical event -> SVG notehead index
     const newMap = new WeakMap<Element, XmlNoteTarget>();
+    const eventBuckets = new Map<number, RenderedMusicalEvent>();
+    const usedNoteIds = new Set<string>();
+    const notesByPitch = new Map<number, ScoreNote[]>();
+    for (const n of notes) {
+      if (!notesByPitch.has(n.pitch_midi)) notesByPitch.set(n.pitch_midi, []);
+      notesByPitch.get(n.pitch_midi)!.push(n);
+    }
+    for (const list of notesByPitch.values()) {
+      list.sort((a, b) => a.onset_sec - b.onset_sec || a.track_index - b.track_index);
+    }
+
     try {
       const measureList = osmd.GraphicSheet?.MeasureList;
       if (Array.isArray(measureList)) {
+        const scale = 10 * zoom;
         for (let mIdx = 0; mIdx < measureList.length; mIdx++) {
           const row = measureList[mIdx];
           if (!Array.isArray(row)) continue;
+
+          // Compute measure's first staffEntry timestamp across all staves to anchor Measure 0 pickups cleanly
+          let firstSeWholeInMeasure: number | null = null;
+          let measureAbsWhole: number | null = null;
+          for (let sIdx = 0; sIdx < row.length; sIdx++) {
+            const gm = row[sIdx] as unknown as {
+              parentSourceMeasure?: { AbsoluteTimestamp?: { RealValue?: number } };
+              staffEntries?: Array<{ getAbsoluteTimestamp?: () => { RealValue?: number } }>;
+            };
+            if (measureAbsWhole === null && typeof gm?.parentSourceMeasure?.AbsoluteTimestamp?.RealValue === "number") {
+              measureAbsWhole = gm.parentSourceMeasure.AbsoluteTimestamp.RealValue;
+            }
+            for (const se of gm?.staffEntries || []) {
+              const t = se.getAbsoluteTimestamp?.()?.RealValue;
+              if (typeof t === "number" && (firstSeWholeInMeasure === null || t < firstSeWholeInMeasure)) {
+                firstSeWholeInMeasure = t;
+              }
+            }
+          }
+          const measureOriginWhole =
+            mIdx === 0 && activeTimeline.hasPickup && firstSeWholeInMeasure !== null
+              ? firstSeWholeInMeasure
+              : measureAbsWhole ?? firstSeWholeInMeasure ?? 0;
+
           for (let sIdx = 0; sIdx < row.length; sIdx++) {
             const gm = row[sIdx] as unknown as {
               MeasureNumber?: number;
               parentSourceMeasure?: { MeasureNumber?: number };
+              ParentMusicSystem?: {
+                Id?: number;
+                PositionAndShape?: { AbsolutePosition?: { y: number }; Size?: { height: number } };
+              };
               staffEntries?: Array<{
                 getAbsoluteTimestamp?: () => { RealValue?: number };
                 graphicalVoiceEntries?: Array<{
                   notes?: Array<{
                     getSVGGElement?: () => Element | null;
-                    sourceNote?: { Pitch?: { halfTone?: number } };
+                    sourceNote?: {
+                      Pitch?: { halfTone?: number };
+                      isRest?: () => boolean;
+                      ParentStaffEntry?: { ParentStaff?: { idInMusicSheet?: number } };
+                    };
                   }>;
                 }>;
               }>;
             };
             if (!gm || !Array.isArray(gm.staffEntries)) continue;
             const mNum = gm.MeasureNumber ?? gm.parentSourceMeasure?.MeasureNumber ?? mIdx + 1;
+            const mWholeStart =
+              measureStartByIndex.get(mIdx) ?? measureStartByNumber.get(mNum) ?? 0;
+            const sys = gm.ParentMusicSystem;
+            const sysTop =
+              sys?.PositionAndShape?.AbsolutePosition ? sys.PositionAndShape.AbsolutePosition.y * scale : 0;
+            const sysHeight =
+              sys?.PositionAndShape?.Size ? Math.max(40, sys.PositionAndShape.Size.height * scale) : 120;
+            const sysIdx = typeof sys?.Id === "number" ? sys.Id : mIdx;
+
             for (const se of gm.staffEntries) {
-              const onsetWhole = se.getAbsoluteTimestamp?.()?.RealValue ?? 0;
+              const rawOnsetWhole = se.getAbsoluteTimestamp?.()?.RealValue ?? 0;
+              const beatOffsetWhole = Math.max(0, rawOnsetWhole - measureOriginWhole);
+              const scoreWhole = mWholeStart + beatOffsetWhole;
+              const timelineSec = wholeNotesToTimeSec(activeTimeline, scoreWhole, tempoBpm);
+
               for (const gve of se.graphicalVoiceEntries || []) {
                 for (const gn of gve.notes || []) {
                   const svgEl = gn.getSVGGElement?.();
                   if (!svgEl) continue;
+                  const isRest = typeof gn.sourceNote?.isRest === "function" ? gn.sourceNote.isRest() : false;
                   const halfTone = gn.sourceNote?.Pitch?.halfTone;
                   const midi = typeof halfTone === "number" ? halfTone + 12 : null;
                   const target: XmlNoteTarget = {
                     partIndex: sIdx,
                     measureNumber: mNum,
-                    onsetWhole,
+                    onsetWhole: rawOnsetWhole,
                     pitchMidi: midi,
                   };
                   newMap.set(svgEl, target);
                   svgEl.setAttribute("data-mxml-note", "true");
+
+                  if (isRest) continue;
+
+                  // Match rendered SVG notehead to canonical ScoreNote
+                  let matchedNote: ScoreNote | null = null;
+                  if (midi !== null) {
+                    const candidates = notesByPitch.get(midi) || [];
+                    let bestDist = Infinity;
+                    for (const cand of candidates) {
+                      if (usedNoteIds.has(cand.id)) continue;
+                      const d = Math.abs(cand.onset_sec - timelineSec);
+                      const trackPenalty = cand.track_index === sIdx ? 0 : 0.005;
+                      if (d <= 0.35 && d + trackPenalty < bestDist) {
+                        bestDist = d + trackPenalty;
+                        matchedNote = cand;
+                      }
+                    }
+                    if (matchedNote) {
+                      usedNoteIds.add(matchedNote.id);
+                    }
+                  }
+
+                  const canonicalOnset = matchedNote ? matchedNote.onset_sec : timelineSec;
+                  const canonicalEnd = matchedNote ? matchedNote.offset_sec : timelineSec + 0.25;
+                  const bucketKey = Math.round(canonicalOnset * 1000);
+                  const staffId = gn.sourceNote?.ParentStaffEntry?.ParentStaff?.idInMusicSheet ?? sIdx;
+                  const track = tracks[matchedNote ? matchedNote.track_index : staffId] ?? tracks[staffId];
+                  const role = resolveTrackVoiceRole(track);
+
+                  if (!eventBuckets.has(bucketKey)) {
+                    eventBuckets.set(bucketKey, {
+                      onsetSec: canonicalOnset,
+                      endSec: canonicalEnd,
+                      systemIndex: sysIdx,
+                      top: sysTop,
+                      height: sysHeight,
+                      noteheads: [],
+                      noteIds: new Set<string>(),
+                      cachedLeft: null,
+                    });
+                  }
+                  const bucket = eventBuckets.get(bucketKey)!;
+                  bucket.endSec = Math.max(bucket.endSec, canonicalEnd);
+                  if (matchedNote) bucket.noteIds.add(matchedNote.id);
+                  bucket.noteheads.push({
+                    svgEl,
+                    role,
+                    trackIndex: matchedNote ? matchedNote.track_index : staffId,
+                    pitchMidi: midi,
+                    noteId: matchedNote ? matchedNote.id : null,
+                  });
                 }
               }
             }
@@ -587,6 +840,9 @@ export function SheetMusicViewer({
       // Ignore graphic indexing errors
     }
     svgNoteTargetMapRef.current = newMap;
+    renderedEventsRef.current = Array.from(eventBuckets.values()).sort(
+      (a, b) => a.onsetSec - b.onsetSec,
+    );
   };
 
   useEffect(() => {

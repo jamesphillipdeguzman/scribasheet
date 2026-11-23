@@ -29,6 +29,7 @@ const {
       isRest?: boolean;
       offsetLeft: number;
     }>,
+    measureList: [] as unknown[],
     idx: 0,
     cursorEl: document.createElement("img"),
   };
@@ -131,7 +132,9 @@ vi.mock("opensheetmusicdisplay", () => ({
         },
       },
       GraphicSheet: {
-        MeasureList: [],
+        get MeasureList() {
+          return mockOsmdState.measureList;
+        },
       },
     };
   },
@@ -250,7 +253,7 @@ describe("Piano Sampler Preloading, Pickup Timing & Spacebar Playback", () => {
       rafCb = cb;
       return 1;
     });
-    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => { });
 
     const startPromise = synth.start({
       notes: sampleNotes,
@@ -297,7 +300,7 @@ describe("Piano Sampler Preloading, Pickup Timing & Spacebar Playback", () => {
       rafCb = cb;
       return 1;
     });
-    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => { });
 
     await act(async () => {
       samplerInstances[0].rejectLoad(new Error("network offline"));
@@ -440,7 +443,7 @@ describe("Piano Sampler Preloading, Pickup Timing & Spacebar Playback", () => {
     installMockAudio("running");
     vi.spyOn(midiSynth, "needsSamplerWait").mockReturnValue(false);
     const synthStartSpy = vi.spyOn(midiSynth, "start").mockResolvedValue(undefined);
-    const synthStopSpy = vi.spyOn(midiSynth, "stop").mockImplementation(() => {});
+    const synthStopSpy = vi.spyOn(midiSynth, "stop").mockImplementation(() => { });
 
     function StudioHarness() {
       const [isPlaying, setIsPlaying] = useState(false);
@@ -554,7 +557,7 @@ describe("Piano Sampler Preloading, Pickup Timing & Spacebar Playback", () => {
     }));
 
     const rafCallbacks: FrameRequestCallback[] = [];
-    const cancelSpy = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+    const cancelSpy = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => { });
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
       rafCallbacks.push(cb);
       return rafCallbacks.length;
@@ -777,7 +780,7 @@ describe("Piano Sampler Preloading, Pickup Timing & Spacebar Playback", () => {
     }));
 
     const rafCallbacks: FrameRequestCallback[] = [];
-    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => { });
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
       rafCallbacks.push(cb);
       return rafCallbacks.length;
@@ -823,5 +826,184 @@ describe("Piano Sampler Preloading, Pickup Timing & Spacebar Playback", () => {
       rafCallbacks[rafCallbacks.length - 1]?.(performance.now());
     });
     expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "500px" });
+  });
+
+  it("drives both SATB notehead highlights and vertical playhead from canonical active notes across pickup, Measure 1, simultaneous SATB, rests, and system wraps", async () => {
+    const makeSvgNote = (leftX: number) => {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("fill", "#000000");
+      const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      g.appendChild(path);
+      g.getBoundingClientRect = () =>
+        ({ left: leftX, right: leftX + 12, top: 20, bottom: 30, width: 12, height: 10, x: leftX, y: 20, toJSON: () => ({}) }) as DOMRect;
+      return { g, path };
+    };
+
+    const pickupSop = makeSvgNote(60);
+    const m1Sop = makeSvgNote(180);
+    const m1Bass = makeSvgNote(182);
+    const m2Sop = makeSvgNote(320);
+
+    // Override GraphicSheet.MeasureList for this test via a local XML and spy
+    const pickupXml = `<?xml version="1.0" encoding="utf-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>1</divisions><time><beats>3</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="1">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>3</duration><type>half</type><dot/></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>3</duration><type>half</type><dot/></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>1</divisions><time><beats>3</beats><beat-type>4</beat-type></time></attributes>
+      <note><rest/><duration>1</duration><type>quarter</type></note>
+    </measure>
+    <measure number="1">
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>3</duration><type>half</type><dot/></note>
+    </measure>
+    <measure number="2">
+      <note><rest/><duration>3</duration><type>half</type><dot/></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const satb2Tracks: ScoreTrack[] = [
+      { index: 0, name: "Soprano", instrument: "piano", clef: "treble", program: 0, muted: false },
+      { index: 1, name: "Bass", instrument: "piano", clef: "bass", program: 0, muted: false },
+    ];
+    const satbNotes: ScoreNote[] = [
+      { id: "n_p0", pitch_midi: 67, onset_sec: 0.0, offset_sec: 0.5, velocity: 90, track_index: 0 },
+      { id: "n_m1_s", pitch_midi: 72, onset_sec: 0.5, offset_sec: 2.0, velocity: 90, track_index: 0 },
+      { id: "n_m1_b", pitch_midi: 48, onset_sec: 0.5, offset_sec: 2.0, velocity: 90, track_index: 1 },
+      { id: "n_m2_s", pitch_midi: 76, onset_sec: 2.0, offset_sec: 3.5, velocity: 90, track_index: 0 },
+    ];
+
+    // Attach MeasureList onto the mocked OSMD instance by spying on container getBoundingClientRect
+    const origGetBCR = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (
+        this.className?.includes?.("relative min-w-") ||
+        this.parentElement?.className?.includes?.("relative min-w-")
+      ) {
+        return { left: 0, right: 800, top: 0, bottom: 600, width: 800, height: 600, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+      }
+      return origGetBCR.call(this);
+    });
+
+    mockOsmdState.measureList = [
+      [
+        {
+          MeasureNumber: 0,
+          parentSourceMeasure: { MeasureNumber: 0, AbsoluteTimestamp: { RealValue: 0 } },
+          ParentMusicSystem: { Id: 0, PositionAndShape: { AbsolutePosition: { y: 2 }, Size: { height: 14 } } },
+          staffEntries: [
+            {
+              getAbsoluteTimestamp: () => ({ RealValue: 0.75 }), // Right-aligned pickup in OSMD
+              graphicalVoiceEntries: [{ notes: [{ getSVGGElement: () => pickupSop.g, sourceNote: { Pitch: { halfTone: 55 }, isRest: () => false } }] }],
+            },
+          ],
+        },
+      ],
+      [
+        {
+          MeasureNumber: 1,
+          parentSourceMeasure: { MeasureNumber: 1, AbsoluteTimestamp: { RealValue: 1.0 } },
+          ParentMusicSystem: { Id: 0, PositionAndShape: { AbsolutePosition: { y: 2 }, Size: { height: 14 } } },
+          staffEntries: [
+            {
+              getAbsoluteTimestamp: () => ({ RealValue: 1.0 }),
+              graphicalVoiceEntries: [{ notes: [{ getSVGGElement: () => m1Sop.g, sourceNote: { Pitch: { halfTone: 60 }, isRest: () => false } }] }],
+            },
+          ],
+        },
+        {
+          MeasureNumber: 1,
+          parentSourceMeasure: { MeasureNumber: 1, AbsoluteTimestamp: { RealValue: 1.0 } },
+          ParentMusicSystem: { Id: 0, PositionAndShape: { AbsolutePosition: { y: 2 }, Size: { height: 14 } } },
+          staffEntries: [
+            {
+              getAbsoluteTimestamp: () => ({ RealValue: 1.0 }),
+              graphicalVoiceEntries: [{ notes: [{ getSVGGElement: () => m1Bass.g, sourceNote: { Pitch: { halfTone: 36 }, isRest: () => false } }] }],
+            },
+          ],
+        },
+      ],
+      [
+        {
+          MeasureNumber: 2,
+          parentSourceMeasure: { MeasureNumber: 2, AbsoluteTimestamp: { RealValue: 1.75 } },
+          ParentMusicSystem: { Id: 1, PositionAndShape: { AbsolutePosition: { y: 20 }, Size: { height: 16 } } },
+          staffEntries: [
+            {
+              getAbsoluteTimestamp: () => ({ RealValue: 1.75 }),
+              graphicalVoiceEntries: [{ notes: [{ getSVGGElement: () => m2Sop.g, sourceNote: { Pitch: { halfTone: 64 }, isRest: () => false } }] }],
+            },
+          ],
+        },
+      ],
+    ];
+
+    const { rerender } = render(
+      <SheetMusicViewer
+        musicxml={pickupXml}
+        notes={satbNotes}
+        playheadSec={0}
+        isPlaying={true}
+        tempoBpm={120}
+        tracks={satb2Tracks}
+      />,
+    );
+
+    // At t=0.0s: pickup notehead is highlighted blue & playhead sits at 60px
+    await waitFor(() => {
+      expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "60px" });
+    });
+    expect(pickupSop.path.getAttribute("fill")).toBe("#3b82f6");
+
+    // At t=0.5s (Measure 1 downbeat): Soprano blue & Bass purple are highlighted and cursor moves to shared Measure 1 X-position
+    rerender(
+      <SheetMusicViewer
+        musicxml={pickupXml}
+        notes={satbNotes}
+        playheadSec={0.5}
+        isPlaying={false}
+        tempoBpm={120}
+        tracks={satb2Tracks}
+      />,
+    );
+    await waitFor(() => {
+      expect(m1Sop.path.getAttribute("fill")).toBe("#3b82f6");
+      expect(m1Bass.path.getAttribute("fill")).toBe("#8b5cf6");
+      expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "182px" });
+    });
+
+    // At t=2.0s (Measure 2 on system 1): cursor wraps to new system height and 320px
+    rerender(
+      <SheetMusicViewer
+        musicxml={pickupXml}
+        notes={satbNotes}
+        playheadSec={2.0}
+        isPlaying={false}
+        tempoBpm={120}
+        tracks={satb2Tracks}
+      />,
+    );
+    await waitFor(() => {
+      expect(m2Sop.path.getAttribute("fill")).toBe("#3b82f6");
+      expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "320px" });
+    });
+
+    // Restore empty MeasureList for subsequent test isolation
+    mockOsmdState.measureList = [];
   });
 });
