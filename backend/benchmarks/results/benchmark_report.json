@@ -1,0 +1,75 @@
+{
+  "schema_version": "1.0",
+  "generated_at_utc": "2026-11-23T07:03:27.884865+00:00",
+  "manifest_path": "C:\\Users\\PC\\Documents\\.WEBSITES\\scribasheet\\backend\\benchmarks\\manifest.json",
+  "onset_tolerance_sec": 0.08,
+  "results": [
+    {
+      "id": "closer",
+      "name": "Closer",
+      "project_id": "53763f5e-3321-43fe-8952-ec66cd75ca6a",
+      "status": "incomplete_missing_audio",
+      "missing_assets": [
+        "audio_file"
+      ],
+      "audio_path": null,
+      "reference_midi": {
+        "path": "assets/midi/Closer Gehlee.mid",
+        "duration_sec": 186.231,
+        "tempo_bpm": 85.7,
+        "time_signature": "4/4",
+        "track_count": 1,
+        "piano_track_indices": [
+          0
+        ],
+        "note_count": 1253
+      },
+      "pipeline_output": null,
+      "performance_metrics": null,
+      "notation_metrics": null,
+      "notes": "Reference MIDI exists locally; original audio resides on remote Railway persistent volume and is not in the local workspace."
+    },
+    {
+      "id": "away_in_a_manger",
+      "name": "Away in a Manger",
+      "project_id": null,
+      "status": "incomplete_missing_assets",
+      "missing_assets": [
+        "audio_file",
+        "reference_midi_file"
+      ],
+      "audio_path": null,
+      "reference_midi": null,
+      "pipeline_output": null,
+      "performance_metrics": null,
+      "notation_metrics": null,
+      "notes": "Neither original audio nor ground-truth MIDI is present in the local workspace."
+    },
+    {
+      "id": "soft_easy_piano_calming_melody",
+      "name": "Soft Easy Piano Calming Melody (75 BPM F Major)",
+      "project_id": null,
+      "status": "incomplete_missing_reference_midi",
+      "missing_assets": [
+        "reference_midi_file"
+      ],
+      "audio_path": "assets/test_audio/soft-easy-piano-calming-melody_75bpm_F_major.wav",
+      "reference_midi": null,
+      "pipeline_output": {
+        "duration_seconds": 13.2,
+        "sample_rate": 22050,
+        "channels": 1,
+        "tempo_bpm": 75.0,
+        "time_signature": "4/4",
+        "key_signature": "F major",
+        "engine": "transkun",
+        "score_note_count": 52,
+        "performance_midi_note_count": 52,
+        "notation_midi_note_count": 52
+      },
+      "performance_metrics": null,
+      "notation_metrics": null,
+      "notes": "Local test audio exists and runs through the full production pipeline, but has no independent ground-truth MIDI."
+    }
+  ]
+}

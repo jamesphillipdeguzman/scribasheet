@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "onset_tolerance_sec": 0.08,
+  "entries": [
+    {
+      "id": "closer",
+      "name": "Closer",
+      "project_id": "53763f5e-3321-43fe-8952-ec66cd75ca6a",
+      "instrument": "piano",
+      "transcription_mode": "single_instrument",
+      "audio_path": null,
+      "reference_midi_path": "assets/midi/Closer Gehlee.mid",
+      "expected_status": "incomplete_missing_audio",
+      "notes": "Reference MIDI exists locally; original audio resides on remote Railway persistent volume and is not in the local workspace."
+    },
+    {
+      "id": "away_in_a_manger",
+      "name": "Away in a Manger",
+      "project_id": null,
+      "instrument": "piano_vocal",
+      "transcription_mode": "piano_vocal",
+      "audio_path": null,
+      "reference_midi_path": null,
+      "expected_status": "incomplete_missing_assets",
+      "notes": "Neither original audio nor ground-truth MIDI is present in the local workspace."
+    },
+    {
+      "id": "soft_easy_piano_calming_melody",
+      "name": "Soft Easy Piano Calming Melody (75 BPM F Major)",
+      "project_id": null,
+      "instrument": "piano",
+      "transcription_mode": "single_instrument",
+      "audio_path": "assets/test_audio/soft-easy-piano-calming-melody_75bpm_F_major.wav",
+      "reference_midi_path": null,
+      "expected_status": "incomplete_missing_reference_midi",
+      "notes": "Local test audio exists and runs through the full production pipeline, but has no independent ground-truth MIDI."
+    }
+  ]
+}

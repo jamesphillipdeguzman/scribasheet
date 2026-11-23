@@ -116,7 +116,13 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
           {railwayStatus && (
             <span className="text-xs text-[#A1A1AA]">
               Railway Heartbeat:{" "}
-              <span className={railwayStatus.worker_online ? "text-emerald-300 font-medium" : "text-amber-300 font-medium"}>
+              <span
+                className={
+                  railwayStatus.worker_online
+                    ? "text-emerald-700 font-semibold dark:text-emerald-400"
+                    : "text-amber-700 font-semibold dark:text-amber-300"
+                }
+              >
                 {railwayStatus.worker_online ? "Online" : "Offline"}
               </span>
               {railwayStatus.active_job_count > 0 && ` • ${railwayStatus.active_job_count} active`}

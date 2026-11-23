@@ -88,7 +88,7 @@ export function DashboardPage() {
 
   return (
     <AppShell>
-      <div className="relative mx-auto max-w-7xl px-4 py-8 sm:px-6 space-y-6">
+      <div className="relative mx-auto max-w-7xl px-4 pt-10 pb-8 sm:px-6 sm:pt-12 space-y-6">
         <AmbientScoreBackdrop variant="watermark" className="h-64 sm:h-72" />
         {/* Top Welcome & CTA */}
         <div className="relative z-10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">

@@ -55,7 +55,7 @@ export function WorkerStatusBadge({ className }: { className?: string }) {
       <span
         data-status="loading"
         className={cn(
-          "inline-flex items-center gap-2 rounded-full border border-[#27273A] bg-[#11111B] px-3 py-1 text-xs text-[#A1A1AA]",
+          "inline-flex items-center gap-2 rounded-full border border-slate-300 bg-slate-100 px-3 py-1 text-xs text-slate-700 dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#A1A1AA]",
           className
         )}
       >
@@ -73,7 +73,7 @@ export function WorkerStatusBadge({ className }: { className?: string }) {
         title={reason}
         aria-label={`Worker status unavailable: ${reason}`}
         className={cn(
-          "inline-flex items-center gap-2 rounded-full border border-[#27273A] bg-[#11111B] px-3 py-1 text-xs text-[#A1A1AA]",
+          "inline-flex items-center gap-2 rounded-full border border-slate-300 bg-slate-100 px-3 py-1 text-xs text-slate-700 dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#A1A1AA]",
           className
         )}
       >
@@ -88,15 +88,20 @@ export function WorkerStatusBadge({ className }: { className?: string }) {
     <span
       data-status={online ? "online" : "offline"}
       className={cn(
-        "inline-flex max-w-full items-center gap-1.5 whitespace-nowrap shrink-0 rounded-full border px-3 py-1 text-xs font-medium",
+        "inline-flex max-w-full items-center gap-1.5 whitespace-nowrap shrink-0 rounded-full border px-3 py-1 text-xs",
         online
-          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-          : "border-amber-500/30 bg-amber-500/10 text-amber-200",
+          ? "bg-emerald-50 text-emerald-800 border-emerald-300 font-semibold dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/35 dark:font-medium"
+          : "bg-amber-50 text-amber-800 border-amber-300 font-semibold dark:bg-amber-500/10 dark:text-amber-200 dark:border-amber-500/30 dark:font-medium",
         className
       )}
       data-testid="worker-status-badge"
     >
-      <span className={cn("h-2 w-2 shrink-0 rounded-full", online ? "bg-emerald-400" : "bg-amber-400")} />
+      <span
+        className={cn(
+          "h-2 w-2 shrink-0 rounded-full",
+          online ? "bg-emerald-600 dark:bg-emerald-400" : "bg-amber-600 dark:bg-amber-400"
+        )}
+      />
       <span>{online ? "Desktop Worker Online" : "Desktop Worker Offline"}</span>
       {!online && data.last_seen_seconds !== null && (
         <span className="text-[11px] opacity-80">({formatLastSeen(data.last_seen_seconds)})</span>
