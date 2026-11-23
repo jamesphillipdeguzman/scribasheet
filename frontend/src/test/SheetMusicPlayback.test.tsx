@@ -562,5 +562,54 @@ describe("Synchronized Sheet Music Playback View & Timeline", () => {
       "Christe",
       "amen",
     ]);
+
+    const passingToneSatbXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+    <score-part id="P3"><part-name>Tenor</part-name></score-part>
+    <score-part id="P4"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>half</type><lyric number="1"><text>All</text></lyric></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><type>half</type></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type><lyric number="1"><text>All</text></lyric></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type><lyric number="1"><text>bright</text></lyric></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>4</duration><type>half</type></note>
+    </measure>
+  </part>
+  <part id="P3">
+    <measure number="1">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><type>half</type></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type><lyric number="1"><syllabic>begin</syllabic><text>Je</text></lyric></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type></note>
+    </measure>
+  </part>
+  <part id="P4">
+    <measure number="1">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>8</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const preparedPassing = prepareDisplayMusicXml(passingToneSatbXml, true);
+    const passingDoc = new DOMParser().parseFromString(preparedPassing, "application/xml");
+    const passingParts = passingDoc.getElementsByTagName("part");
+    expect(
+      Array.from(passingParts[0].getElementsByTagName("text")).map((n) => n.textContent),
+    ).toEqual(["All", "bright Je"]);
+    expect(passingParts[1].getElementsByTagName("lyric")).toHaveLength(0);
+    expect(passingParts[2].getElementsByTagName("lyric")).toHaveLength(0);
+    expect(passingParts[3].getElementsByTagName("lyric")).toHaveLength(0);
   });
 });

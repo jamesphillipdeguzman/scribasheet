@@ -908,6 +908,7 @@ export function PianoRollEditor({
       ) : (
         <SheetMusicViewer
           musicxml={musicxml}
+          notes={notes}
           showChordSymbols={showChordSymbols}
           onToggleChordSymbols={onToggleChordSymbols}
           playheadSec={playheadSec}

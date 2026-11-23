@@ -102,7 +102,13 @@ vi.mock("opensheetmusicdisplay", () => ({
             return mockOsmdState.idx >= mockOsmdState.steps.length;
           },
           get CurrentMeasureIndex() {
-            return mockOsmdState.idx;
+            const cur = mockOsmdState.steps[mockOsmdState.idx];
+            if (!cur) return 0;
+            const seen = new Set<number>();
+            for (let i = 0; i <= mockOsmdState.idx; i++) {
+              seen.add(mockOsmdState.steps[i].measureNumber);
+            }
+            return Math.max(0, seen.size - 1);
           },
           get currentTimeStamp() {
             const cur = mockOsmdState.steps[mockOsmdState.idx];
@@ -324,6 +330,9 @@ describe("Piano Sampler Preloading, Pickup Timing & Spacebar Playback", () => {
     <measure number="1">
       <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>whole</type></note>
     </measure>
+    <measure number="2">
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
   </part>
 </score-partwise>`;
 
@@ -394,6 +403,31 @@ describe("Piano Sampler Preloading, Pickup Timing & Spacebar Playback", () => {
     );
     await waitFor(() => {
       expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "190px" });
+    });
+
+    // Passing note at beat 2 (0.75s with 0.5s pickup) + rest/tie does not shift timeline
+    mockOsmdState.steps = [
+      { realValue: 0.0, measureNumber: 0, durationReal: 0.25, num: 4, den: 4, offsetLeft: 50 },
+      { realValue: 1.0, measureNumber: 1, durationReal: 1.0, num: 4, den: 4, offsetLeft: 160 },
+      { realValue: 1.25, measureNumber: 1, durationReal: 1.0, num: 4, den: 4, offsetLeft: 210 },
+      { realValue: 1.5, measureNumber: 1, durationReal: 1.0, num: 4, den: 4, isRest: true, offsetLeft: 240 },
+    ];
+    rerender(
+      <SheetMusicViewer
+        musicxml={pickupXml}
+        notes={[
+          { id: "p0", pitch_midi: 67, onset_sec: 0.0, offset_sec: 0.5, velocity: 90, track_index: 0 },
+          { id: "m1_1", pitch_midi: 72, onset_sec: 0.5, offset_sec: 1.0, velocity: 90, track_index: 0 },
+          { id: "m1_pass", pitch_midi: 71, onset_sec: 1.0, offset_sec: 1.5, velocity: 80, track_index: 1 },
+        ]}
+        playheadSec={1.0}
+        isPlaying={false}
+        tempoBpm={120}
+        tracks={sampleTracks}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("sheet-music-playhead")).toHaveStyle({ left: "210px" });
     });
   });
 

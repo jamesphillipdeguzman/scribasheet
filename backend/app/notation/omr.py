@@ -591,21 +591,53 @@ def _consolidate_satb_lyrics_to_soprano(root: ET.Element) -> int:
         return 0
 
     sop_items = _collect_part_note_positions(parts[soprano_idx])
-    # Map (m_idx, onset_whole) -> Soprano non-rest note_el
+    sop_non_rest: list[tuple[int, float, float, ET.Element]] = []
     sop_notes_by_pos: dict[tuple[int, float], ET.Element] = {}
     sop_notes_by_measure: dict[int, list[tuple[float, ET.Element]]] = {}
     for m_idx, onset, n_el, is_rest in sop_items:
         if not is_rest:
+            sop_non_rest.append((m_idx, onset, m_idx + onset, n_el))
             sop_notes_by_pos[(m_idx, onset)] = n_el
             sop_notes_by_measure.setdefault(m_idx, []).append((onset, n_el))
 
-    def _find_sop_note(m_idx: int, onset: float) -> ET.Element | None:
+    if not sop_non_rest:
+        return 0
+
+    def _has_verse_on_note(note_el: ET.Element, v_num: str) -> bool:
+        return any((sl.attrib.get("number") or "1") == v_num for sl in note_el.findall("lyric"))
+
+    def _find_nearest_sop_note(m_idx: int, onset: float, v_num: str) -> tuple[ET.Element, bool]:
         if (m_idx, onset) in sop_notes_by_pos:
-            return sop_notes_by_pos[(m_idx, onset)]
-        for s_onset, n_el in sop_notes_by_measure.get(m_idx, []):
+            return sop_notes_by_pos[(m_idx, onset)], True
+        measure_notes = sop_notes_by_measure.get(m_idx, [])
+        for s_onset, n_el in measure_notes:
             if abs(s_onset - onset) <= 0.025:
-                return n_el
-        return None
+                return n_el, True
+        # Nearest note in same measure without this verse (handles passing-tone offsets)
+        free_in_measure = [
+            (abs(s_onset - onset), n_el)
+            for s_onset, n_el in measure_notes
+            if not _has_verse_on_note(n_el, v_num)
+        ]
+        if free_in_measure:
+            free_in_measure.sort(key=lambda x: x[0])
+            return free_in_measure[0][1], False
+        # Nearest Soprano note across adjacent measures without this verse
+        target_global = m_idx + onset
+        free_global = [
+            (abs(g_pos - target_global), n_el)
+            for _, _, g_pos, n_el in sop_non_rest
+            if not _has_verse_on_note(n_el, v_num)
+        ]
+        if free_global:
+            free_global.sort(key=lambda x: x[0])
+            return free_global[0][1], False
+        # Fallback: nearest Soprano note in same measure or globally
+        if measure_notes:
+            closest = min(measure_notes, key=lambda x: abs(x[0] - onset))
+            return closest[1], False
+        closest_global = min(sop_non_rest, key=lambda x: abs(x[2] - target_global))
+        return closest_global[3], False
 
     # Gather all lyrics per part & verse
     sop_lyrics_by_verse: dict[str, dict[tuple[int, float], str]] = {}
@@ -644,19 +676,32 @@ def _consolidate_satb_lyrics_to_soprano(root: ET.Element) -> int:
                         overlap_diff += 1
 
             total_overlap = overlap_same + overlap_diff
-            # Preserve genuine independent polytextual vocal parts
-            if total_overlap >= 4 and (overlap_diff / total_overlap) >= 0.4:
+            # Preserve genuine independent polytextual 2-part vocal scores
+            if len(vocal_part_indices) == 2 and total_overlap >= 4 and (overlap_diff / total_overlap) >= 0.4:
                 continue
 
             for m_idx, onset, n_el, lyr, txt in entries:
-                sop_note = _find_sop_note(m_idx, onset)
-                if sop_note is None:
-                    continue
-                already_on_sop = any((sl.attrib.get("number") or "1") == v_num for sl in sop_note.findall("lyric"))
+                sop_note, _ = _find_nearest_sop_note(m_idx, onset, v_num)
+                already_on_sop = _has_verse_on_note(sop_note, v_num)
                 if not already_on_sop:
                     sop_note.append(deepcopy(lyr))
                     sop_lyrics_by_verse.setdefault(v_num, {})[(m_idx, onset)] = txt
                     consolidated_count += 1
+                elif txt:
+                    existing_lyr = next(
+                        (sl for sl in sop_note.findall("lyric") if (sl.attrib.get("number") or "1") == v_num),
+                        None,
+                    )
+                    existing_txt_el = existing_lyr.find("text") if existing_lyr is not None else None
+                    existing_txt = (existing_txt_el.text or "").strip() if existing_txt_el is not None else ""
+                    existing_words = existing_txt.lower().split()
+                    if (
+                        existing_txt_el is not None
+                        and existing_txt
+                        and existing_txt.lower() != txt.lower()
+                        and txt.lower() not in existing_words
+                    ):
+                        existing_txt_el.text = f"{existing_txt} {txt}"
                 n_el.remove(lyr)
 
     # Sort <lyric> elements by verse number on Soprano notes

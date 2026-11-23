@@ -644,6 +644,54 @@ def test_satb_preserves_genuine_polytextual_vocal_lyrics():
     assert [t.text for t in parts[1].findall(".//lyric/text")] == ["Kyrie", "eleison", "Christe", "amen"]
 
 
+def test_satb_transfers_orphaned_passing_tone_lyrics_and_clears_all_lower_staves():
+    passing_tone_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+    <score-part id="P3"><part-name>Tenor</part-name></score-part>
+    <score-part id="P4"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>half</type><lyric number="1"><text>All</text></lyric></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><type>half</type></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type><lyric number="1"><text>All</text></lyric></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type><lyric number="1"><text>bright</text></lyric></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>4</duration><type>half</type></note>
+    </measure>
+  </part>
+  <part id="P3">
+    <measure number="1">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><type>half</type></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type><lyric number="1"><syllabic>begin</syllabic><text>Je</text></lyric></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type></note>
+    </measure>
+  </part>
+  <part id="P4">
+    <measure number="1">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>8</duration><type>whole</type><lyric number="1"><text>All</text></lyric></note>
+    </measure>
+  </part>
+</score-partwise>"""
+    cleaned, _ = sanitize_omr_musicxml(passing_tone_xml)
+    root = ET.fromstring(cleaned)
+    parts = root.findall("part")
+    assert [t.text for t in parts[0].findall(".//lyric/text")] == ["All", "bright Je"]
+    assert len(parts[1].findall(".//lyric")) == 0
+    assert len(parts[2].findall(".//lyric")) == 0
+    assert len(parts[3].findall(".//lyric")) == 0
+
+
 def test_put_score_persists_direct_musicxml_edits(client, db_session) -> None:
     reg = client.post(
         "/api/v1/auth/register",

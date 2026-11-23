@@ -175,18 +175,93 @@ function consolidateSatbLyricsToSoprano(doc: Document): void {
   if (otherIndices.length === 0) return;
 
   const sopItems = collectPartNotePositions(parts[sopranoIdx]);
+  const sopNonRestNotes: Array<{ mIdx: number; onsetWhole: number; globalWhole: number; noteEl: Element }> = [];
   const sopByMeasure = new Map<number, Array<{ onsetWhole: number; noteEl: Element }>>();
   for (const it of sopItems) {
     if (!it.isRest) {
+      sopNonRestNotes.push({
+        mIdx: it.mIdx,
+        onsetWhole: it.onsetWhole,
+        globalWhole: it.mIdx + it.onsetWhole,
+        noteEl: it.noteEl,
+      });
       if (!sopByMeasure.has(it.mIdx)) sopByMeasure.set(it.mIdx, []);
       sopByMeasure.get(it.mIdx)!.push({ onsetWhole: it.onsetWhole, noteEl: it.noteEl });
     }
   }
-  const findSopNote = (mIdx: number, onset: number): Element | null => {
-    for (const s of sopByMeasure.get(mIdx) || []) {
-      if (Math.abs(s.onsetWhole - onset) <= 0.025) return s.noteEl;
+  if (sopNonRestNotes.length === 0) return;
+
+  const hasVerseOnNote = (noteEl: Element, vNum: string): boolean =>
+    Array.from(noteEl.getElementsByTagName("lyric")).some(
+      (sl) => (sl.getAttribute("number") || "1") === vNum,
+    );
+
+  const findNearestSopNote = (
+    mIdx: number,
+    onset: number,
+    vNum: string,
+  ): { noteEl: Element; exactMatch: boolean } => {
+    const measureNotes = sopByMeasure.get(mIdx) || [];
+    // 1. Exact onset match in same measure
+    for (const s of measureNotes) {
+      if (Math.abs(s.onsetWhole - onset) <= 0.025) {
+        return { noteEl: s.noteEl, exactMatch: true };
+      }
     }
-    return null;
+    // 2. Nearest note in same measure without this verse (handles passing-tone offsets)
+    let bestInMeasure: { onsetWhole: number; noteEl: Element } | null = null;
+    let bestInMeasureDist = Infinity;
+    for (const s of measureNotes) {
+      if (!hasVerseOnNote(s.noteEl, vNum)) {
+        const d = Math.abs(s.onsetWhole - onset);
+        if (d < bestInMeasureDist) {
+          bestInMeasureDist = d;
+          bestInMeasure = s;
+        }
+      }
+    }
+    if (bestInMeasure) {
+      return { noteEl: bestInMeasure.noteEl, exactMatch: false };
+    }
+    // 3. Nearest Soprano note across adjacent measures without this verse
+    const targetGlobal = mIdx + onset;
+    let bestGlobal: (typeof sopNonRestNotes)[number] | null = null;
+    let bestGlobalDist = Infinity;
+    for (const s of sopNonRestNotes) {
+      if (!hasVerseOnNote(s.noteEl, vNum)) {
+        const d = Math.abs(s.globalWhole - targetGlobal);
+        if (d < bestGlobalDist) {
+          bestGlobalDist = d;
+          bestGlobal = s;
+        }
+      }
+    }
+    if (bestGlobal) {
+      return { noteEl: bestGlobal.noteEl, exactMatch: false };
+    }
+    // 4. Fallback: nearest Soprano note in same measure or globally
+    if (measureNotes.length > 0) {
+      let closest = measureNotes[0];
+      let closestDist = Math.abs(closest.onsetWhole - onset);
+      for (const s of measureNotes) {
+        const d = Math.abs(s.onsetWhole - onset);
+        if (d < closestDist) {
+          closestDist = d;
+          closest = s;
+        }
+      }
+      return { noteEl: closest.noteEl, exactMatch: false };
+    }
+    let closestGlobal = sopNonRestNotes[0];
+    let closestGlobalDist = Math.abs(closestGlobal.globalWhole - targetGlobal);
+    for (const s of sopNonRestNotes) {
+      const d = Math.abs(s.globalWhole - targetGlobal);
+      if (d < closestGlobalDist) {
+        closestGlobalDist = d;
+        closestGlobal = s;
+      }
+    }
+    return { noteEl: closestGlobal.noteEl, exactMatch: false };
   };
 
   const sopLyricsByVerse = new Map<string, Array<{ mIdx: number; onset: number; txt: string }>>();
@@ -229,22 +304,37 @@ function consolidateSatbLyricsToSoprano(doc: Document): void {
         }
       }
       const totalOverlap = overlapSame + overlapDiff;
-      if (totalOverlap >= 4 && overlapDiff / totalOverlap >= 0.4) {
-        continue; // Preserve genuine independent polytextual vocal parts
+      if (vocalIndices.length === 2 && totalOverlap >= 4 && overlapDiff / totalOverlap >= 0.4) {
+        continue; // Preserve genuine independent polytextual 2-part vocal scores
       }
 
       for (const e of entries) {
-        const sopNote = findSopNote(e.mIdx, e.onset);
-        if (!sopNote) continue;
-        const already = Array.from(sopNote.getElementsByTagName("lyric")).some(
-          (sl) => (sl.getAttribute("number") || "1") === vNum,
-        );
+        const { noteEl: sopNote } = findNearestSopNote(e.mIdx, e.onset, vNum);
+        const already = hasVerseOnNote(sopNote, vNum);
         if (!already) {
           sopNote.appendChild(e.lyr.cloneNode(true));
           if (!sopLyricsByVerse.has(vNum)) sopLyricsByVerse.set(vNum, []);
           sopLyricsByVerse.get(vNum)!.push({ mIdx: e.mIdx, onset: e.onset, txt: e.txt });
+        } else if (e.txt) {
+          // Preserve distinct orphaned syllables that map to the same Soprano note
+          const existingLyr = Array.from(sopNote.getElementsByTagName("lyric")).find(
+            (sl) => (sl.getAttribute("number") || "1") === vNum,
+          );
+          const existingTxtEl = existingLyr?.getElementsByTagName("text")[0];
+          const existingTxt = (existingTxtEl?.textContent || "").trim();
+          const existingWords = existingTxt.toLowerCase().split(/\s+/);
+          if (
+            existingTxtEl &&
+            existingTxt &&
+            existingTxt.toLowerCase() !== e.txt.toLowerCase() &&
+            !existingWords.includes(e.txt.toLowerCase())
+          ) {
+            existingTxtEl.textContent = `${existingTxt} ${e.txt}`;
+          }
         }
-        e.noteEl.removeChild(e.lyr);
+        if (e.lyr.parentNode === e.noteEl) {
+          e.noteEl.removeChild(e.lyr);
+        }
       }
     }
   }

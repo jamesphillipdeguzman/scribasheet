@@ -880,6 +880,7 @@ export function ProjectStudioPage() {
                 ) : (
                   <SheetMusicViewer
                     musicxml={musicxml}
+                    notes={scoreData?.notes}
                     showChordSymbols={showChordSymbols}
                     onToggleChordSymbols={handleToggleChordSymbols}
                     playheadSec={playheadSec}

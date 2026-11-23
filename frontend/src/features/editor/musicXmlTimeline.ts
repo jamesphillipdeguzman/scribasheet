@@ -5,6 +5,7 @@ export interface MusicXmlTimeSegment {
   secEnd: number;
   tempoBpm: number;
   measureNumber: number;
+  measureIndex?: number;
 }
 
 export interface MusicXmlTimeline {
@@ -57,7 +58,8 @@ export function buildMusicXmlTimeline(
 
   for (let mIdx = 0; mIdx < measures.length; mIdx++) {
     const m = measures[mIdx];
-    const measureNum = Number.parseInt(m.getAttribute("number") || String(mIdx + 1), 10) || mIdx + 1;
+    const parsedNum = Number.parseInt(m.getAttribute("number") || "", 10);
+    const measureNum = Number.isFinite(parsedNum) ? parsedNum : mIdx + 1;
     let measureOffsetDiv = 0;
     let maxMeasureDiv = 0;
     const tempoEvents: Array<{ divOffset: number; tempoBpm: number }> = [];
@@ -127,6 +129,7 @@ export function buildMusicXmlTimeline(
           secEnd: curSec + segSec,
           tempoBpm: currentTempo,
           measureNumber: measureNum,
+          measureIndex: mIdx,
         });
         curWhole += segWhole;
         curSec += segSec;
@@ -145,6 +148,7 @@ export function buildMusicXmlTimeline(
         secEnd: curSec + remSec,
         tempoBpm: currentTempo,
         measureNumber: measureNum,
+        measureIndex: mIdx,
       });
       curWhole += remWhole;
       curSec += remSec;
