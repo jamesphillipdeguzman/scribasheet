@@ -307,7 +307,7 @@ export function DashboardPage() {
                           setRenamingId(p.id);
                           setRenameValue(p.title);
                         }}
-                        className="p-1.5 rounded-lg text-[#A1A1AA] hover:text-[#F5F3FF] hover:bg-[#181825]"
+                        className="p-2 rounded-lg text-stone-600 hover:bg-violet-50 hover:text-violet-700 border border-transparent hover:border-violet-200 transition-colors dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white dark:hover:border-white/10"
                       >
                         <Edit3 className="h-4 w-4" />
                       </button>
@@ -316,7 +316,7 @@ export function DashboardPage() {
                         title="Duplicate project"
                         aria-label="Duplicate project"
                         onClick={() => duplicateMutation.mutate(p.id)}
-                        className="p-1.5 rounded-lg text-[#A1A1AA] hover:text-[#F5F3FF] hover:bg-[#181825]"
+                        className="p-2 rounded-lg text-stone-600 hover:bg-violet-50 hover:text-violet-700 border border-transparent hover:border-violet-200 transition-colors dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white dark:hover:border-white/10"
                       >
                         <Copy className="h-4 w-4" />
                       </button>
@@ -325,7 +325,7 @@ export function DashboardPage() {
                         title="Delete project"
                         aria-label="Delete project"
                         onClick={() => deleteMutation.mutate(p.id)}
-                        className="p-1.5 rounded-lg text-[#A1A1AA] hover:text-red-400 hover:bg-red-500/10"
+                        className="p-2 rounded-lg text-stone-600 hover:bg-rose-50 hover:text-rose-700 border border-transparent hover:border-rose-200 transition-colors dark:text-slate-400 dark:hover:bg-rose-500/15 dark:hover:text-rose-300 dark:hover:border-rose-500/30"
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>

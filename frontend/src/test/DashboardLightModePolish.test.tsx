@@ -135,4 +135,66 @@ describe("Dashboard Light Mode Status Badges & Header Spacing", () => {
     expect(dashboardWrapper).not.toBeNull();
     expect(dashboardWrapper?.className).toContain("sm:pt-12");
   });
+
+  it("renders crisp Light Mode hover classes on Rename, Duplicate, and Delete project card icon buttons", async () => {
+    vi.spyOn(api, "getWorkerStatus").mockResolvedValue({
+      worker_online: true,
+      status: "online",
+      last_seen_seconds: 5,
+      worker_id: "win-1",
+      active_job_count: 0,
+      queue_depth: 0,
+      freshness_threshold_seconds: 45,
+    });
+    vi.spyOn(api, "listProjects").mockResolvedValue({
+      items: [
+        {
+          id: "proj-card-1",
+          user_id: "u1",
+          title: "Closer Piano Cover",
+          description: "",
+          status: "ready",
+          instrument: "piano",
+          transcription_mode: "single_instrument",
+          duration_seconds: 120,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          media_assets: [],
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={qc}>
+          <DashboardPage />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    const renameBtn = await screen.findByRole("button", { name: "Rename project" });
+    const duplicateBtn = screen.getByRole("button", { name: "Duplicate project" });
+    const deleteBtn = screen.getByRole("button", { name: "Delete project" });
+
+    for (const btn of [renameBtn, duplicateBtn]) {
+      expect(btn.className).toContain("text-stone-600");
+      expect(btn.className).toContain("hover:bg-violet-50");
+      expect(btn.className).toContain("hover:text-violet-700");
+      expect(btn.className).toContain("hover:border-violet-200");
+      expect(btn.className).toContain("dark:text-slate-400");
+      expect(btn.className).toContain("dark:hover:bg-white/10");
+      expect(btn.className).toContain("dark:hover:text-white");
+    }
+
+    expect(deleteBtn.className).toContain("text-stone-600");
+    expect(deleteBtn.className).toContain("hover:bg-rose-50");
+    expect(deleteBtn.className).toContain("hover:text-rose-700");
+    expect(deleteBtn.className).toContain("hover:border-rose-200");
+    expect(deleteBtn.className).toContain("dark:hover:bg-rose-500/15");
+    expect(deleteBtn.className).toContain("dark:hover:text-rose-300");
+  });
 });
