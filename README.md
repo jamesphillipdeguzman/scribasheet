@@ -1,6 +1,6 @@
 # ScribaSheet – AI Music Transcription Studio
 
-**From Sound to Sheet Music.**
+**Turn Audio Into Sheet Music.**
 
 ScribaSheet is a full-stack AI-powered music transcription studio that transforms audio recordings into editable sheet music, MIDI, MusicXML, printable PDFs, and synchronized song lyrics.
 
@@ -11,27 +11,27 @@ ScribaSheet is a full-stack AI-powered music transcription studio that transform
 ScribaSheet supports end-to-end music transcription and arrangement workflows:
 
 1. **Media & Score Ingestion**: Upload MP3, WAV, FLAC, M4A, AAC, MP4, MOV, WEBM audio/video, or choral sheet music (`.pdf`, `.mxl`, `.musicxml`), or record via browser microphone with server-side validation.
-2. **AI Transcription & Stem Separation**: Offloads heavy ML inference to a dedicated local Windows worker running Spotify Basic Pitch (ONNX Runtime), optional Transkun, Demucs stem separation (`vocals`, `bass`, `other`), and `faster-whisper` lyrics recognition.
-3. **PDF / MusicXML SATB Separation**: `.mxl` and `.musicxml` files parse directly via `music21` (skipping OMR); `.pdf` scores run OMR via Audiveris CLI (if installed) or `homr` (`backend/.venv_demucs` / `backend/.venv_omr`). Supports **Auto-Detect SATB** (4-staff, 2-staff multi-voice/homophonic, and piano-accompanied choral scores) and **Keep Original Staves**, flagging ambiguous voice assignments for review.
-4. **Arrangement & Music21 Engraving**: Builds single-instrument, Lead Melody, or 3-staff `Piano + Vocal` scores (`Vocal Melody` treble, `Piano Accompaniment (RH)` treble, `Piano Accompaniment (LH)` bass) with key-aware enharmonic spelling, beat/tempo tracking, and chord detection.
+2. **AI Transcription & Stem Separation**: Runs a unified transcription core (`app/transcription/core_pipeline.py`) across both the server pipeline and the local Windows worker using Spotify Basic Pitch (ONNX Runtime), optional Transkun for piano, Demucs stem separation (`vocals`, `bass`, `other`), Beat This! beat/downbeat tracking, and `faster-whisper` lyrics recognition.
+3. **PDF / MusicXML SATB Separation**: `.mxl` and `.musicxml` files parse directly via `music21` (skipping OMR); `.pdf` scores run OMR via Audiveris CLI (if installed) or `homr` (`backend/.venv_omr`). Supports **Auto-Detect SATB** (4-staff, 2-staff multi-voice/homophonic, and piano-accompanied choral scores) and **Keep Original Staves**, flagging ambiguous voice assignments for review.
+4. **Arrangement & Music21 Engraving**: Builds single-instrument, Lead Melody, or 3-staff `Piano + Vocal` scores (`Vocal Melody` treble, `Piano Accompaniment (RH)` treble, `Piano Accompaniment (LH)` bass) with key-aware enharmonic spelling, automatic meter detection (`2/4`, `3/4`, `4/4`, `6/8`), incomplete pickup measure (`Measure 0`, `implicit="yes"`) engraving, contextual Viterbi RH/LH hand assignment, dual performance/notation timing preservation, and dyad-aware chord detection.
 5. **Lyrics Transcription & Alignment**: Transcribes vocal lyrics (including English and Tagalog/Filipino), supports inline review/editing with timestamp playback, and aligns syllables (including explicit hyphens and melisma `<extend/>`) directly beneath `Vocal Melody` notes in MusicXML and PDF exports.
 6. **Interactive Studio Workspace**:
-   - **Sheet Music**: OpenSheetMusicDisplay MusicXML viewer with chord-symbol toggle and zoom controls.
+   - **Sheet Music**: Dual-engine **AlphaTab** (`@coderline/alphatab`) and **OpenSheetMusicDisplay** (`opensheetmusicdisplay`) MusicXML viewers with engine switching, chord-symbol toggle, zoom controls, follow-cursor, Focus Mode, and Light/Dark theme support (`scribasheet-theme`).
    - **SATB / Part Mixer**: Solo, Mute, Volume, Tempo, and voice assignment controls for SATB and multi-part scores.
-   - **Piano Roll Editor**: Note editing, Snap quantization (`1/16`, `1/8`, `Off`), Undo/Redo, plus an integrated 88-key Synthesia-style Virtual Piano with Web MIDI keyboard input, pitch correction, and synchronized MIDI recording.
+   - **Piano Roll & Practice Cascade**: Note editing, Snap quantization (`1/16`, `1/8`, `Off`), Undo/Redo, plus an integrated 88-key Synthesia-style Virtual Piano with Web MIDI keyboard input, pitch correction, synchronized MIDI recording, and Web Audio playback (`midiSynth`) protected by a master `DynamicsCompressorNode` and background-tab burst prevention.
    - **Chords & Guitar Tab**: Editable chord symbols and standard-tuning guitar tablature.
    - **Lyrics**: Review filters (`All` / `Needs Review`), inline segment editing, timestamp auditioning, and `.txt`/`.srt`/`.lrc` export.
-   - **Export Center**: Export `.mid`, `.musicxml`, `.pdf` sheet music, synthesized `.wav`, and individual SATB rehearsal MP3s (`Soprano.mp3`, `Alto.mp3`, `Tenor.mp3`, `Bass.mp3`) stored in R2/local storage.
+   - **Export Center**: Export `.mid` (preserving performance timing), `.musicxml`, `.pdf` sheet music, synthesized `.wav`, and individual SATB rehearsal MP3s (`Soprano.mp3`, `Alto.mp3`, `Tenor.mp3`, `Bass.mp3`) stored in R2/local storage.
 
 ---
 
 ## B. Technology Stack and Architecture
 
-- **Frontend (Vercel)**: React 18, TypeScript, Vite, Tailwind CSS, React Router, TanStack Query, WaveSurfer.js, OpenSheetMusicDisplay, Web Audio API (`midiSynth`), Web MIDI API (`useWebMidi`).
+- **Frontend (Vercel)**: React 18, TypeScript, Vite, Tailwind CSS, React Router, TanStack Query, WaveSurfer.js, AlphaTab (`@coderline/alphatab`), OpenSheetMusicDisplay (`opensheetmusicdisplay`), `smplr`, Web Audio API (`midiSynth`), Web MIDI API (`useWebMidi`).
 - **Backend API (Railway)**: Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2.0, Alembic, ReportLab, `music21`, `pretty_midi`, `boto3`.
 - **Database (Neon)**: Neon PostgreSQL (`ap-southeast-1`, Psycopg 3) with SQLite fallback for local development and isolated testing.
 - **Object Storage (Cloudflare R2)**: S3-compatible private bucket via `boto3` (`STORAGE_BACKEND=r2`), with `STORAGE_BACKEND=local` preserved for local development.
-- **Local Windows ML Worker**: `app.worker_agent` & `app.worker_controller` running Basic Pitch (ONNX CPU), optional Transkun, isolated `backend/.venv_demucs` for Demucs + `faster-whisper`, and FFmpeg.
+- **Local Windows ML Worker**: `app.worker_agent` & `app.worker_controller` running Basic Pitch (ONNX CPU), optional Transkun, Beat This!, isolated `backend/.venv_demucs` for Demucs + `faster-whisper`, and FFmpeg.
 
 ---
 
@@ -179,19 +179,35 @@ Open `http://localhost:5173`. FastAPI interactive docs are at `http://localhost:
 
 ---
 
-## Testing
+## Testing & Benchmarking
 
 ```powershell
-# Backend
+# Backend lint & tests
 cd backend
 .\.venv\Scripts\ruff.exe check app tests
 .\.venv\Scripts\python.exe -m pytest -q
 
-# Frontend
+# Backend audio-to-MIDI benchmark (writes JSON & Markdown reports to backend/benchmarks/results/)
+.\.venv\Scripts\python.exe -m benchmarks.run_benchmark
+
+# Frontend typecheck, production build & tests
 cd frontend
 npm run build
 npm test -- --run
 ```
+
+## Social Sharing & Link Previews
+
+Static Open Graph and Twitter/X Card metadata are defined directly in [`frontend/index.html`](frontend/index.html) so social crawlers receive complete preview tags in the initial HTML response:
+
+- **Canonical URL**: `https://scribasheet.vercel.app/`
+- **Preview Image**: [`frontend/public/images/og-preview.png`](frontend/public/images/og-preview.png) (`1200×630`, `1.91:1`, served at `https://scribasheet.vercel.app/images/og-preview.png`)
+- **Favicons & Touch Icons**: `/favicon.svg`, `/favicon-32x32.png`, and `/apple-touch-icon.png`
+
+After deploying to Vercel, validate link previews using:
+- [Facebook Sharing Debugger](https://developers.facebook.com/tools/debug/)
+- [LinkedIn Post Inspector](https://www.linkedin.com/post-inspector/)
+- X/Twitter Card preview tools (note: Instagram feed captions do not generate clickable Open Graph link previews; use the brand assets for Stories/bio links).
 
 ## Documentation Index
 
