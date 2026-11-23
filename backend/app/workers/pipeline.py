@@ -6,7 +6,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.audio.processor import MediaValidationError, preprocess_to_wav, probe_media
-from app.audio.separator import separate_audio_stems
+from app.audio.separator import detect_audio_source_route, separate_audio_stems
 from app.core.logging import job_id_ctx
 from app.db.session import SessionLocal
 from app.models import (
@@ -17,25 +17,21 @@ from app.models import (
     TranscriptionResult,
     UsageRecord,
 )
-from app.notation.analyzer import (
-    estimate_key_signature,
-    estimate_tempo,
-    get_instrument_program_and_clef,
-)
 from app.notation.generator import (
-    build_score_data,
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
-from app.notation.melody import (
-    extract_lead_melody,
-    is_lead_melody_mode,
-    normalize_transcription_mode,
-)
 from app.schemas.transcription import TranscriptionSettings
 from app.storage.service import storage_service
-from app.transcription.basic_pitch_provider import BasicPitchProvider
-from app.transcription.note_refiner import refine_detected_notes
+from app.transcription.core_pipeline import (
+    analyze_timing_and_build_score,
+    resolve_preprocessing_profile,
+    transcribe_and_refine_audio,
+)
+from app.transcription.provider_factory import (
+    get_target_sample_rate_for_engine,
+    resolve_engine_for_instrument,
+)
 from app.workers.ws_manager import job_ws_manager
 
 logger = logging.getLogger(__name__)
@@ -132,6 +128,10 @@ def run_transcription_pipeline(job_id: str) -> None:
             tmp_path = Path(tmpdir)
             processed_wav = tmp_path / "normalized.wav"
 
+            requested_engine, allow_fallback = resolve_engine_for_instrument(settings.instrument)
+            target_sr = get_target_sample_rate_for_engine(requested_engine)
+            prep_profile_name = resolve_preprocessing_profile(settings.instrument)
+
             # Stage 2: Preprocessing
             _update_job(
                 db,
@@ -139,16 +139,18 @@ def run_transcription_pipeline(job_id: str) -> None:
                 status="preprocessing",
                 progress=25,
                 stage="Preprocessing",
-                log_line="Normalizing audio to 22.05kHz mono WAV via FFmpeg/Librosa.",
+                log_line=f"Normalizing audio ({prep_profile_name} profile, {target_sr} Hz) to mono WAV.",
             )
-            proc_meta = preprocess_to_wav(local_source_path, processed_wav, target_sr=22050)
+            proc_meta = preprocess_to_wav(
+                local_source_path, processed_wav, target_sr=target_sr, profile=prep_profile_name
+            )
             asset.duration_seconds = proc_meta.duration_seconds
             asset.sample_rate = proc_meta.sample_rate
             asset.channels = meta.channels
             project.duration_seconds = proc_meta.duration_seconds
             db.commit()
 
-            transcription_target_wav = processed_wav
+            sep_res = None
             separation_note = "Direct transcription (source separation not requested)."
 
             # Stage 3: Optional Source Separation
@@ -159,9 +161,16 @@ def run_transcription_pipeline(job_id: str) -> None:
                     status="separating",
                     progress=40,
                     stage="Separating",
-                    log_line="Checking source separation backend availability.",
+                    log_line=f"Separating stems with Demucs ({settings.demucs_model}) when available.",
                 )
-                sep_res = separate_audio_stems(processed_wav, tmp_path / "stems")
+                sep_res = separate_audio_stems(
+                    local_source_path,
+                    tmp_path / "stems",
+                    enabled=True,
+                    model_name=settings.demucs_model,
+                    segment_sec=settings.demucs_segment_sec,
+                    overlap=settings.demucs_overlap,
+                )
                 separation_note = sep_res.message
                 if sep_res.available and sep_res.stems:
                     # Save generated stems as MediaAssets
@@ -184,8 +193,6 @@ def run_transcription_pipeline(job_id: str) -> None:
                             )
                         )
                     db.commit()
-                    if settings.mode == "vocal_melody" and "vocals" in sep_res.stems:
-                        transcription_target_wav = sep_res.stems["vocals"]
                 else:
                     _update_job(
                         db,
@@ -196,84 +203,67 @@ def run_transcription_pipeline(job_id: str) -> None:
                         log_line=sep_res.message,
                     )
 
-            # Stage 4: AI Audio-to-MIDI Transcription
+            source_route = detect_audio_source_route(
+                local_source_path,
+                sep_res.stems if sep_res and sep_res.available else None,
+                requested_source_type=settings.audio_source_type,
+                mode=settings.mode,
+            )
+
+            # Stage 4: AI Audio-to-MIDI Transcription via Provider Factory
             _update_job(
                 db,
                 job,
                 status="transcribing",
                 progress=58,
                 stage="Transcribing",
-                log_line="Running Spotify Basic Pitch neural network transcription.",
+                log_line=f"Running AI transcription (requested_engine={requested_engine}, allow_fallback={allow_fallback}).",
             )
-            program, _ = get_instrument_program_and_clef(settings.instrument)
-            provider = BasicPitchProvider()
-            t_out = provider.transcribe(
-                transcription_target_wav,
-                onset_threshold=settings.onset_threshold,
-                frame_threshold=settings.frame_threshold,
-                min_note_length_ms=settings.min_note_length_ms,
-                min_midi_pitch=settings.min_midi_pitch,
-                max_midi_pitch=settings.max_midi_pitch,
-                midi_program=program,
-                transpose_semitones=settings.transpose_semitones,
+            core_res = transcribe_and_refine_audio(
+                processed_wav,
+                tmp_path,
+                settings=settings,
+                requested_engine=requested_engine,
+                allow_fallback=allow_fallback,
+                target_sr=target_sr,
+                prep_profile_name=prep_profile_name,
+                sep_res=sep_res,
+                source_route=source_route,
             )
+            if core_res.exec_res.fallback_used:
+                logger.warning(
+                    "Job %s fell back from %s to %s: %s",
+                    job_id,
+                    core_res.exec_res.requested_engine,
+                    core_res.exec_res.actual_engine,
+                    core_res.exec_res.fallback_reason,
+                )
 
-            refinement = refine_detected_notes(t_out.notes)
-            refined_notes = refinement.notes or t_out.notes
-
-            # Stage 5: Musical Analysis & MusicXML Notation Generation
+            # Stage 5: Beat Tracking, TimingMap, Arrangement & MusicXML Notation Generation
             _update_job(
                 db,
                 job,
                 status="generating_notation",
                 progress=80,
                 stage="Generating Notation",
-                log_line=f"Detected {len(t_out.notes)} raw note events ({len(refined_notes)} refined). Analyzing tempo, key, chords, and building MusicXML.",
+                log_line=(
+                    f"Detected {len(core_res.raw_notes)} raw note events ({len(core_res.refined_notes)} refined) "
+                    f"with engine={core_res.exec_res.actual_engine}. Analyzing beats, TimingMap, key, arrangement, and MusicXML."
+                ),
             )
-            tempo_bpm, tempo_est = estimate_tempo(
-                processed_wav, settings.tempo_mode, settings.manual_tempo_bpm, notes=refined_notes
-            )
-            key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
-            time_sig = "4/4" if settings.time_signature == "auto" else settings.time_signature
-            time_est = settings.time_signature == "auto"
-
-            lead_melody_active = is_lead_melody_mode(settings.mode)
-            melody_result = None
-            final_notes = refined_notes
-            if lead_melody_active:
-                melody_result = extract_lead_melody(refined_notes, tempo_bpm=tempo_bpm)
-                final_notes = melody_result.notes or refined_notes
-
-            pipeline_analysis = {
-                "engine": t_out.engine,
-                "raw_note_count": len(t_out.notes),
-                "note_count": len(final_notes),
-                "refiner": refinement.stats,
-                "is_silent_audio": proc_meta.is_silent,
-                "separation": separation_note,
-                "mode": normalize_transcription_mode(settings.mode),
-            }
-            if melody_result is not None:
-                pipeline_analysis["melody_extraction"] = melody_result.stats
-                pipeline_analysis["melody_uncertain_segments"] = melody_result.uncertain_segments
-
-            score_data = build_score_data(
+            score_data = analyze_timing_and_build_score(
                 title=project.title,
-                detected_notes=final_notes,
-                tempo_bpm=tempo_bpm,
-                tempo_estimated=tempo_est,
-                time_signature=time_sig,
-                time_signature_estimated=time_est,
-                key_signature=key_sig,
-                key_signature_estimated=key_est,
-                duration_seconds=proc_meta.duration_seconds,
-                instrument=settings.instrument,
-                quantization=settings.quantization,
-                clef_override="treble" if lead_melody_active else None,
-                track_name_override="Lead Melody" if lead_melody_active else None,
-                chord_source_notes=refined_notes if lead_melody_active else None,
-                analysis=pipeline_analysis,
+                processed_wav=processed_wav,
+                proc_meta=proc_meta,
+                settings=settings,
+                core_res=core_res,
+                sep_res=sep_res,
+                source_route=source_route,
+                extra_analysis={"separation_note": separation_note},
             )
+            tempo_bpm = score_data.tempo_bpm
+            key_sig = score_data.key_signature
+            time_sig = score_data.time_signature
 
             musicxml_str = score_data_to_musicxml(score_data)
             midi_bytes = score_data_to_midi_bytes(score_data)

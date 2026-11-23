@@ -62,6 +62,10 @@ from app.transcription.basic_pitch_provider import (
     resolve_onnx_model_path,
     verify_onnx_cpu_runtime,
 )
+from app.transcription.core_pipeline import (
+    resolve_preprocessing_profile,
+    transcribe_and_refine_audio,
+)
 from app.transcription.lyrics import LyricsTranscriptionError, transcribe_lyrics
 from app.transcription.note_refiner import NoteRefinerConfig, refine_detected_notes
 from app.transcription.provider_factory import (
@@ -467,11 +471,7 @@ class RealTranscriptionHandler:
 
             # 3. Preprocess to target mono WAV (25%)
             self._check_cancelled(job_id, cancel_event)
-            prep_profile_name = (
-                "piano"
-                if "piano" in settings.instrument.lower()
-                else ("vocal" if "vocal" in settings.instrument.lower() else "general")
-            )
+            prep_profile_name = resolve_preprocessing_profile(settings.instrument)
             report_progress(
                 "preprocessing",
                 25,
@@ -541,79 +541,28 @@ class RealTranscriptionHandler:
                     else f"Detecting musical notes on CPU using {requested_engine}."
                 ),
             )
-            program, _ = get_instrument_program_and_clef(settings.instrument)
             refiner_cfg = NoteRefinerConfig()
-
-            def _run_transcribe(audio_target: Path, min_pitch: int, max_pitch: int, midi_prog: int):
-                return transcribe_with_provider(
-                    audio_target,
-                    engine=requested_engine,
-                    allow_fallback=allow_fallback,
-                    provider=self._provider if requested_engine == self.requested_engine else None,
-                    onset_threshold=settings.onset_threshold,
-                    frame_threshold=settings.frame_threshold,
-                    min_note_length_ms=settings.min_note_length_ms,
-                    min_midi_pitch=min_pitch,
-                    max_midi_pitch=max_pitch,
-                    midi_program=midi_prog,
-                    transpose_semitones=settings.transpose_semitones,
-                    concert_pitch_hz=settings.concert_pitch_hz,
-                )
-
-            vocal_refined_notes: list[Any] = []
-            bass_refined_notes: list[Any] = []
-            other_refined_notes: list[Any] = []
-
-            if is_vocal_melody_route and sep_res is not None:
-                vocal_wav = tmp_path / "stems_proc_vocals.wav"
-                preprocess_to_wav(sep_res.stems["vocals"], vocal_wav, target_sr=target_sr, profile="vocals")
-                exec_res = _run_transcribe(vocal_wav, settings.min_midi_pitch, settings.max_midi_pitch, 52)
-                vocal_raw = exec_res.output.notes
-                vocal_refined_notes = refine_detected_notes(vocal_raw, config=refiner_cfg).notes or vocal_raw
-
-                if "bass" in sep_res.stems:
-                    bass_wav = tmp_path / "stems_proc_bass.wav"
-                    preprocess_to_wav(sep_res.stems["bass"], bass_wav, target_sr=target_sr, profile="bass")
-                    bass_exec = _run_transcribe(bass_wav, max(24, settings.min_midi_pitch), min(64, settings.max_midi_pitch), 32)
-                    bass_raw = bass_exec.output.notes
-                    bass_refined_notes = refine_detected_notes(bass_raw, config=refiner_cfg).notes or bass_raw
-
-                if "other" in sep_res.stems:
-                    other_wav = tmp_path / "stems_proc_other.wav"
-                    preprocess_to_wav(sep_res.stems["other"], other_wav, target_sr=target_sr, profile=prep_profile_name)
-                    other_exec = _run_transcribe(other_wav, settings.min_midi_pitch, settings.max_midi_pitch, program)
-                    other_raw = other_exec.output.notes
-                    other_refined_notes = refine_detected_notes(other_raw, config=refiner_cfg).notes or other_raw
-
-                combined_stem_notes = sorted(
-                    [*vocal_refined_notes, *bass_refined_notes, *other_refined_notes],
-                    key=lambda n: (n.onset_sec, n.pitch_midi),
-                )
-                if not combined_stem_notes:
-                    exec_res = _run_transcribe(processed_wav, settings.min_midi_pitch, settings.max_midi_pitch, program)
-                    t_out = exec_res.output
-                    refinement = refine_detected_notes(t_out.notes, config=refiner_cfg)
-                    refined_notes = refinement.notes or t_out.notes
-                else:
-                    t_out = exec_res.output
-                    refinement = refine_detected_notes(combined_stem_notes, config=refiner_cfg)
-                    refined_notes = combined_stem_notes
-            else:
-                exec_res = _run_transcribe(processed_wav, settings.min_midi_pitch, settings.max_midi_pitch, program)
-                t_out = exec_res.output
-                if not t_out.notes:
-                    raise TranscriptionInferenceError(
-                        "NO_NOTES_DETECTED",
-                        "No valid musical notes were detected in the audio recording.",
-                    )
-                refinement = refine_detected_notes(t_out.notes, config=refiner_cfg)
-                refined_notes = refinement.notes or t_out.notes
-
-            if not refined_notes:
-                raise TranscriptionInferenceError(
-                    "NO_NOTES_DETECTED",
-                    "No valid musical notes were detected in the audio recording.",
-                )
+            core_res = transcribe_and_refine_audio(
+                processed_wav,
+                tmp_path,
+                settings=settings,
+                requested_engine=requested_engine,
+                allow_fallback=allow_fallback,
+                target_sr=target_sr,
+                prep_profile_name=prep_profile_name,
+                sep_res=sep_res,
+                source_route=source_route,
+                custom_provider=self._provider,
+                custom_provider_engine=self.requested_engine,
+                refiner_cfg=refiner_cfg,
+            )
+            exec_res = core_res.exec_res
+            t_out = exec_res.output
+            refined_notes = core_res.refined_notes
+            vocal_refined_notes = core_res.vocal_refined_notes
+            bass_refined_notes = core_res.bass_refined_notes
+            other_refined_notes = core_res.other_refined_notes
+            refinement_stats = core_res.refiner_stats
 
             # 5. Extract musical notes, tempo, key, and timing (70%)
             self._check_cancelled(job_id, cancel_event)
@@ -713,9 +662,9 @@ class RealTranscriptionHandler:
                 "fallback_used": exec_res.fallback_used,
                 "fallback_reason": exec_res.fallback_reason,
                 "model": t_out.metadata.get("model"),
-                "raw_note_count": len(t_out.notes),
+                "raw_note_count": len(core_res.raw_notes),
                 "note_count": len(arranged_notes),
-                "refiner": refinement.stats,
+                "refiner": refinement_stats,
                 "arrangement_detail": arrangement_detail_value,
                 "arrangement": arrangement_stats,
                 "quantization": settings.quantization,
