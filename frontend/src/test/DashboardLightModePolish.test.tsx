@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -196,5 +196,58 @@ describe("Dashboard Light Mode Status Badges & Header Spacing", () => {
     expect(deleteBtn.className).toContain("hover:border-rose-200");
     expect(deleteBtn.className).toContain("dark:hover:bg-rose-500/15");
     expect(deleteBtn.className).toContain("dark:hover:text-rose-300");
+  });
+
+  it("closes New Transcription Project modal via top-right X button, Escape key, and backdrop click", async () => {
+    vi.spyOn(api, "getWorkerStatus").mockResolvedValue({
+      worker_online: true,
+      status: "online",
+      last_seen_seconds: 5,
+      worker_id: "win-1",
+      active_job_count: 0,
+      queue_depth: 0,
+      freshness_threshold_seconds: 45,
+    });
+    vi.spyOn(api, "listProjects").mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 20,
+    });
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={qc}>
+          <DashboardPage />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    const openModalBtn = await screen.findByRole("button", { name: /New Transcription/i });
+
+    // 1. Close via X button
+    fireEvent.click(openModalBtn);
+    const closeBtn = screen.getByRole("button", { name: "Close modal" });
+    expect(closeBtn.className).toContain("text-stone-500");
+    expect(closeBtn.className).toContain("hover:text-stone-900");
+    expect(closeBtn.className).toContain("hover:bg-stone-100");
+    expect(closeBtn.className).toContain("dark:text-slate-400");
+    expect(closeBtn.className).toContain("dark:hover:text-white");
+    expect(closeBtn.className).toContain("dark:hover:bg-white/10");
+    fireEvent.click(closeBtn);
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // 2. Close via Escape key
+    fireEvent.click(openModalBtn);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // 3. Close via backdrop click
+    fireEvent.click(openModalBtn);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(dialog);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

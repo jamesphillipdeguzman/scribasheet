@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
@@ -10,6 +10,7 @@ import {
   Plus,
   Search,
   Trash2,
+  X,
 } from "lucide-react";
 import { AmbientScoreBackdrop } from "@/components/AmbientScoreBackdrop";
 import { AppShell } from "@/components/AppShell";
@@ -33,6 +34,17 @@ export function DashboardPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortBy, setSortBy] = useState("updated_at");
   const [showCreateModal, setShowCreateModal] = useState(false);
+
+  useEffect(() => {
+    if (!showCreateModal) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !createMutation.isPending) {
+        setShowCreateModal(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
 
   const [newTitle, setNewTitle] = useState("");
   const [newInstrument, setNewInstrument] = useState("piano");
@@ -340,9 +352,31 @@ export function DashboardPage() {
 
       {/* Create Project Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4" role="dialog" aria-modal="true">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !createMutation.isPending) {
+              setShowCreateModal(false);
+            }
+          }}
+        >
           <div className="w-full max-w-md rounded-2xl border border-[#27273A] bg-[#11111B] p-6 shadow-2xl space-y-4">
-            <h2 className="text-lg font-semibold">New Transcription Project</h2>
+            <div className="flex items-center justify-between gap-4 mb-4">
+              <h2 className="text-lg font-semibold">New Transcription Project</h2>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!createMutation.isPending) setShowCreateModal(false);
+                }}
+                disabled={createMutation.isPending}
+                aria-label="Close modal"
+                className="p-1.5 rounded-lg text-stone-500 hover:text-stone-900 hover:bg-stone-100 transition-colors dark:text-slate-400 dark:hover:text-white dark:hover:bg-white/10 disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
             <Input
               label="Project Title"
               placeholder="e.g., Chopin Prelude Sketch"
