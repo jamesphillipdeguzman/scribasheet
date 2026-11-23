@@ -15,6 +15,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
+import { AlphaTabSheetViewer } from "@/features/editor/AlphaTabSheetViewer";
 import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
 import { midiSynth } from "@/features/editor/midiSynth";
 import {
@@ -94,6 +95,7 @@ interface SheetMusicViewerProps {
   playheadSec?: number;
   isPlaying?: boolean;
   tempoBpm?: number;
+  playbackRate?: number;
   tracks?: ScoreTrack[];
   satbSoloVoice?: string | null;
   satbMutedVoices?: Record<string, boolean>;
@@ -103,6 +105,23 @@ interface SheetMusicViewerProps {
   isFocusMode?: boolean;
   onToggleFocusMode?: () => void;
   onMusicXmlChange?: (nextXml: string) => void;
+  defaultEngine?: "alphatab" | "osmd";
+}
+
+const ENGINE_PREF_KEY = "scribasheet:notation_engine";
+
+function getInitialNotationEngine(defaultEngine?: "alphatab" | "osmd"): "alphatab" | "osmd" {
+  if (defaultEngine) return defaultEngine;
+  try {
+    const saved = window.localStorage.getItem(ENGINE_PREF_KEY);
+    if (saved === "alphatab" || saved === "osmd") return saved;
+  } catch {
+    // ignore storage errors
+  }
+  if (typeof navigator !== "undefined" && /jsdom/i.test(navigator.userAgent)) {
+    return "osmd";
+  }
+  return "alphatab";
 }
 
 const EMPTY_NOTES: ScoreNote[] = [];
@@ -117,6 +136,7 @@ export function SheetMusicViewer({
   playheadSec = 0,
   isPlaying = false,
   tempoBpm = 120,
+  playbackRate = 1.0,
   tracks = EMPTY_TRACKS,
   satbSoloVoice = null,
   satbMutedVoices = EMPTY_MUTED,
@@ -126,7 +146,51 @@ export function SheetMusicViewer({
   isFocusMode = false,
   onToggleFocusMode,
   onMusicXmlChange,
+  defaultEngine,
 }: SheetMusicViewerProps) {
+  const [engine, setEngine] = useState<"alphatab" | "osmd">(() =>
+    getInitialNotationEngine(defaultEngine),
+  );
+  const handleEngineChange = (next: "alphatab" | "osmd") => {
+    setEngine(next);
+    try {
+      window.localStorage.setItem(ENGINE_PREF_KEY, next);
+    } catch {
+      // ignore storage errors
+    }
+  };
+  const engineSwitcher = (
+    <div
+      role="group"
+      aria-label="Sheet music engine"
+      className="inline-flex rounded-lg border border-[#27273A] bg-[#09090F] p-0.5 text-[11px]"
+    >
+      <button
+        type="button"
+        aria-pressed={engine === "alphatab"}
+        onClick={() => handleEngineChange("alphatab")}
+        className={`rounded-md px-2 py-0.5 font-medium transition-colors ${
+          engine === "alphatab"
+            ? "bg-[#8B5CF6] text-[#F5F3FF]"
+            : "text-[#A1A1AA] hover:text-[#F5F3FF]"
+        }`}
+      >
+        AlphaTab
+      </button>
+      <button
+        type="button"
+        aria-pressed={engine === "osmd"}
+        onClick={() => handleEngineChange("osmd")}
+        className={`rounded-md px-2 py-0.5 font-medium transition-colors ${
+          engine === "osmd"
+            ? "bg-[#8B5CF6] text-[#F5F3FF]"
+            : "text-[#A1A1AA] hover:text-[#F5F3FF]"
+        }`}
+      >
+        OSMD
+      </button>
+    </div>
+  );
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
@@ -846,6 +910,7 @@ export function SheetMusicViewer({
   };
 
   useEffect(() => {
+    if (engine === "alphatab") return;
     const normalized = normalizeScorePayload(musicxml, effectiveShowChords);
     if (normalized.kind === "empty") {
       setResolvedXml(null);
@@ -964,7 +1029,7 @@ export function SheetMusicViewer({
       clearNoteheadHighlights();
       clearSelectedHighlight();
     };
-  }, [musicxml, zoom, effectiveShowChords]);
+  }, [engine, musicxml, zoom, effectiveShowChords]);
 
   // Clean up OSMD instance and listeners on unmount
   useEffect(() => {
@@ -1145,6 +1210,30 @@ export function SheetMusicViewer({
     }
   };
 
+  if (engine === "alphatab") {
+    return (
+      <AlphaTabSheetViewer
+        musicxml={musicxml}
+        notes={notes}
+        showChordSymbols={showChordSymbols}
+        onToggleChordSymbols={onToggleChordSymbols}
+        playheadSec={playheadSec}
+        isPlaying={isPlaying}
+        tempoBpm={tempoBpm}
+        playbackRate={playbackRate}
+        tracks={tracks}
+        satbSoloVoice={satbSoloVoice}
+        satbMutedVoices={satbMutedVoices}
+        onTogglePlay={onTogglePlay}
+        onStopPlay={onStopPlay}
+        onSeek={onSeek}
+        isFocusMode={isFocusMode}
+        onToggleFocusMode={onToggleFocusMode}
+        engineSwitcher={engineSwitcher}
+      />
+    );
+  }
+
   if (payloadStatus === "empty" && !musicxml?.trim()) {
     return (
       <div
@@ -1195,6 +1284,7 @@ export function SheetMusicViewer({
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
+          {engineSwitcher}
           {onMusicXmlChange && (
             <button
               type="button"

@@ -992,6 +992,7 @@ export function ProjectStudioPage() {
                     playheadSec={playheadSec}
                     isPlaying={isPlaybackActive}
                     tempoBpm={scoreData?.tempo_bpm || 120}
+                    playbackRate={playbackRate}
                     tracks={scoreData?.tracks || []}
                     satbSoloVoice={satbSoloVoice}
                     satbMutedVoices={satbMutedVoices}

@@ -914,6 +914,7 @@ export function PianoRollEditor({
           playheadSec={playheadSec}
           isPlaying={isPlaying}
           tempoBpm={tempoBpm}
+          playbackRate={playbackRate}
           tracks={tracks}
           satbSoloVoice={satbSoloVoice}
           satbMutedVoices={satbMutedVoices}
