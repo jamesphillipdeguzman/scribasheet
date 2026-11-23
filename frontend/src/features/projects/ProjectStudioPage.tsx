@@ -730,7 +730,7 @@ export function ProjectStudioPage() {
             {scoreData && (
               <div className="text-xs text-[#A1A1AA] flex flex-wrap items-center gap-x-2 gap-y-1 mt-1">
                 <span className="whitespace-nowrap">
-                  {scoreData.tempo_bpm} BPM {scoreData.tempo_estimated ? "(est.)" : ""}
+                  {Math.round(scoreData.tempo_bpm)} BPM {scoreData.tempo_estimated ? "(est.)" : ""}
                 </span>
                 <span aria-hidden="true">•</span>
                 <span className="whitespace-nowrap">{scoreData.time_signature}</span>

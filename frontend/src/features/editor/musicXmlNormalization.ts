@@ -662,6 +662,49 @@ function stripArtificialPickupPadding(doc: Document): void {
   }
 }
 
+export function normalizeTempoMarkings(doc: Document): void {
+  for (const pmEl of Array.from(doc.getElementsByTagName("per-minute"))) {
+    const raw = (pmEl.textContent || "").trim();
+    if (!raw) continue;
+    const val = Number.parseFloat(raw);
+    if (Number.isFinite(val) && val > 0) {
+      const next = String(Math.round(val));
+      if (pmEl.textContent !== next) {
+        pmEl.textContent = next;
+      }
+    }
+  }
+
+  for (const soundEl of Array.from(doc.getElementsByTagName("sound"))) {
+    const rawTempo = soundEl.getAttribute("tempo");
+    if (!rawTempo) continue;
+    const val = Number.parseFloat(rawTempo.trim());
+    if (Number.isFinite(val) && val > 0) {
+      const next = String(Math.round(val));
+      if (rawTempo !== next) {
+        soundEl.setAttribute("tempo", next);
+      }
+    }
+  }
+
+  for (const wordsEl of Array.from(doc.getElementsByTagName("words"))) {
+    const txt = wordsEl.textContent;
+    if (!txt) continue;
+    let updated = txt.replace(
+      /(=\s*)(\d+\.\d+)/g,
+      (_match, prefix: string, num: string) => `${prefix}${Math.round(Number.parseFloat(num))}`,
+    );
+    updated = updated.replace(
+      /(\b)(\d+\.\d+)(\s*bpm\b)/gi,
+      (_match, pre: string, num: string, suf: string) =>
+        `${pre}${Math.round(Number.parseFloat(num))}${suf}`,
+    );
+    if (updated !== txt) {
+      wordsEl.textContent = updated;
+    }
+  }
+}
+
 export function prepareDisplayMusicXml(xml: string, showChords: boolean): string {
   const stripped = xml.replace(/^\uFEFF/, "").trim();
   if (!isMusicXmlDocument(stripped)) {
@@ -707,6 +750,7 @@ export function prepareDisplayMusicXml(xml: string, showChords: boolean): string
         sanitizeDocumentFooterLyrics(doc);
         consolidateSatbLyricsToSoprano(doc);
         stripArtificialPickupPadding(doc);
+        normalizeTempoMarkings(doc);
 
         const serialized = new XMLSerializer().serializeToString(doc).replace(/^\uFEFF/, "").trim();
         if (serialized.startsWith("<?xml")) {

@@ -387,6 +387,42 @@ def apply_scribasheet_musicxml_branding(xml_str: str, *, title: str | None = Non
         if (cw.text or "").strip().lower() == "music21":
             cw.text = "ScribaSheet"
 
+    for pm_el in root.iter("per-minute"):
+        raw = (pm_el.text or "").strip()
+        if raw:
+            try:
+                val = float(raw)
+                if val > 0:
+                    pm_el.text = str(int(round(val)))
+            except ValueError:
+                pass
+
+    for sound_el in root.iter("sound"):
+        raw_tempo = sound_el.get("tempo")
+        if raw_tempo:
+            try:
+                val = float(raw_tempo.strip())
+                if val > 0:
+                    sound_el.set("tempo", str(int(round(val))))
+            except ValueError:
+                pass
+
+    for words_el in root.iter("words"):
+        if words_el.text:
+            updated = re.sub(
+                r"(=\s*)(\d+\.\d+)",
+                lambda m: f"{m.group(1)}{int(round(float(m.group(2))))}",
+                words_el.text,
+            )
+            updated = re.sub(
+                r"(\b)(\d+\.\d+)(\s*bpm\b)",
+                lambda m: f"{m.group(1)}{int(round(float(m.group(2))))}{m.group(3)}",
+                updated,
+                flags=re.IGNORECASE,
+            )
+            if updated != words_el.text:
+                words_el.text = updated
+
     body = ET.tostring(root, encoding="unicode")
     if not body.lstrip().startswith("<?xml"):
         return f'<?xml version="1.0" encoding="UTF-8"?>\n{body}'
@@ -768,7 +804,7 @@ def _populate_part_from_notes(
             m.append(clef_obj)
             m.append(music21.meter.TimeSignature(time_sig))
             m.append(key_obj)
-            m.append(music21.tempo.MetronomeMark(number=round(tempo_bpm, 1)))
+            m.append(music21.tempo.MetronomeMark(number=int(round(float(tempo_bpm or 120.0)))))
         elif (m_idx - (1 if has_pickup else 0)) % 4 == 0:
             m.insert(0, music21.layout.SystemLayout(isNew=True))
 

@@ -157,3 +157,32 @@ def test_music21_chord_symbols_and_beaming_preserve_midi_parity() -> None:
         }
     )
     assert midi_pitches == xml_pitches
+
+
+def test_musicxml_engraving_rounds_decimal_tempo_markings() -> None:
+    detected = [
+        DetectedNote(pitch_midi=60, onset_sec=0.0, offset_sec=0.7, velocity=85),
+        DetectedNote(pitch_midi=64, onset_sec=0.7, offset_sec=1.4, velocity=85),
+    ]
+    for raw_bpm, expected_str in ((85.7, "86"), (85.4, "85"), (120.0, "120")):
+        score = build_score_data(
+            title="Closer Piano Cover",
+            detected_notes=detected,
+            tempo_bpm=raw_bpm,
+            tempo_estimated=True,
+            time_signature="4/4",
+            time_signature_estimated=False,
+            key_signature="C major",
+            key_signature_estimated=False,
+            duration_seconds=2.0,
+            instrument="piano",
+        )
+        assert score.tempo_bpm == raw_bpm
+        xml_str = score_data_to_musicxml(score)
+        root = ET.fromstring(xml_str)
+        per_mins = [el.text for el in root.findall(".//per-minute")]
+        sounds = [el.get("tempo") for el in root.findall(".//sound") if el.get("tempo")]
+        assert expected_str in per_mins
+        assert expected_str in sounds
+        assert str(raw_bpm) not in per_mins
+        assert str(raw_bpm) not in sounds
