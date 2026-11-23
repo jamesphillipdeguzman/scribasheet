@@ -1033,10 +1033,10 @@ export function PianoRollEditor({
               onClick={() => setMonitorEnabled((v) => !v)}
               aria-pressed={monitorEnabled}
               title="Toggle local MIDI audio monitoring"
-              className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] ${
+              className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors ${
                 monitorEnabled
-                  ? "border-[#8B5CF6]/50 bg-[#8B5CF6]/15 text-[#E4E4E7]"
-                  : "border-[#27273A] bg-[#181825] text-[#71717A]"
+                  ? "bg-emerald-600 text-white border-emerald-700 font-semibold dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/40"
+                  : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:bg-white/5 dark:hover:bg-white/10 dark:text-slate-200 dark:border-white/10"
               }`}
             >
               {monitorEnabled ? <Volume2 className="h-3 w-3" /> : <VolumeX className="h-3 w-3" />}
@@ -1049,10 +1049,10 @@ export function PianoRollEditor({
                   type="button"
                   onClick={() => setMetronomeEnabled((v) => !v)}
                   aria-pressed={metronomeEnabled}
-                  className={`rounded-md border px-2 py-1 text-[11px] ${
+                  className={`rounded-md border px-2 py-1 text-[11px] transition-colors ${
                     metronomeEnabled
-                      ? "border-[#8B5CF6]/50 bg-[#8B5CF6]/15 text-[#E4E4E7]"
-                      : "border-[#27273A] bg-[#181825] text-[#71717A]"
+                      ? "bg-violet-100 text-violet-900 border-violet-300 font-semibold dark:bg-[#8B5CF6]/15 dark:text-[#E4E4E7] dark:border-[#8B5CF6]/50"
+                      : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:bg-[#181825] dark:text-[#71717A] dark:border-[#27273A]"
                   }`}
                 >
                   Metronome

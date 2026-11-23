@@ -134,7 +134,7 @@ export function MetronomeControl({
         <div
           data-testid="metronome-beat-indicator"
           aria-label="Visual beat indicator"
-          className="inline-flex items-center gap-0.5 rounded border border-[#27273A] bg-[#09090F] px-1.5 py-0.5"
+          className="inline-flex items-center gap-0.5 rounded border border-stone-300 bg-stone-100 px-1.5 py-0.5 dark:border-[#27273A] dark:bg-[#09090F]"
         >
           {Array.from({ length: beatsPerBar }, (_, idx) => {
             const beatNum = idx + 1;
@@ -148,9 +148,9 @@ export function MetronomeControl({
                 className={`inline-flex h-4 w-4 items-center justify-center rounded-sm font-mono text-[10px] transition-colors ${
                   isActive
                     ? isDownbeat
-                      ? "bg-emerald-400 text-[#09090F] font-bold"
-                      : "bg-[#A78BFA] text-[#09090F] font-bold"
-                    : "text-[#71717A]"
+                      ? "bg-emerald-600 text-white font-bold dark:bg-emerald-400 dark:text-[#09090F]"
+                      : "bg-violet-600 text-white font-bold dark:bg-[#A78BFA] dark:text-[#09090F]"
+                    : "bg-white text-stone-700 border border-stone-300 font-medium dark:bg-white/5 dark:text-slate-400 dark:border-white/10"
                 }`}
               >
                 {beatNum}

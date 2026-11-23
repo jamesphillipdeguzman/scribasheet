@@ -552,10 +552,10 @@ export function PracticeCascade({
           {showBeatIndicator && (
             <span
               data-testid="cascade-beat-indicator"
-              className={`rounded px-1.5 py-0.5 font-mono text-[11px] border ${
+              className={`rounded px-1.5 py-0.5 font-mono text-[11px] border tabular-nums ${
                 effectivePlaying
-                  ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
-                  : "border-[#27273A] bg-[#181825] text-[#A1A1AA]"
+                  ? "bg-emerald-50 text-emerald-800 border-emerald-300 font-semibold dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/35"
+                  : "bg-stone-100 text-stone-700 border-stone-300 font-medium dark:border-[#27273A] dark:bg-[#181825] dark:text-[#A1A1AA]"
               }`}
             >
               Beat {currentBeat}

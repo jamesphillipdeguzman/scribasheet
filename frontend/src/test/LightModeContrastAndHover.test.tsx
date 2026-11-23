@@ -10,6 +10,7 @@ import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { VirtualPianoKeyboard } from "@/features/editor/VirtualPianoKeyboard";
 import { LandingPage } from "@/features/landing/LandingPage";
 import { MetronomeControl } from "@/features/editor/MetronomeControl";
+import { PracticeCascade } from "@/features/editor/PracticeCascade";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { MediaUploader } from "@/features/uploads/MediaUploader";
 import { setControllerToken, workerController } from "@/services/workerController";
@@ -351,6 +352,11 @@ describe("Light Mode Contrast & Hover-State Fixes", () => {
     expect(metroToggle.className).toContain("text-violet-900");
     expect(metroToggle.className).toContain("border-violet-300");
 
+    const beatStep2 = screen.getByTestId("metronome-beat-indicator").querySelector('[data-beat="2"]');
+    expect(beatStep2?.className).toContain("bg-white");
+    expect(beatStep2?.className).toContain("text-stone-700");
+    expect(beatStep2?.className).toContain("border-stone-300");
+
     fireEvent.click(screen.getByRole("button", { name: "Metronome settings" }));
     const dialog = screen.getByRole("dialog", { name: "Metronome Settings" });
     expect(dialog.className).toContain("w-80");
@@ -369,5 +375,65 @@ describe("Light Mode Contrast & Hover-State Fixes", () => {
     expect(stopClickBtn.className).toContain("text-rose-800");
     expect(stopClickBtn.className).toContain("border-rose-300");
     expect(stopClickBtn.className).toContain("font-semibold");
+  });
+
+  it("renders high-contrast Light Mode Beat counter pill and Monitor button", () => {
+    render(
+      <div>
+        <PracticeCascade
+          notes={[{ id: "n1", pitch_midi: 60, onset_sec: 0, offset_sec: 0.5, velocity: 85, track_index: 0 }]}
+          tracks={[]}
+          keyboardBodyRef={{ current: null }}
+          durationSeconds={4}
+          tempoBpm={120}
+          timeSignature="4/4"
+          playheadSec={0.2}
+          isPlaying={true}
+          activeMidiPitches={new Set()}
+          onTogglePlay={vi.fn()}
+          onStop={vi.fn()}
+          onPlayheadChange={vi.fn()}
+          playbackRate={1}
+          onPlaybackRateChange={vi.fn()}
+          loop={false}
+          onToggleLoop={vi.fn()}
+        />
+        <PianoRollEditor
+          notes={[]}
+          durationSeconds={4}
+          tempoBpm={120}
+          timeSignature="4/4"
+          playheadSec={0}
+          isPlaying={false}
+          selectedNoteId={null}
+          onSelectNote={vi.fn()}
+          onChangeNotes={vi.fn()}
+          onTogglePlay={vi.fn()}
+          onStopPlay={vi.fn()}
+          onPlayheadChange={vi.fn()}
+          playbackRate={1}
+          onPlaybackRateChange={vi.fn()}
+          loop={false}
+          onToggleLoop={vi.fn()}
+        />
+      </div>,
+    );
+
+    const beatPill = screen.getByTestId("cascade-beat-indicator");
+    expect(beatPill.className).toContain("bg-emerald-50");
+    expect(beatPill.className).toContain("text-emerald-800");
+    expect(beatPill.className).toContain("border-emerald-300");
+    expect(beatPill.className).toContain("dark:bg-emerald-500/15");
+    expect(beatPill.className).toContain("dark:text-emerald-300");
+
+    const monitorBtn = screen.getByRole("button", { name: "Monitor" });
+    expect(monitorBtn.className).toContain("bg-emerald-600");
+    expect(monitorBtn.className).toContain("text-white");
+    expect(monitorBtn.className).toContain("border-emerald-700");
+
+    fireEvent.click(monitorBtn);
+    expect(monitorBtn.className).toContain("bg-white");
+    expect(monitorBtn.className).toContain("text-stone-800");
+    expect(monitorBtn.className).toContain("border-stone-300");
   });
 });
