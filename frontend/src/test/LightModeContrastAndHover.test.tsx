@@ -432,10 +432,10 @@ describe("Light Mode Contrast & Hover-State Fixes", () => {
     expect(monitorBtn.className).toContain("border-emerald-700");
 
     const midiStatus = screen.getByTestId("midi-connection-status");
-    expect(midiStatus.className).toContain("bg-stone-100");
-    expect(midiStatus.className).toContain("text-stone-700");
-    expect(midiStatus.className).toContain("border-stone-300");
-    expect(midiStatus.className).toContain("dark:bg-white/5");
+    expect(midiStatus.className).toContain("bg-amber-50");
+    expect(midiStatus.className).toContain("text-amber-800");
+    expect(midiStatus.className).toContain("border-amber-300");
+    expect(midiStatus.className).toContain("dark:bg-amber-500/10");
 
     fireEvent.click(monitorBtn);
     expect(monitorBtn.className).toContain("bg-stone-100");
