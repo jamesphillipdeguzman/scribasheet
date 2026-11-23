@@ -356,9 +356,23 @@ def claim_next_job(
         project.status = "processing"
         db.commit()
 
+    job_settings = job.settings_json or {}
     source_asset = None
     if job.source_asset_id:
         source_asset = db.query(MediaAsset).filter(MediaAsset.id == job.source_asset_id).first()
+    if not source_asset and job_settings.get("source_media_id"):
+        source_asset = (
+            db.query(MediaAsset)
+            .filter(MediaAsset.id == job_settings["source_media_id"], MediaAsset.project_id == job.project_id)
+            .first()
+        )
+    if not source_asset:
+        source_asset = (
+            db.query(MediaAsset)
+            .filter(MediaAsset.project_id == job.project_id, MediaAsset.asset_type == "original")
+            .order_by(MediaAsset.created_at.desc())
+            .first()
+        )
 
     source_download_url: str | None = None
     if source_asset:
@@ -370,6 +384,12 @@ def claim_next_job(
                 f"{settings.API_V1_PREFIX}/uploads/{source_asset.id}/stream"
                 f"?sig={params['sig']}&exp={params['exp']}"
             )
+    elif job_settings.get("source_storage_key"):
+        params = storage_service.create_signed_download_params(str(job_settings["source_storage_key"]), job.user_id)
+        if "url" in params:
+            source_download_url = str(params["url"])
+    elif job_settings.get("external_media_url"):
+        source_download_url = str(job_settings["external_media_url"])
 
     artifact_targets: dict[str, dict[str, str | int]] = {}
     if storage_service.is_object_storage:

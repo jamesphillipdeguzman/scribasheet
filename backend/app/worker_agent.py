@@ -848,6 +848,10 @@ class RealTranscriptionHandler:
             )
 
 
+class TransientBackendError(RuntimeError):
+    """Raised when a backend endpoint still returns a transient 5xx after bounded retries."""
+
+
 class RemoteWorkerAgent:
     def __init__(
         self,
@@ -900,38 +904,58 @@ class RemoteWorkerAgent:
         url: str,
         *,
         json_payload: dict[str, Any],
-        max_attempts: int = 3,
+        max_attempts: int = 4,
         retry_statuses: tuple[int, ...] = (429, 502, 503, 504),
+        initial_backoff_sec: float = 1.0,
+        job_id: str | None = None,
     ) -> httpx.Response:
-        """POST with bounded retry for transient Railway cold-start or network errors."""
-        backoff = 1.0
-        for attempt in range(1, max(1, max_attempts) + 1):
+        """POST with bounded retry (max 3 retries, 1s/2s/4s exponential backoff) for transient Railway/network errors."""
+        total_attempts = max(1, max_attempts)
+        for attempt in range(1, total_attempts + 1):
             try:
                 resp = self._client.post(url, json=json_payload, headers=self._headers())
-                if resp.status_code in retry_statuses and attempt < max_attempts:
-                    wait_sec, backoff = self._compute_backoff(backoff, max_backoff=10.0)
-                    logger.warning(
-                        "Transient HTTP %s from %s (attempt %d/%d); retrying in %.1fs",
+                if resp.status_code in retry_statuses:
+                    if attempt < total_attempts:
+                        wait_sec = initial_backoff_sec * (2 ** (attempt - 1))
+                        logger.warning(
+                            "Transient HTTP %s from %s (job_id=%s, attempt %d/%d); retrying in %.1fs",
+                            resp.status_code,
+                            url,
+                            job_id,
+                            attempt,
+                            total_attempts,
+                            wait_sec,
+                        )
+                        if self._stop_event.wait(wait_sec):
+                            raise WorkerInterruptedError("Worker stopping during retry wait.")
+                        continue
+                    logger.error(
+                        "HTTP %s from %s exhausted retries (job_id=%s, attempts=%d)",
                         resp.status_code,
                         url,
-                        attempt,
-                        max_attempts,
-                        wait_sec,
+                        job_id,
+                        total_attempts,
                     )
-                    if self._stop_event.wait(wait_sec):
-                        raise WorkerInterruptedError("Worker stopping during retry wait.")
-                    continue
                 return resp
             except httpx.RequestError as exc:
-                if attempt >= max_attempts:
+                if attempt >= total_attempts:
+                    logger.error(
+                        "Network error (%s) calling %s exhausted retries (job_id=%s, attempts=%d): %s",
+                        type(exc).__name__,
+                        url,
+                        job_id,
+                        total_attempts,
+                        exc,
+                    )
                     raise
-                wait_sec, backoff = self._compute_backoff(backoff, max_backoff=10.0)
+                wait_sec = initial_backoff_sec * (2 ** (attempt - 1))
                 logger.warning(
-                    "Transient network error (%s) calling %s (attempt %d/%d); retrying in %.1fs",
+                    "Transient network error (%s) calling %s (job_id=%s, attempt %d/%d); retrying in %.1fs",
                     type(exc).__name__,
                     url,
+                    job_id,
                     attempt,
-                    max_attempts,
+                    total_attempts,
                     wait_sec,
                 )
                 if self._stop_event.wait(wait_sec):
@@ -950,12 +974,13 @@ class RemoteWorkerAgent:
         lease_lost: threading.Event,
         cancel_event: threading.Event,
     ) -> None:
+        hb_url = self._url(f"/worker/jobs/{job_id}/heartbeat")
         while not job_done.wait(self.heartbeat_interval_sec) and not self._stop_event.is_set():
             try:
-                resp = self._client.post(
-                    self._url(f"/worker/jobs/{job_id}/heartbeat"),
-                    json={"worker_id": self.worker_id},
-                    headers=self._headers(),
+                resp = self._post_with_retry(
+                    hb_url,
+                    json_payload={"worker_id": self.worker_id},
+                    job_id=job_id,
                 )
                 if resp.status_code in (403, 409):
                     logger.warning(
@@ -975,14 +1000,23 @@ class RemoteWorkerAgent:
                     self.worker_id,
                     data.get("lease_expires_at"),
                 )
+            except WorkerInterruptedError:
+                return
             except httpx.HTTPStatusError as exc:
                 logger.warning(
-                    "Heartbeat HTTP error for job %s (status=%s)",
+                    "Heartbeat HTTP error for job %s at %s (status=%s)",
                     job_id,
+                    hb_url,
                     exc.response.status_code,
                 )
             except Exception as exc:
-                logger.warning("Heartbeat transient error for job %s: %s", job_id, type(exc).__name__)
+                logger.warning(
+                    "Heartbeat transient error for job %s at %s: %s (%s)",
+                    job_id,
+                    hb_url,
+                    type(exc).__name__,
+                    exc,
+                )
 
     def run_once(self) -> bool:
         """Poll for and process at most one job. Returns True if a job was claimed."""
@@ -1027,22 +1061,40 @@ class RemoteWorkerAgent:
                 raise WorkerInterruptedError(f"Worker stopping; aborting progress for job {job_id}.")
             if lease_lost.is_set():
                 raise LeaseLostError(f"Aborting progress report for job {job_id}: lease lost.")
-            p_resp = self._client.post(
-                self._url(f"/worker/jobs/{job_id}/progress"),
-                json={
-                    "worker_id": self.worker_id,
-                    "status": status_str,
-                    "progress": progress,
-                    "current_stage": stage,
-                    "log_line": log_line,
-                },
-                headers=self._headers(),
-            )
+            progress_url = self._url(f"/worker/jobs/{job_id}/progress")
+            try:
+                p_resp = self._post_with_retry(
+                    progress_url,
+                    json_payload={
+                        "worker_id": self.worker_id,
+                        "status": status_str,
+                        "progress": progress,
+                        "current_stage": stage,
+                        "log_line": log_line,
+                    },
+                    job_id=job_id,
+                )
+            except httpx.RequestError as exc:
+                logger.warning(
+                    "Progress update failed after retries for job %s at %s (%s: %s); continuing transcription.",
+                    job_id,
+                    progress_url,
+                    type(exc).__name__,
+                    exc,
+                )
+                return
+
             if p_resp.status_code in (403, 409):
                 lease_lost.set()
                 cancel_event.set()
                 raise LeaseLostError(f"Progress rejected (HTTP {p_resp.status_code}) for job {job_id}.")
-            p_resp.raise_for_status()
+            if p_resp.status_code >= 400:
+                logger.warning(
+                    "Progress update returned HTTP %s for job %s at %s; continuing transcription.",
+                    p_resp.status_code,
+                    job_id,
+                    progress_url,
+                )
 
         try:
             result = self.handler.handle(job, report_progress, cancel_event)
@@ -1051,8 +1103,9 @@ class RemoteWorkerAgent:
             if lease_lost.is_set():
                 raise LeaseLostError(f"Lease lost before completion of job {job_id}.")
 
+            complete_url = self._url(f"/worker/jobs/{job_id}/complete")
             c_resp = self._post_with_retry(
-                self._url(f"/worker/jobs/{job_id}/complete"),
+                complete_url,
                 json_payload={
                     "worker_id": self.worker_id,
                     "is_simulated": result.is_simulated,
@@ -1065,20 +1118,26 @@ class RemoteWorkerAgent:
                     "duration_seconds": result.duration_seconds,
                     "metadata_json": result.metadata_json,
                 },
+                job_id=job_id,
             )
             if c_resp.status_code in (403, 409):
                 lease_lost.set()
                 cancel_event.set()
                 raise LeaseLostError(f"Completion rejected (HTTP {c_resp.status_code}) for job {job_id}.")
+            if c_resp.status_code in (429, 502, 503, 504):
+                raise TransientBackendError(
+                    f"Completion failed after retries (HTTP {c_resp.status_code}) for job {job_id} at {complete_url}."
+                )
             c_resp.raise_for_status()
             logger.info("Completed job %s (project=%s, worker_id=%s)", job_id, project_id, self.worker_id)
         except (LeaseLostError, WorkerInterruptedError) as exc:
             logger.warning("Stopped job %s without completing or failing: %s", job_id, exc)
-        except httpx.RequestError as exc:
+        except (httpx.RequestError, TransientBackendError) as exc:
             logger.warning(
-                "Transient network error during job %s (%s); leaving job for lease recovery.",
+                "Transient backend error during job %s (%s: %s); leaving job for lease recovery.",
                 job_id,
                 type(exc).__name__,
+                exc,
             )
             raise
         except Exception as exc:

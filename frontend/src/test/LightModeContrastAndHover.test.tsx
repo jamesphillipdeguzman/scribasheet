@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AppShell } from "@/components/AppShell";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/Button";
+import { StatusBadge } from "@/components/ui/Badge";
 import { WorkerControlPanel } from "@/components/WorkerControlPanel";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { VirtualPianoKeyboard } from "@/features/editor/VirtualPianoKeyboard";
@@ -14,7 +15,7 @@ import { PracticeCascade } from "@/features/editor/PracticeCascade";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { MediaUploader } from "@/features/uploads/MediaUploader";
 import { setControllerToken, workerController } from "@/services/workerController";
-import type { ScoreNote } from "@/types/api";
+import type { ScoreNote, TranscriptionJob } from "@/types/api";
 
 vi.mock("@/features/auth/AuthContext", () => ({
   useAuth: () => ({
@@ -441,5 +442,67 @@ describe("Light Mode Contrast & Hover-State Fixes", () => {
     expect(monitorBtn.className).toContain("bg-stone-100");
     expect(monitorBtn.className).toContain("text-stone-600");
     expect(monitorBtn.className).toContain("border-stone-300");
+  });
+
+  it("renders high-contrast Light Mode classes on failed StatusBadge and sidebar Retry Job error card", () => {
+    render(
+      <div>
+        <StatusBadge status="failed" />
+        <TranscriptionConfigPanel
+          hasMedia={true}
+          activeJob={{
+            id: "job-failed-1",
+            project_id: "proj-1",
+            user_id: "u1",
+            source_asset_id: "asset-orig-1",
+            status: "failed",
+            progress: 40,
+            current_stage: "Failed",
+            engine: "basic_pitch",
+            settings_json: { instrument: "piano", mode: "single_instrument" } as TranscriptionJob["settings_json"],
+            error_code: "MISSING_SOURCE_AUDIO",
+            error_message: "Job has no source_download_url.",
+            started_at: null,
+            completed_at: null,
+            created_at: new Date().toISOString(),
+          }}
+          defaultInstrument="piano"
+          defaultMode="single_instrument"
+          onStart={vi.fn()}
+          onCancel={vi.fn()}
+          onRetry={vi.fn()}
+          isStarting={false}
+        />
+      </div>,
+    );
+
+    const badge = screen.getByText("failed");
+    expect(badge.className).toContain("bg-red-50");
+    expect(badge.className).toContain("text-red-800");
+    expect(badge.className).toContain("border-red-300");
+    expect(badge.className).toContain("font-semibold");
+    expect(badge.className).toContain("dark:bg-red-500/15");
+    expect(badge.className).toContain("dark:text-red-300");
+    expect(badge.className).toContain("dark:border-red-500/35");
+
+    const errorCard = screen.getByTestId("sidebar-job-error-card");
+    expect(errorCard.className).toContain("bg-red-50");
+    expect(errorCard.className).toContain("border-red-300");
+    expect(errorCard.className).toContain("dark:bg-red-500/10");
+    expect(errorCard.className).toContain("dark:border-red-500/30");
+
+    const errorMsg = screen.getByText("Job has no source_download_url.");
+    expect(errorMsg.className).toContain("text-red-900");
+    expect(errorMsg.className).toContain("font-medium");
+    expect(errorMsg.className).toContain("break-words");
+    expect(errorMsg.className).toContain("dark:text-red-200");
+
+    const retryBtn = screen.getByRole("button", { name: /Retry Job/i });
+    expect(retryBtn.className).toContain("bg-white");
+    expect(retryBtn.className).toContain("text-red-900");
+    expect(retryBtn.className).toContain("border-red-300");
+    expect(retryBtn.className).toContain("font-semibold");
+    expect(retryBtn.className).toContain("dark:bg-white/10");
+    expect(retryBtn.className).toContain("dark:text-white");
   });
 });

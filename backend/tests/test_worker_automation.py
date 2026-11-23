@@ -318,3 +318,186 @@ def test_worker_coordinator_url_builder_supports_origin_and_api_v1_bases():
     assert "/api/v1/worker/jobs/{job_id}/fail" in registered_paths
     assert "/api/v1/worker/offline" in registered_paths
     assert "/api/v1/uploads/{upload_id}/stream" in registered_paths
+
+
+def test_worker_http_retries_502_503_504_timeouts_backoff_and_no_4xx_retry(monkeypatch):
+    wait_calls: list[float] = []
+
+    def make_agent(handler):
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        agent = RemoteWorkerAgent(
+            api_base_url="http://testserver/api/v1",
+            worker_token="tok",
+            worker_id="retry-worker",
+            poll_interval_sec=0.2,
+            heartbeat_interval_sec=0.2,
+            handler=PhaseATestHandler(0.05),
+            http_client=client,
+        )
+        monkeypatch.setattr(agent._stop_event, "wait", lambda sec: wait_calls.append(sec) or False)
+        return agent
+
+    # 1) 502 -> 503 -> 504 -> 200 (3 retries = 4 attempts total, backoff 1s, 2s, 4s)
+    attempts = {"count": 0}
+
+    def transient_statuses(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return httpx.Response(502, json={"detail": "Bad Gateway"})
+        if attempts["count"] == 2:
+            return httpx.Response(503, json={"detail": "Service Unavailable"})
+        if attempts["count"] == 3:
+            return httpx.Response(504, json={"detail": "Gateway Timeout"})
+        return httpx.Response(200, json={"ok": True})
+
+    agent = make_agent(transient_statuses)
+    resp = agent._post_with_retry(
+        "http://testserver/api/v1/worker/jobs/j1/progress",
+        json_payload={"worker_id": "retry-worker"},
+        job_id="j1",
+    )
+    assert resp.status_code == 200
+    assert attempts["count"] == 4
+    assert wait_calls == [1.0, 2.0, 4.0]
+
+    # 2) ReadTimeout -> ConnectError -> 200
+    wait_calls.clear()
+    net_attempts = {"count": 0}
+
+    def transient_network(request: httpx.Request) -> httpx.Response:
+        net_attempts["count"] += 1
+        if net_attempts["count"] == 1:
+            raise httpx.ReadTimeout("Timed out", request=request)
+        if net_attempts["count"] == 2:
+            raise httpx.ConnectError("Connection reset", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    agent2 = make_agent(transient_network)
+    resp2 = agent2._post_with_retry(
+        "http://testserver/api/v1/worker/jobs/j1/heartbeat",
+        json_payload={"worker_id": "retry-worker"},
+        job_id="j1",
+    )
+    assert resp2.status_code == 200
+    assert net_attempts["count"] == 3
+    assert wait_calls == [1.0, 2.0]
+
+    # 3) Permanent 4xx errors (400, 401, 403, 404) are never retried
+    for code in (400, 401, 403, 404):
+        wait_calls.clear()
+        client_attempts = {"count": 0}
+
+        def client_err(request: httpx.Request, status_code=code) -> httpx.Response:
+            client_attempts["count"] += 1
+            return httpx.Response(status_code, json={"detail": "Client error"})
+
+        agent3 = make_agent(client_err)
+        err_resp = agent3._post_with_retry(
+            "http://testserver/api/v1/worker/jobs/j1/progress",
+            json_payload={"worker_id": "retry-worker"},
+            job_id="j1",
+        )
+        assert err_resp.status_code == code
+        assert client_attempts["count"] == 1
+        assert wait_calls == []
+
+
+def test_worker_progress_502_does_not_abort_transcription_and_complete_retries_idempotently(
+    client, db_session, monkeypatch
+):
+    from tests.test_remote_worker_and_r2 import _setup_project_and_job
+
+    _user_headers, _project_id, job_id, _w_headers = _setup_project_and_job(client, db_session)
+    progress_calls = {"count": 0}
+    complete_calls = {"count": 0}
+    fail_calls = {"count": 0}
+
+    def proxy_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/progress"):
+            progress_calls["count"] += 1
+            # Simulate persistent 502 on progress reporting
+            return httpx.Response(502, json={"detail": "Bad Gateway"})
+        if path.endswith("/complete"):
+            complete_calls["count"] += 1
+            if complete_calls["count"] == 1:
+                # First complete hits backend, then proxy returns 502; second complete hits idempotent guard
+                res = client.post(path, content=request.content, headers=dict(request.headers))
+                assert res.status_code == 200
+                return httpx.Response(502, json={"detail": "Proxy 502 after upstream commit"})
+            res = client.post(path, content=request.content, headers=dict(request.headers))
+            return httpx.Response(res.status_code, content=res.content, headers=dict(res.headers))
+        if path.endswith("/fail"):
+            fail_calls["count"] += 1
+        res = client.post(path, content=request.content, headers=dict(request.headers))
+        return httpx.Response(res.status_code, content=res.content, headers=dict(res.headers))
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(proxy_handler))
+    agent = RemoteWorkerAgent(
+        api_base_url="http://testserver/api/v1",
+        worker_token=_w_headers["X-Worker-Token"],
+        worker_id="resilient-worker",
+        poll_interval_sec=0.2,
+        heartbeat_interval_sec=10.0,
+        handler=PhaseATestHandler(0.05),
+        http_client=mock_client,
+    )
+    monkeypatch.setattr(agent._stop_event, "wait", lambda _sec: False)
+
+    assert agent.run_once() is True
+    assert progress_calls["count"] >= 4
+    assert complete_calls["count"] == 2
+    assert fail_calls["count"] == 0
+
+    job_row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    db_session.refresh(job_row)
+    assert job_row.status == "completed"
+
+
+def test_retry_job_recovers_source_download_url_and_rejects_missing_media(client, db_session):
+    from tests.test_remote_worker_and_r2 import _setup_project_and_job
+
+    user_headers, project_id, job_id, w_headers = _setup_project_and_job(client, db_session)
+
+    # Simulate a legacy/failed job whose source_asset_id was lost
+    job_row = db_session.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    job_row.status = "failed"
+    job_row.error_message = "Job has no source_download_url."
+    job_row.source_asset_id = None
+    db_session.commit()
+
+    retry_res = client.post(f"/api/v1/transcriptions/{job_id}/retry", headers=user_headers)
+    assert retry_res.status_code == 202
+    retried_job_id = retry_res.json()["id"]
+
+    db_session.query(TranscriptionJob).filter(
+        TranscriptionJob.id != retried_job_id,
+        TranscriptionJob.status == "queued",
+    ).update({"status": "cancelled"})
+    db_session.commit()
+
+    claim_res = client.post("/api/v1/worker/jobs/claim", json={"worker_id": "worker-retry"}, headers=w_headers)
+    assert claim_res.status_code == 200
+    claimed = claim_res.json()["job"]
+    assert claimed["id"] == retried_job_id
+    assert claimed["source_download_url"]
+    assert claimed["settings"]["instrument"] == "piano"
+
+    # Project with no uploaded media must return HTTP 400 and not queue a job
+    empty_proj = client.post("/api/v1/projects", json={"title": "Empty Project"}, headers=user_headers).json()
+    orphan_job = TranscriptionJob(
+        project_id=empty_proj["id"],
+        user_id=job_row.user_id,
+        source_asset_id=None,
+        status="failed",
+        progress=0,
+        current_stage="Failed",
+        engine="basic_pitch",
+        settings_json={"instrument": "piano", "mode": "single_instrument"},
+    )
+    db_session.add(orphan_job)
+    db_session.commit()
+
+    bad_retry = client.post(f"/api/v1/transcriptions/{orphan_job.id}/retry", headers=user_headers)
+    assert bad_retry.status_code == 400
+    assert bad_retry.json()["detail"] == "No uploaded media found for this project. Please upload an audio file first."

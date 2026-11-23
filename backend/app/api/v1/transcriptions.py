@@ -181,6 +181,60 @@ def cancel_transcription_job(
     return _serialize_job(job, worker_online)
 
 
+def _resolve_retry_source(
+    db: Session,
+    project: Project,
+    old_job: TranscriptionJob,
+) -> tuple[MediaAsset | None, dict]:
+    """Recover source MediaAsset or external/storage reference for a retried job."""
+    settings_json = dict(old_job.settings_json or {})
+    if not settings_json.get("instrument"):
+        settings_json["instrument"] = project.instrument
+    if not settings_json.get("mode"):
+        settings_json["mode"] = project.transcription_mode
+
+    candidate_ids = [
+        old_job.source_asset_id,
+        settings_json.get("source_media_id"),
+        getattr(project, "source_media_id", None),
+    ]
+    source_asset: MediaAsset | None = None
+    for asset_id in candidate_ids:
+        if asset_id:
+            source_asset = (
+                db.query(MediaAsset)
+                .filter(MediaAsset.id == asset_id, MediaAsset.project_id == project.id)
+                .first()
+            )
+            if source_asset:
+                break
+
+    if not source_asset:
+        source_asset = (
+            db.query(MediaAsset)
+            .filter(MediaAsset.project_id == project.id, MediaAsset.asset_type == "original")
+            .order_by(MediaAsset.created_at.desc())
+            .first()
+        )
+
+    source_storage_key = settings_json.get("source_storage_key") or getattr(project, "source_storage_key", None)
+    external_media_url = settings_json.get("external_media_url") or getattr(project, "external_media_url", None)
+
+    if source_asset:
+        settings_json.setdefault("source_storage_key", source_asset.storage_path)
+    elif source_storage_key:
+        settings_json["source_storage_key"] = source_storage_key
+    elif external_media_url:
+        settings_json["external_media_url"] = external_media_url
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No uploaded media found for this project. Please upload an audio file first.",
+        )
+
+    return source_asset, settings_json
+
+
 @router.post("/transcriptions/{job_id}/retry", response_model=TranscriptionJobResponse, status_code=status.HTTP_202_ACCEPTED)
 def retry_transcription_job(
     job_id: str,
@@ -193,22 +247,29 @@ def retry_transcription_job(
     if old_job.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
 
+    project = db.query(Project).filter(Project.id == old_job.project_id).first()
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+
+    source_asset, resolved_settings = _resolve_retry_source(db, project, old_job)
+
     worker_online = bool(get_worker_availability(db)["worker_online"])
     initial_stage = "Queued" if worker_online else "Waiting for Desktop Worker"
 
     new_job = TranscriptionJob(
         project_id=old_job.project_id,
         user_id=current_user.id,
-        source_asset_id=old_job.source_asset_id,
+        source_asset_id=source_asset.id if source_asset else None,
         status="queued",
         progress=0,
         current_stage=initial_stage,
         engine=old_job.engine,
-        settings_json=old_job.settings_json,
+        settings_json=resolved_settings,
     )
+    project.status = "processing"
     db.add(new_job)
     db.flush()
-    if (old_job.settings_json or {}).get("mode") != "lyrics_only":
+    if (resolved_settings or {}).get("mode") != "lyrics_only":
         _supersede_previous_project_results(db, old_job.project_id, new_job.id)
     db.commit()
     db.refresh(new_job)

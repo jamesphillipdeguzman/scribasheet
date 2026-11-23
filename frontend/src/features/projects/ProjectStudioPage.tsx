@@ -10,8 +10,6 @@ import {
   FileText,
   Guitar,
   Loader2,
-  Maximize2,
-  Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -125,6 +123,7 @@ export function ProjectStudioPage() {
   const activeJobIdRef = useRef<string | null>(null);
   const processingGenerationRef = useRef<number>(0);
   const scoreLoadTokenRef = useRef<number>(0);
+  const isRetryingRef = useRef<boolean>(false);
   activeJobIdRef.current = activeJob?.id ?? null;
   const [runtimeNowMs, setRuntimeNowMs] = useState<number>(() => Date.now());
   const [isStartingJob, setIsStartingJob] = useState(false);
@@ -724,7 +723,7 @@ export function ProjectStudioPage() {
               <WorkerStatusBadge />
             </div>
             {renameError && (
-              <div role="alert" className="mt-1 text-xs text-red-400">
+              <div role="alert" className="mt-1 text-xs text-red-700 font-medium dark:text-red-400">
                 {renameError}
               </div>
             )}
@@ -796,17 +795,44 @@ export function ProjectStudioPage() {
                     setActiveJob(updated);
                   }}
                   onRetry={async (jobId) => {
+                    if (isStartingJob || isRetryingRef.current) return;
+                    isRetryingRef.current = true;
                     const gen = ++processingGenerationRef.current;
                     scoreLoadTokenRef.current++;
                     activeJobIdRef.current = null;
                     clearWorkspaceForNewProcessing();
                     setIsStartingJob(true);
                     try {
-                      const retried = await api.retryJob(jobId);
+                      let retried: TranscriptionJob;
+                      try {
+                        retried = await api.retryJob(jobId);
+                      } catch (err) {
+                        const orig = project.media_assets.find((a) => a.asset_type === "original");
+                        const canFallback =
+                          orig &&
+                          err instanceof ApiError &&
+                          (err.status === 400 || err.status === 404 || err.status === 422);
+                        if (!canFallback) {
+                          throw err;
+                        }
+                        const savedSettings = activeJob?.settings_json as TranscriptionSettings | undefined;
+                        retried = await api.startTranscription(project.id, orig.id, {
+                          ...(savedSettings || {}),
+                          instrument: savedSettings?.instrument || project.instrument,
+                          mode: savedSettings?.mode || project.transcription_mode,
+                        } as TranscriptionSettings);
+                      }
                       if (gen !== processingGenerationRef.current) return;
                       activeJobIdRef.current = retried.id;
                       setActiveJob(retried);
+                    } catch (err) {
+                      if (gen !== processingGenerationRef.current) return;
+                      setScoreLoadState("error");
+                      setScoreLoadError(
+                        err instanceof ApiError ? err.message : "Failed to retry transcription.",
+                      );
                     } finally {
+                      isRetryingRef.current = false;
                       if (gen === processingGenerationRef.current) {
                         setIsStartingJob(false);
                       }
@@ -901,20 +927,6 @@ export function ProjectStudioPage() {
                     );
                   })}
                 </div>
-                {(activeTab === "notation" || activeTab === "pianoroll") && (
-                  <Button
-                    size="sm"
-                    variant={isFocusMode ? "primary" : "secondary"}
-                    onClick={() => setIsFocusMode((v) => !v)}
-                    title={isFocusMode ? "Exit Focus" : "Maximize"}
-                    aria-label={isFocusMode ? "Exit Focus" : "Maximize"}
-                    data-testid="workspace-focus-toggle"
-                    className="shrink-0 ml-auto"
-                  >
-                    {isFocusMode ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-                    <span className="hidden sm:inline">{isFocusMode ? "Exit Focus" : "Maximize"}</span>
-                  </Button>
-                )}
               </div>
 
               {(runtimeBadgeText || (canShowMixer && !isGenuineSatb)) && (
@@ -999,13 +1011,23 @@ export function ProjectStudioPage() {
                     </p>
                   </div>
                 ) : scoreLoadState === "unauthorized" ? (
-                  <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-6 text-center text-xs text-red-300">
+                  <div className="rounded-xl bg-red-50 border border-red-300 p-6 text-center text-xs text-red-900 font-medium break-words dark:bg-red-500/10 dark:border-red-500/30 dark:text-red-200">
                     {scoreLoadError || "You are not authorized to view this score."}
                   </div>
                 ) : scoreLoadState === "error" ? (
-                  <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-6 text-center space-y-3">
-                    <div className="text-xs text-red-300">{scoreLoadError || "Failed to load score."}</div>
-                    <Button size="sm" variant="secondary" onClick={() => void loadScore()}>
+                  <div
+                    data-testid="workspace-score-error-card"
+                    className="rounded-xl bg-red-50 border border-red-300 p-6 text-center space-y-3 dark:bg-red-500/10 dark:border-red-500/30"
+                  >
+                    <div className="text-xs text-red-900 font-medium break-words dark:text-red-200">
+                      {scoreLoadError || "Failed to load score."}
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => void loadScore()}
+                      className="bg-white hover:bg-red-100/70 text-red-900 border border-red-300 font-semibold shadow-xs dark:bg-white/10 dark:hover:bg-white/15 dark:text-white dark:border-white/15"
+                    >
                       Retry Loading Score
                     </Button>
                   </div>

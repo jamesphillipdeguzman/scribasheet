@@ -519,9 +519,20 @@ export function TranscriptionConfigPanel({
       ) : (
         <div className="space-y-2">
           {activeJob?.status === "failed" && (
-            <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300 space-y-2">
-              <p>{activeJob.error_message || "Transcription failed."}</p>
-              <Button size="sm" variant="outline" onClick={() => onRetry(activeJob.id)} className="min-h-[40px]">
+            <div
+              data-testid="sidebar-job-error-card"
+              className="rounded-lg bg-red-50 border border-red-300 p-3 text-xs space-y-2 dark:bg-red-500/10 dark:border-red-500/30"
+            >
+              <p className="text-red-900 font-medium break-words dark:text-red-200">
+                {activeJob.error_message || "Transcription failed."}
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={isStarting}
+                onClick={() => onRetry(activeJob.id)}
+                className="min-h-[40px] bg-white hover:bg-red-100/70 text-red-900 border border-red-300 font-semibold shadow-xs dark:bg-white/10 dark:hover:bg-white/15 dark:text-white dark:border-white/15"
+              >
                 <RotateCcw className="h-3.5 w-3.5" />
                 Retry Job
               </Button>

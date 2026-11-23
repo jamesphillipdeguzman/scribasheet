@@ -24,7 +24,7 @@ const STATUS_STYLES: Record<string, string> = {
   finalizing:
     "bg-amber-50 text-amber-800 border-amber-300 font-semibold dark:bg-[#A78BFA]/15 dark:text-[#A78BFA] dark:border-[#A78BFA]/30",
   failed:
-    "bg-red-50 text-red-800 border-red-300 font-semibold dark:bg-red-500/15 dark:text-red-300 dark:border-red-500/30",
+    "bg-red-50 text-red-800 border-red-300 font-semibold dark:bg-red-500/15 dark:text-red-300 dark:border-red-500/35",
   cancelled:
     "bg-zinc-100 text-zinc-700 border-zinc-300 dark:bg-zinc-500/15 dark:text-zinc-400 dark:border-zinc-500/30",
   draft:
