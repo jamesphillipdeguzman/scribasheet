@@ -441,4 +441,126 @@ describe("Synchronized Sheet Music Playback View & Timeline", () => {
     expect(parts[0].getElementsByTagName("lyric")).toHaveLength(2);
     expect(parts[1].getElementsByTagName("lyric")).toHaveLength(0);
   });
+
+  it("consolidates split SATB verses onto Soprano while preserving genuine polytextual parts", () => {
+    const splitSatbXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+    <score-part id="P3"><part-name>Tenor</part-name></score-part>
+    <score-part id="P4"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>begin</syllabic><text>A</text></lyric>
+        <lyric number="2"><syllabic>single</syllabic><text>Praise</text></lyric>
+      </note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>single</syllabic><text>grace</text></lyric>
+      </note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note>
+        <pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>end</syllabic><text>mazing</text></lyric>
+        <lyric number="2"><syllabic>single</syllabic><text>be</text></lyric>
+      </note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>single</syllabic><text>how</text></lyric>
+      </note>
+    </measure>
+  </part>
+  <part id="P3">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>begin</syllabic><text>A</text></lyric>
+      </note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
+    </measure>
+  </part>
+  <part id="P4">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const prepared = prepareDisplayMusicXml(splitSatbXml, true);
+    const doc = new DOMParser().parseFromString(prepared, "application/xml");
+    const parts = doc.getElementsByTagName("part");
+    const sopranoTexts = Array.from(parts[0].getElementsByTagName("lyric")).map((el) => ({
+      num: el.getAttribute("number"),
+      text: el.getElementsByTagName("text")[0]?.textContent,
+    }));
+    expect(sopranoTexts).toEqual([
+      { num: "1", text: "A" },
+      { num: "2", text: "Praise" },
+      { num: "1", text: "mazing" },
+      { num: "2", text: "be" },
+      { num: "1", text: "grace" },
+      { num: "1", text: "how" },
+    ]);
+    expect(parts[1].getElementsByTagName("lyric")).toHaveLength(0);
+    expect(parts[2].getElementsByTagName("lyric")).toHaveLength(0);
+    expect(parts[3].getElementsByTagName("lyric")).toHaveLength(0);
+
+    const polytextualXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>Sing</text></lyric></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>joyful</text></lyric></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>songs</text></lyric></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>today</text></lyric></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>Kyrie</text></lyric></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>eleison</text></lyric></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>Christe</text></lyric></note>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>amen</text></lyric></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const preparedPoly = prepareDisplayMusicXml(polytextualXml, true);
+    const polyDoc = new DOMParser().parseFromString(preparedPoly, "application/xml");
+    const polyParts = polyDoc.getElementsByTagName("part");
+    expect(Array.from(polyParts[0].getElementsByTagName("text")).map((n) => n.textContent)).toEqual([
+      "Sing",
+      "joyful",
+      "songs",
+      "today",
+    ]);
+    expect(Array.from(polyParts[1].getElementsByTagName("text")).map((n) => n.textContent)).toEqual([
+      "Kyrie",
+      "eleison",
+      "Christe",
+      "amen",
+    ]);
+  });
 });

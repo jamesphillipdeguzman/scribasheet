@@ -506,6 +506,255 @@ def _reconstruct_and_filter_part_lyrics(
     return removed
 
 
+def _collect_part_note_positions(
+    part_el: ET.Element,
+) -> list[tuple[int, float, ET.Element, bool]]:
+    """Return [(measure_idx, onset_whole, note_el, is_rest)] in musical order for a part."""
+    items: list[tuple[int, float, ET.Element, bool]] = []
+    divisions = 1.0
+    for m_idx, m_el in enumerate(part_el.findall("measure")):
+        offset_div = 0.0
+        last_start_div = 0.0
+        for child in list(m_el):
+            tag = child.tag.lower()
+            if tag == "attributes":
+                div_txt = child.findtext("divisions")
+                if div_txt:
+                    try:
+                        d = float(div_txt)
+                        if d > 0:
+                            divisions = d
+                    except ValueError:
+                        pass
+            elif tag == "backup":
+                dur_txt = child.findtext("duration")
+                if dur_txt:
+                    try:
+                        offset_div = max(0.0, offset_div - float(dur_txt))
+                    except ValueError:
+                        pass
+            elif tag == "forward":
+                dur_txt = child.findtext("duration")
+                if dur_txt:
+                    try:
+                        offset_div += float(dur_txt)
+                    except ValueError:
+                        pass
+            elif tag == "note":
+                is_chord = child.find("chord") is not None
+                is_grace = child.find("grace") is not None
+                is_rest = child.find("rest") is not None
+                start_div = last_start_div if is_chord else offset_div
+                onset_whole = round(start_div / (divisions * 4.0), 4)
+                if not is_chord:
+                    items.append((m_idx, onset_whole, child, is_rest))
+                if not is_chord and not is_grace:
+                    dur_txt = child.findtext("duration")
+                    try:
+                        dur_div = float(dur_txt or 0.0)
+                    except ValueError:
+                        dur_div = 0.0
+                    last_start_div = offset_div
+                    if dur_div > 0:
+                        offset_div += dur_div
+    return items
+
+
+def _consolidate_satb_lyrics_to_soprano(root: ET.Element) -> int:
+    """Consolidate split/duplicated SATB lyrics onto Soprano while preserving genuine independent vocal texts."""
+    parts = list(root.findall("part"))
+    if len(parts) < 2:
+        return 0
+
+    part_names: dict[str, str] = {}
+    for sp in root.findall("./part-list/score-part"):
+        pid = sp.attrib.get("id", "")
+        pname = (sp.findtext("part-name") or "").strip()
+        part_names[pid] = pname
+
+    vocal_part_indices: list[int] = []
+    soprano_idx: int | None = None
+    for idx, p in enumerate(parts):
+        pname = part_names.get(p.attrib.get("id", ""), "").lower()
+        if _is_accompaniment_label(pname):
+            continue
+        vocal_part_indices.append(idx)
+        if soprano_idx is None and ("soprano" in pname or pname == "sop"):
+            soprano_idx = idx
+    if soprano_idx is None:
+        if not vocal_part_indices:
+            return 0
+        soprano_idx = vocal_part_indices[0]
+
+    other_indices = [i for i in vocal_part_indices if i != soprano_idx]
+    if not other_indices:
+        return 0
+
+    sop_items = _collect_part_note_positions(parts[soprano_idx])
+    # Map (m_idx, onset_whole) -> Soprano non-rest note_el
+    sop_notes_by_pos: dict[tuple[int, float], ET.Element] = {}
+    sop_notes_by_measure: dict[int, list[tuple[float, ET.Element]]] = {}
+    for m_idx, onset, n_el, is_rest in sop_items:
+        if not is_rest:
+            sop_notes_by_pos[(m_idx, onset)] = n_el
+            sop_notes_by_measure.setdefault(m_idx, []).append((onset, n_el))
+
+    def _find_sop_note(m_idx: int, onset: float) -> ET.Element | None:
+        if (m_idx, onset) in sop_notes_by_pos:
+            return sop_notes_by_pos[(m_idx, onset)]
+        for s_onset, n_el in sop_notes_by_measure.get(m_idx, []):
+            if abs(s_onset - onset) <= 0.025:
+                return n_el
+        return None
+
+    # Gather all lyrics per part & verse
+    sop_lyrics_by_verse: dict[str, dict[tuple[int, float], str]] = {}
+    for m_idx, onset, n_el, _ in sop_items:
+        for lyr in n_el.findall("lyric"):
+            v_num = lyr.attrib.get("number") or "1"
+            txt = "".join(t.text or "" for t in lyr.findall("text")).strip()
+            sop_lyrics_by_verse.setdefault(v_num, {})[(m_idx, onset)] = txt
+
+    consolidated_count = 0
+    for other_idx in other_indices:
+        other_items = _collect_part_note_positions(parts[other_idx])
+        other_by_verse: dict[str, list[tuple[int, float, ET.Element, ET.Element, str]]] = {}
+        for m_idx, onset, n_el, _ in other_items:
+            for lyr in n_el.findall("lyric"):
+                v_num = lyr.attrib.get("number") or "1"
+                txt = "".join(t.text or "" for t in lyr.findall("text")).strip()
+                other_by_verse.setdefault(v_num, []).append((m_idx, onset, n_el, lyr, txt))
+
+        for v_num, entries in other_by_verse.items():
+            sop_v = sop_lyrics_by_verse.get(v_num, {})
+            overlap_same = 0
+            overlap_diff = 0
+            for m_idx, onset, _, _, txt in entries:
+                # Check if Soprano has a lyric at same position
+                sop_txt = sop_v.get((m_idx, onset))
+                if sop_txt is None:
+                    for (sm, so), st in sop_v.items():
+                        if sm == m_idx and abs(so - onset) <= 0.025:
+                            sop_txt = st
+                            break
+                if sop_txt is not None:
+                    if sop_txt.lower() == txt.lower():
+                        overlap_same += 1
+                    else:
+                        overlap_diff += 1
+
+            total_overlap = overlap_same + overlap_diff
+            # Preserve genuine independent polytextual vocal parts
+            if total_overlap >= 4 and (overlap_diff / total_overlap) >= 0.4:
+                continue
+
+            for m_idx, onset, n_el, lyr, txt in entries:
+                sop_note = _find_sop_note(m_idx, onset)
+                if sop_note is None:
+                    continue
+                already_on_sop = any((sl.attrib.get("number") or "1") == v_num for sl in sop_note.findall("lyric"))
+                if not already_on_sop:
+                    sop_note.append(deepcopy(lyr))
+                    sop_lyrics_by_verse.setdefault(v_num, {})[(m_idx, onset)] = txt
+                    consolidated_count += 1
+                n_el.remove(lyr)
+
+    # Sort <lyric> elements by verse number on Soprano notes
+    for _, _, n_el, _ in sop_items:
+        lyrs = list(n_el.findall("lyric"))
+        if len(lyrs) > 1:
+            for lyr in lyrs:
+                n_el.remove(lyr)
+            lyrs.sort(key=lambda el: int(el.attrib.get("number") or "1") if (el.attrib.get("number") or "1").isdigit() else 99)
+            for lyr in lyrs:
+                n_el.append(lyr)
+
+    return consolidated_count
+
+
+def extract_lyrics_data_from_musicxml(xml_str: str, *, tempo_bpm: float = 100.0) -> dict | None:
+    """Extract verse-ordered LyricsData dict from Soprano (default lyric carrier) in MusicXML."""
+    if not xml_str or "<score-" not in xml_str:
+        return None
+    try:
+        root = ET.fromstring(xml_str.lstrip("\ufeff").strip())
+    except ET.ParseError:
+        return None
+
+    parts = list(root.findall("part"))
+    if not parts:
+        return None
+    sop_part = parts[0]
+    for sp in root.findall("./part-list/score-part"):
+        pid = sp.attrib.get("id", "")
+        pname = (sp.findtext("part-name") or "").lower()
+        if "soprano" in pname or pname == "sop":
+            match = next((p for p in parts if p.attrib.get("id", "") == pid), None)
+            if match is not None:
+                sop_part = match
+                break
+
+    by_verse: dict[str, list[tuple[str, str]]] = {}
+    for lyr in sop_part.findall(".//note/lyric"):
+        v_num = lyr.attrib.get("number") or "1"
+        txt = "".join(t.text or "" for t in lyr.findall("text")).strip()
+        syl = (lyr.findtext("syllabic") or "").strip().lower()
+        if txt:
+            by_verse.setdefault(v_num, []).append((txt, syl))
+
+    if not by_verse:
+        return None
+
+    verse_lines: list[str] = []
+    segments: list[dict] = []
+    sec_cursor = 0.0
+    for idx, v_num in enumerate(sorted(by_verse.keys(), key=lambda k: int(k) if k.isdigit() else 99)):
+        tokens = by_verse[v_num]
+        words: list[str] = []
+        cur_word = ""
+        for txt, syl in tokens:
+            if syl in ("begin", "middle"):
+                cur_word += txt[:-1] if txt.endswith("-") else txt
+            elif syl == "end":
+                cur_word += txt
+                words.append(cur_word)
+                cur_word = ""
+            else:
+                if cur_word:
+                    words.append(cur_word)
+                    cur_word = ""
+                words.append(txt)
+        if cur_word:
+            words.append(cur_word)
+        line = " ".join(words).strip()
+        if line:
+            verse_lines.append(line)
+            dur = max(1.0, len(words) * (60.0 / max(20.0, tempo_bpm)))
+            segments.append(
+                {
+                    "id": f"verse_{v_num}",
+                    "text": line,
+                    "start_sec": round(sec_cursor, 3),
+                    "end_sec": round(sec_cursor + dur, 3),
+                    "confidence": 1.0,
+                    "needs_review": False,
+                    "reviewed": True,
+                    "edited": False,
+                    "words": [],
+                }
+            )
+            sec_cursor += dur
+
+    if not verse_lines:
+        return None
+    return {
+        "text": "\n".join(verse_lines),
+        "segments": segments,
+        "source_used": "manual",
+        "has_word_timestamps": False,
+    }
+
+
 def sanitize_omr_musicxml(
     xml_str: str,
     *,
@@ -557,6 +806,8 @@ def sanitize_omr_musicxml(
 
     # Reconstruct multi-note lyric phrases & clean sparse bottom-staff pseudo-lyrics
     removed_lyrics += _reconstruct_and_filter_part_lyrics(root, pdf_footer_texts=pdf_footers)
+    # Consolidate split/duplicated SATB lyrics onto Soprano
+    _consolidate_satb_lyrics_to_soprano(root)
 
     # Strip footer <credit-words> / <words> far below the lowest staff if needed
     for dir_el in root.findall(".//direction"):
@@ -1192,6 +1443,31 @@ def musicxml_to_satb_score_data(
                     active_ties.pop(p_midi, None)
 
     notes.sort(key=lambda n: (n.onset_sec, n.track_index, n.pitch_midi))
+    analysis_dict: dict = {
+        "mode": "satb_pdf",
+        "satb": {
+            "needs_review": needs_review,
+            "warnings": warnings,
+            "assignments": [
+                {
+                    "part_index": a.part_index,
+                    "source_label": a.source_label,
+                    "clef": a.clef,
+                    "voice_id": a.voice_id,
+                    "assigned_voice": a.assigned_voice,
+                    "confidence": a.confidence,
+                    "uncertain": a.uncertain,
+                    "note_count": a.note_count,
+                    "mean_pitch": a.mean_pitch,
+                }
+                for a in assignments
+            ],
+        },
+    }
+    extracted_lyrics = extract_lyrics_data_from_musicxml(cleaned_xml, tempo_bpm=resolved_bpm)
+    if extracted_lyrics:
+        analysis_dict["lyrics"] = extracted_lyrics
+
     score_data = ScoreData(
         title=title,
         tempo_bpm=round(resolved_bpm, 1),
@@ -1204,27 +1480,7 @@ def musicxml_to_satb_score_data(
         tracks=tracks,
         notes=notes,
         chords=[],
-        analysis={
-            "mode": "satb_pdf",
-            "satb": {
-                "needs_review": needs_review,
-                "warnings": warnings,
-                "assignments": [
-                    {
-                        "part_index": a.part_index,
-                        "source_label": a.source_label,
-                        "clef": a.clef,
-                        "voice_id": a.voice_id,
-                        "assigned_voice": a.assigned_voice,
-                        "confidence": a.confidence,
-                        "uncertain": a.uncertain,
-                        "note_count": a.note_count,
-                        "mean_pitch": a.mean_pitch,
-                    }
-                    for a in assignments
-                ],
-            },
-        },
+        analysis=analysis_dict,
     )
     return score_data, assignments, warnings, needs_review
 

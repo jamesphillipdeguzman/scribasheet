@@ -107,6 +107,158 @@ function sanitizeDocumentFooterLyrics(doc: Document): void {
   }
 }
 
+function collectPartNotePositions(partEl: Element): Array<{ mIdx: number; onsetWhole: number; noteEl: Element; isRest: boolean }> {
+  const items: Array<{ mIdx: number; onsetWhole: number; noteEl: Element; isRest: boolean }> = [];
+  let divisions = 1;
+  const measures = Array.from(partEl.getElementsByTagName("measure"));
+  for (let mIdx = 0; mIdx < measures.length; mIdx++) {
+    let offsetDiv = 0;
+    let lastStartDiv = 0;
+    for (const child of Array.from(measures[mIdx].children)) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === "attributes") {
+        const d = Number.parseFloat(child.getElementsByTagName("divisions")[0]?.textContent || "");
+        if (Number.isFinite(d) && d > 0) divisions = d;
+      } else if (tag === "backup") {
+        const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+        if (Number.isFinite(d) && d > 0) offsetDiv = Math.max(0, offsetDiv - d);
+      } else if (tag === "forward") {
+        const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+        if (Number.isFinite(d) && d > 0) offsetDiv += d;
+      } else if (tag === "note") {
+        const isChord = child.getElementsByTagName("chord").length > 0;
+        const isGrace = child.getElementsByTagName("grace").length > 0;
+        const isRest = child.getElementsByTagName("rest").length > 0;
+        const startDiv = isChord ? lastStartDiv : offsetDiv;
+        const onsetWhole = Math.round((startDiv / (divisions * 4)) * 10000) / 10000;
+        if (!isChord) {
+          items.push({ mIdx, onsetWhole, noteEl: child, isRest });
+        }
+        if (!isChord && !isGrace) {
+          const dur = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+          lastStartDiv = offsetDiv;
+          if (Number.isFinite(dur) && dur > 0) offsetDiv += dur;
+        }
+      }
+    }
+  }
+  return items;
+}
+
+function consolidateSatbLyricsToSoprano(doc: Document): void {
+  const parts = Array.from(doc.getElementsByTagName("part"));
+  if (parts.length < 2) return;
+
+  const partNames = new Map<string, string>();
+  for (const sp of Array.from(doc.getElementsByTagName("score-part"))) {
+    const id = sp.getAttribute("id") || "";
+    const name = (sp.getElementsByTagName("part-name")[0]?.textContent || "").trim();
+    partNames.set(id, name);
+  }
+
+  const isAccomp = (name: string) => /(?:piano|accompaniment|accomp|keyboard|organ|pno)/i.test(name);
+  const vocalIndices: number[] = [];
+  let sopranoIdx: number | null = null;
+  for (let i = 0; i < parts.length; i++) {
+    const pname = (partNames.get(parts[i].getAttribute("id") || "") || "").toLowerCase();
+    if (isAccomp(pname)) continue;
+    vocalIndices.push(i);
+    if (sopranoIdx === null && (pname.includes("soprano") || pname === "sop")) {
+      sopranoIdx = i;
+    }
+  }
+  if (sopranoIdx === null) {
+    if (vocalIndices.length === 0) return;
+    sopranoIdx = vocalIndices[0];
+  }
+  const otherIndices = vocalIndices.filter((i) => i !== sopranoIdx);
+  if (otherIndices.length === 0) return;
+
+  const sopItems = collectPartNotePositions(parts[sopranoIdx]);
+  const sopByMeasure = new Map<number, Array<{ onsetWhole: number; noteEl: Element }>>();
+  for (const it of sopItems) {
+    if (!it.isRest) {
+      if (!sopByMeasure.has(it.mIdx)) sopByMeasure.set(it.mIdx, []);
+      sopByMeasure.get(it.mIdx)!.push({ onsetWhole: it.onsetWhole, noteEl: it.noteEl });
+    }
+  }
+  const findSopNote = (mIdx: number, onset: number): Element | null => {
+    for (const s of sopByMeasure.get(mIdx) || []) {
+      if (Math.abs(s.onsetWhole - onset) <= 0.025) return s.noteEl;
+    }
+    return null;
+  };
+
+  const sopLyricsByVerse = new Map<string, Array<{ mIdx: number; onset: number; txt: string }>>();
+  for (const it of sopItems) {
+    for (const lyr of Array.from(it.noteEl.getElementsByTagName("lyric"))) {
+      const vNum = lyr.getAttribute("number") || "1";
+      const txt = Array.from(lyr.getElementsByTagName("text"))
+        .map((t) => t.textContent || "")
+        .join("")
+        .trim();
+      if (!sopLyricsByVerse.has(vNum)) sopLyricsByVerse.set(vNum, []);
+      sopLyricsByVerse.get(vNum)!.push({ mIdx: it.mIdx, onset: it.onsetWhole, txt });
+    }
+  }
+
+  for (const otherIdx of otherIndices) {
+    const otherItems = collectPartNotePositions(parts[otherIdx]);
+    const byVerse = new Map<string, Array<{ mIdx: number; onset: number; noteEl: Element; lyr: Element; txt: string }>>();
+    for (const it of otherItems) {
+      for (const lyr of Array.from(it.noteEl.getElementsByTagName("lyric"))) {
+        const vNum = lyr.getAttribute("number") || "1";
+        const txt = Array.from(lyr.getElementsByTagName("text"))
+          .map((t) => t.textContent || "")
+          .join("")
+          .trim();
+        if (!byVerse.has(vNum)) byVerse.set(vNum, []);
+        byVerse.get(vNum)!.push({ mIdx: it.mIdx, onset: it.onsetWhole, noteEl: it.noteEl, lyr, txt });
+      }
+    }
+
+    for (const [vNum, entries] of byVerse.entries()) {
+      const sopV = sopLyricsByVerse.get(vNum) || [];
+      let overlapSame = 0;
+      let overlapDiff = 0;
+      for (const e of entries) {
+        const match = sopV.find((s) => s.mIdx === e.mIdx && Math.abs(s.onset - e.onset) <= 0.025);
+        if (match) {
+          if (match.txt.toLowerCase() === e.txt.toLowerCase()) overlapSame++;
+          else overlapDiff++;
+        }
+      }
+      const totalOverlap = overlapSame + overlapDiff;
+      if (totalOverlap >= 4 && overlapDiff / totalOverlap >= 0.4) {
+        continue; // Preserve genuine independent polytextual vocal parts
+      }
+
+      for (const e of entries) {
+        const sopNote = findSopNote(e.mIdx, e.onset);
+        if (!sopNote) continue;
+        const already = Array.from(sopNote.getElementsByTagName("lyric")).some(
+          (sl) => (sl.getAttribute("number") || "1") === vNum,
+        );
+        if (!already) {
+          sopNote.appendChild(e.lyr.cloneNode(true));
+          if (!sopLyricsByVerse.has(vNum)) sopLyricsByVerse.set(vNum, []);
+          sopLyricsByVerse.get(vNum)!.push({ mIdx: e.mIdx, onset: e.onset, txt: e.txt });
+        }
+        e.noteEl.removeChild(e.lyr);
+      }
+    }
+  }
+
+  for (const it of sopItems) {
+    const lyrs = Array.from(it.noteEl.getElementsByTagName("lyric"));
+    if (lyrs.length > 1) {
+      for (const lyr of lyrs) it.noteEl.removeChild(lyr);
+      lyrs.sort((a, b) => (Number.parseInt(a.getAttribute("number") || "1", 10) || 99) - (Number.parseInt(b.getAttribute("number") || "1", 10) || 99));
+      for (const lyr of lyrs) it.noteEl.appendChild(lyr);
+    }
+  }
+}
+
 export function cleanDisplayScoreTitle(rawTitle: string): string {
   return rawTitle.trim().replace(TITLE_EXT_RE, "").trim();
 }
@@ -160,6 +312,7 @@ export function prepareDisplayMusicXml(xml: string, showChords: boolean): string
           }
         }
         sanitizeDocumentFooterLyrics(doc);
+        consolidateSatbLyricsToSoprano(doc);
 
         const serialized = new XMLSerializer().serializeToString(doc).replace(/^\uFEFF/, "").trim();
         if (serialized.startsWith("<?xml")) {

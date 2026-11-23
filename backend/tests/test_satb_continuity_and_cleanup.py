@@ -509,6 +509,141 @@ def test_multinote_copyright_and_credit_phrase_filtering_and_genuine_tb_preserva
     assert len(tb_root.findall("part")[1].findall(".//lyric/text")) == 10
 
 
+def test_satb_lyrics_consolidate_to_soprano_with_verses_and_hyphenation():
+    from app.notation.omr import extract_lyrics_data_from_musicxml
+
+    satb_split_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+    <score-part id="P3"><part-name>Tenor</part-name></score-part>
+    <score-part id="P4"><part-name>Bass</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>begin</syllabic><text>A</text></lyric>
+        <lyric number="2"><syllabic>single</syllabic><text>Praise</text></lyric>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>single</syllabic><text>grace,</text></lyric>
+      </note>
+      <note>
+        <pitch><step>F</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+      </note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note>
+        <pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>end</syllabic><text>mazing</text></lyric>
+        <lyric number="2"><syllabic>single</syllabic><text>be</text></lyric>
+      </note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>single</syllabic><text>how</text></lyric>
+        <lyric number="2"><syllabic>single</syllabic><text>to</text></lyric>
+      </note>
+    </measure>
+  </part>
+  <part id="P3">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>begin</syllabic><text>A</text></lyric>
+      </note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      <note>
+        <pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>single</syllabic><text>grace,</text></lyric>
+      </note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+    </measure>
+  </part>
+  <part id="P4">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>"""
+    cleaned, _ = sanitize_omr_musicxml(satb_split_xml)
+    root = ET.fromstring(cleaned)
+    parts = root.findall("part")
+    soprano_v1 = [
+        (ly.findtext("syllabic"), ly.findtext("text"))
+        for ly in parts[0].findall(".//lyric[@number='1']")
+    ]
+    soprano_v2 = [
+        (ly.findtext("syllabic"), ly.findtext("text"))
+        for ly in parts[0].findall(".//lyric[@number='2']")
+    ]
+    assert soprano_v1 == [
+        ("begin", "A"),
+        ("end", "mazing"),
+        ("single", "grace,"),
+        ("single", "how"),
+    ]
+    assert soprano_v2 == [
+        ("single", "Praise"),
+        ("single", "be"),
+        ("single", "to"),
+    ]
+    assert len(parts[1].findall(".//lyric")) == 0
+    assert len(parts[2].findall(".//lyric")) == 0
+    assert len(parts[3].findall(".//lyric")) == 0
+
+    lyrics_data = extract_lyrics_data_from_musicxml(cleaned, tempo_bpm=120.0)
+    assert lyrics_data is not None
+    assert "Amazing grace, how" in lyrics_data["text"]
+    assert "Praise be to" in lyrics_data["text"]
+
+
+def test_satb_preserves_genuine_polytextual_vocal_lyrics():
+    polytextual_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Soprano</part-name></score-part>
+    <score-part id="P2"><part-name>Alto</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>Sing</text></lyric></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>joyful</text></lyric></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>songs</text></lyric></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>today</text></lyric></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>Kyrie</text></lyric></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>eleison</text></lyric></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>Christe</text></lyric></note>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><lyric number="1"><text>amen</text></lyric></note>
+    </measure>
+  </part>
+</score-partwise>"""
+    cleaned, _ = sanitize_omr_musicxml(polytextual_xml)
+    root = ET.fromstring(cleaned)
+    parts = root.findall("part")
+    assert [t.text for t in parts[0].findall(".//lyric/text")] == ["Sing", "joyful", "songs", "today"]
+    assert [t.text for t in parts[1].findall(".//lyric/text")] == ["Kyrie", "eleison", "Christe", "amen"]
+
+
 def test_put_score_persists_direct_musicxml_edits(client, db_session) -> None:
     reg = client.post(
         "/api/v1/auth/register",
