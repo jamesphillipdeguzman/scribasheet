@@ -138,12 +138,18 @@ def build_timing_map(
         earliest_pre = min(n.onset_sec for n in pre_notes)
         pre_span_beats = (first_db - earliest_pre) / sec_per_beat
         if pre_span_beats >= 0.4:
-            # Reserve whole measure 1 for pickup so first_db lands on beat 1 of measure 2
-            pickup_ql = float(beats_per_measure)
-            for b in range(beats_per_measure):
-                t_b = first_db - (beats_per_measure - b) * sec_per_beat
-                beat_times.append(t_b)
-                beat_qls.append(float(b))
+            # Size the incomplete pickup bar to the actual pickup span (snapped to 0.5 ql)
+            # instead of reserving a full measure, so first_db lands on Measure 1 beat 1.
+            snapped_pickup = round(pre_span_beats * 2.0) / 2.0
+            pickup_ql = float(min(float(beats_per_measure), max(0.5, snapped_pickup)))
+            pickup_start_sec = first_db - pickup_ql * sec_per_beat
+            beat_times.append(pickup_start_sec)
+            beat_qls.append(0.0)
+            b_ql = 1.0
+            while b_ql < pickup_ql - 1e-6:
+                beat_times.append(first_db - (pickup_ql - b_ql) * sec_per_beat)
+                beat_qls.append(float(b_ql))
+                b_ql += 1.0
 
     raw_beats = np.array(beat_result.beat_times_sec, dtype=np.float64)
     for bar_idx in range(len(reg_downbeats) - 1):
@@ -196,6 +202,7 @@ def build_timing_map(
             "inference_seconds": beat_result.inference_seconds,
             "regularized_beat_count": len(beat_times),
             "regularized_downbeat_count": len(reg_downbeats),
+            "pickup_ql": round(pickup_ql, 3),
             **beat_result.diagnostics,
         },
     )

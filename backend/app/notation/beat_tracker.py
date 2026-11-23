@@ -311,3 +311,97 @@ def track_beats_and_downbeats(
             "raw_downbeat_count": len(downbeat_times),
         },
     )
+
+
+def infer_time_signature_from_beats(
+    beat_result: BeatTrackingResult,
+    requested_time_signature: str = "auto",
+) -> tuple[str, bool, dict[str, Any]]:
+    """Infer musical meter (2/4, 3/4, 4/4, 6/8) from downbeat/beat intervals when 'auto'.
+
+    Returns (time_signature, was_estimated, diagnostics).
+    Preserves explicit user-selected time signatures untouched.
+    """
+    req = (requested_time_signature or "auto").strip()
+    if req.lower() != "auto":
+        return req, False, {
+            "requested_time_signature": req,
+            "detected_time_signature": req,
+            "confidence": 1.0,
+            "reason": "explicit_user_selection",
+        }
+
+    downbeats = [float(t) for t in beat_result.downbeat_times_sec]
+    beats = [float(t) for t in beat_result.beat_times_sec]
+    conf = float(beat_result.downbeat_confidence)
+
+    if len(downbeats) < 2 or len(beats) < 4:
+        return "4/4", True, {
+            "requested_time_signature": "auto",
+            "detected_time_signature": "4/4",
+            "confidence": round(conf, 3),
+            "consistency": 0.0,
+            "bar_count": max(0, len(downbeats) - 1),
+            "reason": "insufficient_downbeats_fallback_4_4",
+        }
+
+    beat_diffs = np.diff(np.array(beats, dtype=np.float64))
+    beat_diffs = beat_diffs[beat_diffs > 0.1]
+    if len(beat_diffs) == 0:
+        return "4/4", True, {
+            "requested_time_signature": "auto",
+            "detected_time_signature": "4/4",
+            "confidence": round(conf, 3),
+            "consistency": 0.0,
+            "bar_count": len(downbeats) - 1,
+            "reason": "invalid_beat_intervals_fallback_4_4",
+        }
+
+    median_beat = float(np.median(beat_diffs))
+    bar_counts: dict[int, int] = {}
+    valid_bars = 0
+    for i in range(len(downbeats) - 1):
+        bar_dur = downbeats[i + 1] - downbeats[i]
+        if bar_dur <= 0.2:
+            continue
+        ratio = bar_dur / median_beat
+        nearest = int(round(ratio))
+        if abs(ratio - nearest) <= 0.28 and nearest in (2, 3, 4, 6):
+            bar_counts[nearest] = bar_counts.get(nearest, 0) + 1
+        valid_bars += 1
+
+    if valid_bars == 0 or not bar_counts:
+        return "4/4", True, {
+            "requested_time_signature": "auto",
+            "detected_time_signature": "4/4",
+            "confidence": round(conf, 3),
+            "consistency": 0.0,
+            "bar_count": valid_bars,
+            "reason": "no_consistent_bar_grouping_fallback_4_4",
+        }
+
+    best_n, best_count = max(bar_counts.items(), key=lambda kv: (kv[1], kv[0] == 4))
+    consistency = best_count / valid_bars
+    meter_map = {2: "2/4", 3: "3/4", 4: "4/4", 6: "6/8"}
+
+    if consistency >= 0.65 and conf >= 0.45 and best_n in meter_map:
+        detected = meter_map[best_n]
+        return detected, True, {
+            "requested_time_signature": "auto",
+            "detected_time_signature": detected,
+            "confidence": round(conf, 3),
+            "consistency": round(consistency, 3),
+            "beats_per_bar_observed": best_n,
+            "bar_count": valid_bars,
+            "reason": "downbeat_interval_consensus",
+        }
+
+    return "4/4", True, {
+        "requested_time_signature": "auto",
+        "detected_time_signature": "4/4",
+        "confidence": round(conf, 3),
+        "consistency": round(consistency, 3),
+        "beats_per_bar_observed": best_n,
+        "bar_count": valid_bars,
+        "reason": "low_confidence_fallback_4_4",
+    }

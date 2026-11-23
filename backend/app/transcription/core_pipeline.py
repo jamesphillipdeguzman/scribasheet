@@ -23,7 +23,7 @@ from app.notation.analyzer import (
     select_chord_source_notes,
 )
 from app.notation.arrangement import simplify_arrangement
-from app.notation.beat_tracker import track_beats_and_downbeats
+from app.notation.beat_tracker import infer_time_signature_from_beats, track_beats_and_downbeats
 from app.notation.generator import build_piano_vocal_score_data, build_score_data, clean_score_title
 from app.notation.melody import (
     extract_lead_melody,
@@ -225,6 +225,10 @@ def analyze_timing_and_build_score(
                 beats_per_measure=beats_per_bar,
                 note_durations_sec=note_durs,
             )
+            time_sig, time_est, meter_diag = infer_time_signature_from_beats(
+                beat_res,
+                settings.time_signature,
+            )
             timing_map = build_timing_map(
                 beat_result=beat_res,
                 notes=refined_notes,
@@ -233,7 +237,7 @@ def analyze_timing_and_build_score(
             )
             tempo_bpm = timing_map.tempo_bpm
             tempo_est = True
-            tempo_diag = timing_map.provenance
+            tempo_diag = {**timing_map.provenance, "meter_detection": meter_diag}
         except Exception as exc:
             logger.warning("Beat/TimingMap analysis failed (%s); falling back to Librosa tempo estimation.", exc)
             tempo_diag = estimate_tempo_with_diagnostics(

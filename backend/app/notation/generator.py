@@ -732,6 +732,7 @@ def _populate_part_from_notes(
     clef_obj: music21.clef.Clef,
     min_measures: int = 1,
     grid_ql: float = 0.5,
+    pickup_ql: float = 0.0,
 ) -> None:
     beats_per_sec = max(20.0, tempo_bpm) / 60.0
     ts_obj = music21.meter.TimeSignature(time_sig)
@@ -741,18 +742,32 @@ def _populate_part_from_notes(
 
     voices = _pack_notes_into_voices(notes, beats_per_sec, grid_ql=grid_ql, measure_ql=measure_ql)
     max_end_ql = max((ev[1] for v in voices for ev in v), default=measure_ql)
-    total_measures = max(min_measures, int(np.ceil(max_end_ql / measure_ql)))
+    has_pickup = 0.0 < pickup_ql < measure_ql - 1e-6
+    if has_pickup:
+        total_measures = max(min_measures, 1 + int(np.ceil(max(0.0, max_end_ql - pickup_ql) / measure_ql)))
+    else:
+        total_measures = max(min_measures, int(np.ceil(max_end_ql / measure_ql)))
 
     for m_idx in range(total_measures):
-        m_start = m_idx * measure_ql
-        m_end = (m_idx + 1) * measure_ql
-        m = music21.stream.Measure(number=m_idx + 1)
+        if has_pickup and m_idx == 0:
+            m_start = 0.0
+            m_end = pickup_ql
+            m = music21.stream.Measure(number=0)
+            m.paddingLeft = measure_ql - pickup_ql
+        elif has_pickup:
+            m_start = pickup_ql + (m_idx - 1) * measure_ql
+            m_end = m_start + measure_ql
+            m = music21.stream.Measure(number=m_idx)
+        else:
+            m_start = m_idx * measure_ql
+            m_end = (m_idx + 1) * measure_ql
+            m = music21.stream.Measure(number=m_idx + 1)
         if m_idx == 0:
             m.append(clef_obj)
             m.append(music21.meter.TimeSignature(time_sig))
             m.append(key_obj)
             m.append(music21.tempo.MetronomeMark(number=round(tempo_bpm, 1)))
-        elif m_idx % 4 == 0:
+        elif (m_idx - (1 if has_pickup else 0)) % 4 == 0:
             m.insert(0, music21.layout.SystemLayout(isNew=True))
 
         active_voices: list[tuple[int, list[tuple[float, float, list[int], int]]]] = []
@@ -951,9 +966,18 @@ def score_data_to_musicxml(
     measure_ql = float(ts_obj.barDuration.quarterLength)
     beats_per_sec = max(20.0, score.tempo_bpm) / 60.0
     req_quant = (score.analysis or {}).get("quantization") if isinstance(score.analysis, dict) else None
+    timing_prov = (
+        ((score.analysis or {}).get("timing_provenance") or (score.analysis or {}).get("tempo_diagnostics"))
+        if isinstance(score.analysis, dict)
+        else None
+    )
+    pickup_ql = float((timing_prov or {}).get("pickup_ql") or 0.0) if isinstance(timing_prov, dict) else 0.0
     grid_ql = _select_rhythmic_grid_ql(score.notes, score.tempo_bpm, quantization=req_quant)
     max_note_ql = max((n.offset_sec * beats_per_sec for n in score.notes), default=measure_ql)
-    min_measures = max(1, int(np.ceil(max_note_ql / measure_ql)))
+    if 0.0 < pickup_ql < measure_ql - 1e-6:
+        min_measures = max(1, 1 + int(np.ceil(max(0.0, max_note_ql - pickup_ql) / measure_ql)))
+    else:
+        min_measures = max(1, int(np.ceil(max_note_ql / measure_ql)))
     tracks = score.tracks or [ScoreTrack()]
 
     extend_ordinals: set[int] = set()
@@ -973,6 +997,7 @@ def score_data_to_musicxml(
                 music21.clef.TrebleClef(),
                 min_measures=min_measures,
                 grid_ql=grid_ql,
+                pickup_ql=pickup_ql,
             )
             _attach_ottava_spanners(p_treble)
             if include_chords and (len(tracks) == 1 or track.index == 0):
@@ -990,6 +1015,7 @@ def score_data_to_musicxml(
                 music21.clef.BassClef(),
                 min_measures=min_measures,
                 grid_ql=grid_ql,
+                pickup_ql=pickup_ql,
             )
             m21_score.insert(0, p_bass)
 
@@ -1008,6 +1034,7 @@ def score_data_to_musicxml(
                 clef_obj,
                 min_measures=min_measures,
                 grid_ql=grid_ql,
+                pickup_ql=pickup_ql,
             )
             if track.clef == "treble":
                 _attach_ottava_spanners(p)
@@ -1020,15 +1047,26 @@ def score_data_to_musicxml(
     exporter = music21.musicxml.m21ToXml.GeneralObjectExporter(m21_score)
     xml_bytes = exporter.parse()
     xml_str = xml_bytes.decode("utf-8")
-    if extend_ordinals:
+    has_pickup = 0.0 < pickup_ql < measure_ql - 1e-6
+    if extend_ordinals or has_pickup:
         import xml.etree.ElementTree as ET
 
         root = ET.fromstring(xml_str)
-        first_part = root.find("part")
-        if first_part is not None:
-            for ord_idx, lyr_el in enumerate(first_part.findall(".//note/lyric")):
-                if ord_idx in extend_ordinals and lyr_el.find("extend") is None:
-                    ET.SubElement(lyr_el, "extend")
+        if has_pickup:
+            for part_el in root.findall("part"):
+                part_measures = part_el.findall("measure")
+                for m_idx, m_el in enumerate(part_measures):
+                    if m_idx == 0:
+                        m_el.set("number", "0")
+                        m_el.set("implicit", "yes")
+                    else:
+                        m_el.set("number", str(m_idx))
+        if extend_ordinals:
+            first_part = root.find("part")
+            if first_part is not None:
+                for ord_idx, lyr_el in enumerate(first_part.findall(".//note/lyric")):
+                    if ord_idx in extend_ordinals and lyr_el.find("extend") is None:
+                        ET.SubElement(lyr_el, "extend")
         xml_str = ET.tostring(root, encoding="unicode")
     return apply_scribasheet_musicxml_branding(xml_str, title=clean_title)
 

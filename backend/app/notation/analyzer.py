@@ -364,6 +364,65 @@ def _build_chord_from_pcs(
     return next(iter(chordified.recurse().getElementsByClass(music21.chord.Chord)), None)
 
 
+def _infer_dyad_chord(
+    *,
+    ranked_pcs: list[tuple[int, float]],
+    pc_weights: dict[int, float],
+    bass_pc: int | None,
+    bass_is_sustained: bool,
+    key_pcs: set[int],
+    key_obj: music21.key.Key,
+    cfg: ChordDetectionConfig,
+) -> tuple[str, str, str, float] | None:
+    """Infer an implied triad from a strong 2-pitch-class dyad (e.g. root+3rd or root+5th)."""
+    if not bass_is_sustained or len(ranked_pcs) < 2:
+        return None
+    (pc_a, w_a), (pc_b, w_b) = ranked_pcs[0], ranked_pcs[1]
+    if w_a <= 0 or w_b < 0.45 * w_a:
+        return None
+    total_w = sum(pc_weights.values())
+    if total_w < max(cfg.min_window_total_weight, 0.90):
+        return None
+
+    interval = (pc_b - pc_a) % 12
+    # Determine candidate (root_pc, suffix, quality_name) from harmonic interval
+    candidates: list[tuple[int, str, str]] = []
+    if interval == 4:  # Major 3rd: pc_a -> pc_b
+        candidates.append((pc_a, "", "major"))
+    elif interval == 8:  # Minor 6th: pc_b -> pc_a is Major 3rd
+        candidates.append((pc_b, "", "major"))
+    elif interval in (3, 9):  # Minor 3rd (pc_a -> pc_b) or Major 6th (pc_b -> pc_a)
+        root_pc = pc_a if interval == 3 else pc_b
+        candidates.append((root_pc, "m", "minor"))
+    else:
+        return None
+
+    if not candidates:
+        return None
+
+    best_result: tuple[str, str, str, float] | None = None
+    best_score = -1.0
+    for root_pc, suffix, quality_name in candidates:
+        if bass_pc is None or bass_pc != root_pc:
+            continue
+        if key_pcs and not ({pc_a, pc_b} <= key_pcs or root_pc in key_pcs):
+            continue
+        coverage = (w_a + w_b) / total_w
+        diatonic_ratio = (len({pc_a, pc_b} & key_pcs) / 2.0) if key_pcs else 0.7
+        bass_bonus = 0.14
+        # Penalty vs full 3-note triads so brief 2-note melodic fragments stay suppressed
+        score = min(1.0, max(0.0, 0.62 * coverage + 0.24 * diatonic_ratio + bass_bonus - 0.12))
+        if score > best_score:
+            best_score = score
+            spelled = _spell_pitch_for_key(music21.pitch.Pitch(60 + root_pc), key_obj)
+            root_name = spelled.name.replace("-", "b")
+            best_result = (f"{root_name}{suffix}", root_name, quality_name, score)
+
+    if best_result is None or best_score < max(cfg.min_confidence, 0.78):
+        return None
+    return best_result
+
+
 def _is_complex_extension(cs: music21.harmony.ChordSymbol) -> bool:
     fig = cs.figure or ""
     kind = cs.chordKind or ""
@@ -394,10 +453,21 @@ def _analyze_window_chord(
         key=lambda item: -item[1],
     )
     filtered_pcs = [pc for pc, _ in ranked_pcs[:4]]
-    if len(filtered_pcs) < cfg.min_distinct_pcs:
-        return None
-
     bass_pc = (lowest_midi % 12) if lowest_midi is not None else None
+    key_pcs = {int(p.pitchClass) for p in key_obj.pitches}
+    if len(filtered_pcs) < 2:
+        return None
+    if len(filtered_pcs) < cfg.min_distinct_pcs:
+        return _infer_dyad_chord(
+            ranked_pcs=ranked_pcs[:2],
+            pc_weights=pc_weights,
+            bass_pc=bass_pc,
+            bass_is_sustained=bass_is_sustained,
+            key_pcs=key_pcs,
+            key_obj=key_obj,
+            cfg=cfg,
+        )
+
     include_bass = (
         cfg.allow_slash_chords
         and lowest_midi is not None

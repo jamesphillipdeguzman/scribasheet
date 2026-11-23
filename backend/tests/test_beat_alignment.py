@@ -123,9 +123,9 @@ def test_pickup_notes_before_first_downbeat_preserve_measure_structure() -> None
         DetectedNote(pitch_midi=60, onset_sec=first_db, offset_sec=first_db + spb, velocity=85),
     ]
     tm = build_timing_map(beat_result=bt, notes=notes, duration_seconds=14.0, time_signature="4/4")
-    assert tm.pickup_ql == 4.0
-    assert abs(tm.seconds_to_ql(first_db) - 4.0) < 1e-4
-    assert abs(tm.seconds_to_ql(first_db - spb) - 3.0) < 1e-4
+    assert tm.pickup_ql == 1.0
+    assert abs(tm.seconds_to_ql(first_db) - 1.0) < 1e-4
+    assert abs(tm.seconds_to_ql(first_db - spb) - 0.0) < 1e-4
 
 
 def test_piecewise_tempo_drift_and_80_plus_measures_no_cumulative_drift() -> None:

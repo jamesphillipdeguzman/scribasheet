@@ -39,7 +39,7 @@ from app.notation.analyzer import (
     select_chord_source_notes,
 )
 from app.notation.arrangement import simplify_arrangement
-from app.notation.beat_tracker import track_beats_and_downbeats
+from app.notation.beat_tracker import infer_time_signature_from_beats, track_beats_and_downbeats
 from app.notation.generator import (
     _render_pdf_from_musicxml_via_musescore,
     build_piano_vocal_score_data,
@@ -588,6 +588,10 @@ class RealTranscriptionHandler:
                     beats_per_measure=beats_per_bar,
                     note_durations_sec=note_durs,
                 )
+                time_sig, time_est, meter_diag = infer_time_signature_from_beats(
+                    beat_res,
+                    settings.time_signature,
+                )
                 timing_map = build_timing_map(
                     beat_result=beat_res,
                     notes=refined_notes,
@@ -596,7 +600,7 @@ class RealTranscriptionHandler:
                 )
                 tempo_bpm = timing_map.tempo_bpm
                 tempo_est = True
-                tempo_diag = timing_map.provenance
+                tempo_diag = {**timing_map.provenance, "meter_detection": meter_diag}
             key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
 
             def _serialize_note_list(note_list: list[Any]) -> list[dict[str, Any]]:
