@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Iterable
 from fractions import Fraction
 from pathlib import Path
+from typing import Literal
 
 import music21
 import numpy as np
@@ -86,14 +87,16 @@ def build_score_data(
             if offset <= onset:
                 offset = round(onset + min_dur, 4)
             str_num, fret_num = assign_guitar_tab(n.pitch_midi) if is_guitar else (None, None)
+            raw_onset = round(max(0.0, float(n.onset_sec)), 4)
+            raw_offset = round(max(raw_onset + 0.01, float(n.offset_sec)), 4)
             quantized.append(
                 ScoreNote(
                     id=uuid.uuid4().hex[:12],
                     pitch_midi=n.pitch_midi,
                     onset_sec=onset,
                     offset_sec=offset,
-                    raw_onset_sec=round(n.onset_sec, 4),
-                    raw_offset_sec=round(n.offset_sec, 4),
+                    raw_onset_sec=raw_onset,
+                    raw_offset_sec=raw_offset,
                     velocity=n.velocity,
                     confidence=n.confidence,
                     track_index=0,
@@ -1096,7 +1099,31 @@ def score_data_to_musicxml(
     return apply_scribasheet_musicxml_branding(xml_str, title=clean_title)
 
 
-def score_data_to_midi_bytes(score: ScoreData) -> bytes:
+def get_note_performance_timing(note: ScoreNote) -> tuple[float, float]:
+    """Return expressive performance (onset_sec, offset_sec), falling back safely for legacy notes."""
+    start = float(note.raw_onset_sec) if note.raw_onset_sec is not None else float(note.onset_sec)
+    end = float(note.raw_offset_sec) if note.raw_offset_sec is not None else float(note.offset_sec)
+    start = max(0.0, start)
+    return start, max(start + 0.03, end)
+
+
+def get_note_notation_timing(note: ScoreNote) -> tuple[float, float]:
+    """Return quantized notation (onset_sec, offset_sec) for sheet music and grid rendering."""
+    start = max(0.0, float(note.onset_sec))
+    return start, max(start + 0.03, float(note.offset_sec))
+
+
+def score_data_to_midi_bytes(
+    score: ScoreData,
+    *,
+    timing_mode: Literal["performance", "notation"] = "performance",
+) -> bytes:
+    """Serialize ScoreData to Standard MIDI bytes.
+
+    Uses original detected performance timing (``raw_onset_sec`` / ``raw_offset_sec``)
+    by default so exported MIDI preserves expressive timing, while supporting explicit
+    ``timing_mode="notation"`` when quantized grid timing is requested.
+    """
     pm = pretty_midi.PrettyMIDI(initial_tempo=max(20.0, float(score.tempo_bpm)))
     tracks = score.tracks or [ScoreTrack()]
     track_map = {t.index: t for t in tracks}
@@ -1111,12 +1138,17 @@ def score_data_to_midi_bytes(score: ScoreData) -> bytes:
         if t_idx not in instruments:
             t_meta = track_map.get(t_idx, ScoreTrack())
             instruments[t_idx] = pretty_midi.Instrument(program=t_meta.program, name=t_meta.name)
+        start_sec, end_sec = (
+            get_note_notation_timing(n)
+            if timing_mode == "notation"
+            else get_note_performance_timing(n)
+        )
         instruments[t_idx].notes.append(
             pretty_midi.Note(
                 velocity=max(1, min(127, n.velocity)),
                 pitch=max(0, min(127, n.pitch_midi)),
-                start=max(0.0, float(n.onset_sec)),
-                end=max(float(n.onset_sec) + 0.03, float(n.offset_sec)),
+                start=start_sec,
+                end=end_sec,
             )
         )
 

@@ -6,6 +6,14 @@ from app.schemas.common import UTCDatetime
 
 
 class ScoreNote(BaseModel):
+    """Canonical note event carrying both quantized notation timing and raw performance timing.
+
+    - ``onset_sec`` / ``offset_sec``: Quantized notation timing used for MusicXML,
+      measures, Piano Roll grid, and notation-synchronized playback.
+    - ``raw_onset_sec`` / ``raw_offset_sec``: Original detected performance timing
+      preserved for expressive MIDI exports and arrangement re-quantization.
+    """
+
     id: str
     pitch_midi: int = Field(ge=0, le=127)
     onset_sec: float = Field(ge=0.0)

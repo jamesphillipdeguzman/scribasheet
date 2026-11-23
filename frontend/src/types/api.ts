@@ -130,6 +130,8 @@ export interface ScoreNote {
   pitch_midi: number;
   onset_sec: number;
   offset_sec: number;
+  raw_onset_sec?: number | null;
+  raw_offset_sec?: number | null;
   velocity: number;
   confidence?: number | null;
   track_index: number;
