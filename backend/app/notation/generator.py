@@ -120,6 +120,20 @@ def build_score_data(
                 continue
             if prev.offset_sec > cur.onset_sec:
                 prev.offset_sec = round(cur.onset_sec, 4)
+            elif (
+                quantization != "none"
+                and cur.pitch_midi != prev.pitch_midi
+                and 0.0 < (cur.onset_sec - prev.offset_sec) <= min(0.16, grid_ql * sec_per_beat * 1.05)
+            ):
+                # Bridge tiny notation micro-rests between syllables in monophonic vocal phrases
+                # without touching raw_onset_sec / raw_offset_sec or merging repeated pitches.
+                raw_gap = (
+                    (cur.raw_onset_sec - prev.raw_offset_sec)
+                    if (cur.raw_onset_sec is not None and prev.raw_offset_sec is not None)
+                    else (cur.onset_sec - prev.offset_sec)
+                )
+                if raw_gap <= 0.14 and (prev.offset_sec - prev.onset_sec) >= min_dur * 1.5:
+                    prev.offset_sec = cur.onset_sec
             mono_quantized.append(cur)
         score_notes = mono_quantized
 

@@ -257,12 +257,14 @@ def analyze_timing_and_build_score(
         if piano_vocal_active or core_res.is_vocal_melody_route or (settings.instrument or "").strip().lower() == "vocals":
             app_cfg = get_settings()
             vocal_range = (app_cfg.VOCAL_RANGE_MIN_MIDI, app_cfg.VOCAL_RANGE_MAX_MIDI)
+        accomp_notes_for_bleed = [*core_res.other_refined_notes, *core_res.bass_refined_notes] or None
         melody_result = extract_lead_melody(
             melody_source_notes,
             tempo_bpm=tempo_bpm,
             timing_map=timing_map,
             vocal_range=vocal_range,
             key_signature=key_sig,
+            accompaniment_notes=accomp_notes_for_bleed,
         )
         arranged_notes = melody_result.notes or melody_source_notes
         arrangement_detail_value = settings.arrangement_detail

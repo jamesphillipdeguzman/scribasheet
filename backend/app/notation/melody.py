@@ -431,12 +431,160 @@ def _enforce_monophony(
     return monophonic, trimmed_count
 
 
+def _suppress_intro_percussion_and_transients(
+    notes: list[DetectedNote],
+    beat_sec: float,
+) -> tuple[list[DetectedNote], int]:
+    """Suppress isolated percussion/transient bleed before the first sustained vocal phrase.
+
+    Preserves quiet but sustained vocal entrances and legitimate short pickup notes
+    that connect directly into the opening phrase.
+    """
+    if len(notes) < 2:
+        return list(notes), 0
+
+    ordered = sorted(notes, key=lambda n: (n.onset_sec, n.pitch_midi))
+    sustained_min_dur = max(0.18, beat_sec * 0.30)
+    pickup_connect_gap = max(0.35, beat_sec * 0.65)
+    isolated_gap = max(0.55, beat_sec * 0.90)
+
+    # Locate the start of the first genuine vocal phrase:
+    # either a sustained note (>= sustained_min_dur) or >= 3 connected notes with
+    # melodic continuity (<= 7 semitones) and average duration >= 0.14s.
+    first_phrase_idx: int | None = None
+    for idx, n in enumerate(ordered):
+        dur = max(0.0, n.offset_sec - n.onset_sec)
+        conf = n.confidence if n.confidence is not None else 0.72
+        if dur >= sustained_min_dur and (conf >= 0.38 or n.velocity >= 42):
+            first_phrase_idx = idx
+            break
+        if idx + 2 < len(ordered):
+            window = ordered[idx : idx + 3]
+            gaps_ok = all(window[k + 1].onset_sec - window[k].offset_sec <= 0.25 for k in range(2))
+            steps_ok = all(1 <= abs(window[k + 1].pitch_midi - window[k].pitch_midi) <= 7 for k in range(2))
+            mean_dur = sum(max(0.0, w.offset_sec - w.onset_sec) for w in window) / 3.0
+            if gaps_ok and steps_ok and mean_dur >= 0.13:
+                first_phrase_idx = idx
+                break
+
+    if first_phrase_idx is None or first_phrase_idx == 0:
+        return ordered, 0
+
+    phrase_start_note = ordered[first_phrase_idx]
+    kept: list[DetectedNote] = []
+    removed = 0
+
+    for idx, n in enumerate(ordered):
+        if idx >= first_phrase_idx:
+            kept.append(n)
+            continue
+
+        dur = max(0.0, n.offset_sec - n.onset_sec)
+        conf = n.confidence if n.confidence is not None else 0.70
+        gap_to_phrase = phrase_start_note.onset_sec - n.offset_sec
+
+        # Preserve legitimate pickup notes immediately preceding the opening phrase
+        if (
+            gap_to_phrase <= pickup_connect_gap
+            and abs(n.pitch_midi - phrase_start_note.pitch_midi) <= 9
+            and (dur >= 0.10 or conf >= 0.58)
+        ):
+            kept.append(n)
+            continue
+
+        # Suppress short/weak/chromatic transient blips before a clear gap or before the phrase
+        is_transient = dur < max(0.14, beat_sec * 0.28) and (
+            gap_to_phrase >= isolated_gap or conf < 0.64 or n.velocity < 62
+        )
+        if is_transient:
+            removed += 1
+            continue
+
+        kept.append(n)
+
+    return (kept or ordered), (removed if kept else 0)
+
+
+def _reject_octave_and_accompaniment_bleed(
+    notes: list[DetectedNote],
+    accompaniment_notes: list[DetectedNote] | None = None,
+) -> tuple[list[DetectedNote], int]:
+    """Reject isolated octave-jump / accompaniment-bleed notes using local phrase contour.
+
+    Preserves legitimate octave jumps and low-register phrases (sustained >= 2 notes
+    or strong sustained solo notes).
+    """
+    if len(notes) < 3:
+        return list(notes), 0
+
+    accomp = accompaniment_notes or []
+    kept: list[DetectedNote] = []
+    rejected = 0
+
+    for idx, cur in enumerate(notes):
+        # Build local context window from neighboring notes (excluding cur)
+        lo_i = max(0, idx - 4)
+        hi_i = min(len(notes), idx + 5)
+        neighbors = [notes[j] for j in range(lo_i, hi_i) if j != idx and abs(notes[j].onset_sec - cur.onset_sec) <= 4.0]
+        if len(neighbors) < 2:
+            kept.append(cur)
+            continue
+
+        local_med = float(median(n.pitch_midi for n in neighbors))
+        local_med_vel = float(median(n.velocity for n in neighbors))
+        cur_dur = max(0.0, cur.offset_sec - cur.onset_sec)
+        cur_conf = cur.confidence if cur.confidence is not None else 0.70
+        diff_from_med = cur.pitch_midi - local_med
+
+        # Check if cur is an isolated sudden octave/subharmonic dip (or extreme octave spike)
+        is_octave_jump = 10.0 <= abs(diff_from_med) <= 24.0
+        if not is_octave_jump:
+            kept.append(cur)
+            continue
+
+        # If next note also stays in the new register, it's a legitimate register shift
+        next_stays = (
+            idx + 1 < len(notes)
+            and abs(notes[idx + 1].pitch_midi - cur.pitch_midi) <= 5
+            and notes[idx + 1].onset_sec - cur.offset_sec <= 0.6
+        )
+        prev_was_there = (
+            idx - 1 >= 0
+            and abs(notes[idx - 1].pitch_midi - cur.pitch_midi) <= 5
+            and cur.onset_sec - notes[idx - 1].offset_sec <= 0.6
+        )
+        if next_stays or prev_was_there:
+            kept.append(cur)
+            continue
+
+        # Check simultaneous accompaniment overlap (same pitch class / exact pitch in accompaniment)
+        matches_accomp = any(
+            abs(a.onset_sec - cur.onset_sec) <= 0.08
+            and (a.pitch_midi == cur.pitch_midi or abs(a.pitch_midi - cur.pitch_midi) == 12)
+            for a in accomp
+        )
+
+        weak_or_short = cur_dur < 0.32 or cur_conf < 0.68 or cur.velocity < local_med_vel - 8
+        strong_sustained = cur_dur >= 0.45 and cur.velocity >= local_med_vel - 5 and cur_conf >= 0.72
+
+        if (diff_from_med <= -10.0 and (weak_or_short or matches_accomp) and not strong_sustained) or (
+            diff_from_med >= 11.0 and matches_accomp and weak_or_short
+        ):
+            rejected += 1
+            continue
+
+        kept.append(cur)
+
+    return (kept or notes), (rejected if kept else 0)
+
+
 def extract_lead_melody(
     notes: list[DetectedNote],
     tempo_bpm: float = 120.0,
     timing_map: Any = None,
     vocal_range: tuple[int, int] | None = None,
     key_signature: str | None = None,
+    accompaniment_notes: list[DetectedNote] | None = None,
 ) -> MelodyExtractionResult:
     """Extract a single, coherent monophonic melody line from polyphonic notes.
 
@@ -461,12 +609,19 @@ def extract_lead_melody(
         )
 
     filtered_outlier_count = 0
+    intro_transients_suppressed = 0
+    octave_bleed_rejected = 0
     diatonic_pcs = _key_diatonic_pcs(key_signature)
-    if vocal_range is not None:
-        valid_notes, filtered_outlier_count = _filter_vocal_outliers(valid_notes, vocal_range)
 
     effective_bpm = float(getattr(timing_map, "tempo_bpm", None) or tempo_bpm or 120.0)
     beat_sec = 60.0 / max(30.0, effective_bpm)
+
+    if vocal_range is not None:
+        valid_notes, filtered_outlier_count = _filter_vocal_outliers(valid_notes, vocal_range)
+        valid_notes, intro_transients_suppressed = _suppress_intro_percussion_and_transients(
+            valid_notes, beat_sec=beat_sec
+        )
+
     onset_tolerance_sec = max(0.025, min(0.055, beat_sec * 0.08))
 
     clusters = _cluster_by_onset(valid_notes, onset_tolerance_sec=onset_tolerance_sec)
@@ -552,6 +707,10 @@ def extract_lead_melody(
     vibrato_smoothed = 0
     same_pitch_merges = 0
     if vocal_range is not None:
+        filtered_selected, octave_bleed_rejected = _reject_octave_and_accompaniment_bleed(
+            filtered_selected,
+            accompaniment_notes=accompaniment_notes,
+        )
         filtered_selected, vibrato_smoothed, same_pitch_merges = _smooth_vocal_vibrato_and_glitches(
             filtered_selected,
             diatonic_pcs=diatonic_pcs,
@@ -579,6 +738,8 @@ def extract_lead_melody(
             "uncertain_segment_count": len(uncertain_segments),
             "trimmed_overlaps": trimmed_overlaps,
             "filtered_outlier_count": filtered_outlier_count,
+            "intro_transients_suppressed": intro_transients_suppressed,
+            "octave_bleed_rejected": octave_bleed_rejected,
             "vibrato_smoothed_count": vibrato_smoothed,
             "same_pitch_merges": same_pitch_merges,
             "vocal_range": list(vocal_range) if vocal_range is not None else None,
