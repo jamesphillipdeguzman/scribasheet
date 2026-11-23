@@ -200,7 +200,7 @@ export function PracticeCascade({
 
   const effectivePlaying = onTogglePlay ? isPlaying : localPlaying;
 
-  const handlePlayPause = () => {
+  const handlePlayPause = async () => {
     if (onTogglePlay) {
       onTogglePlay();
       return;
@@ -210,8 +210,11 @@ export function PracticeCascade({
       setLocalPlaying(false);
       return;
     }
+    if (midiSynth.needsSamplerWait()) {
+      await midiSynth.loaded();
+    }
     setLocalPlaying(true);
-      midiSynth.start({
+    void midiSynth.start({
       notes,
       fromSec: playheadSec,
       durationSec: Math.max(1, durationSeconds),
@@ -432,7 +435,12 @@ export function PracticeCascade({
       {/* Practice Cascade Controls */}
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#27273A] bg-[#09090F] px-3 py-2 text-xs shrink-0">
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" onClick={handlePlayPause} aria-label={effectivePlaying ? "Pause cascade" : "Play cascade"}>
+          <Button
+            size="sm"
+            onClick={() => void handlePlayPause()}
+            title="Play / Stop (Space)"
+            aria-label={effectivePlaying ? "Pause cascade" : "Play cascade"}
+          >
             {effectivePlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
             {effectivePlaying ? "Pause" : "Play"}
           </Button>

@@ -182,6 +182,10 @@ export function PianoRollEditor({
   const gridRef = useRef<HTMLDivElement>(null);
   const keyboardBodyRef = useRef<HTMLDivElement>(null);
   const prevPlayingRef = useRef(isPlaying);
+
+  useEffect(() => {
+    midiSynth.preloadPiano();
+  }, []);
   const notesRef = useRef(notes);
   notesRef.current = notes;
   const selectedIdsRef = useRef(selectedNoteIds);

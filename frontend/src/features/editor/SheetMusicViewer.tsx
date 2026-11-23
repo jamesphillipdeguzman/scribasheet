@@ -107,6 +107,8 @@ export function SheetMusicViewer({
   const selectedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
   const svgNoteTargetMapRef = useRef<WeakMap<Element, XmlNoteTarget>>(new WeakMap());
   const cursorSnapshotsRef = useRef<OsmdCursorSnapshot[]>([]);
+  const pickupPaddingWholeRef = useRef<number>(0);
+  const firstSoundingSecRef = useRef<number>(0);
   const lastCursorWholeRef = useRef<number>(-1);
   const lastFollowedSystemRef = useRef<number>(-1);
   const manualScrollPauseUntilRef = useRef<number>(0);
@@ -327,17 +329,95 @@ export function SheetMusicViewer({
   // Build OSMD iterator timeline & SVG notehead -> XmlNoteTarget map after render
   const indexRenderedScore = (osmd: OpenSheetMusicDisplay, activeTimeline: ReturnType<typeof buildMusicXmlTimeline>) => {
     const snapshots: OsmdCursorSnapshot[] = [];
+    let phantomPaddingWhole = 0;
+    let firstSoundingSec: number | null = null;
+
     if (osmd.cursor?.iterator) {
       try {
         osmd.cursor.reset();
         let prevReal = -1;
         let step = 0;
+
+        interface RawCursorEntry {
+          rawReal: number;
+          measureNumber: number;
+          fullBarWhole: number;
+          pickupDurationWhole: number;
+          hasSounding: boolean;
+          stepIndex: number;
+        }
+        const rawEntries: RawCursorEntry[] = [];
+
         while (!osmd.cursor.iterator.EndReached && step < 4000) {
-          const real = osmd.cursor.iterator.currentTimeStamp?.RealValue ?? 0;
+          const iter = osmd.cursor.iterator as unknown as {
+            currentTimeStamp?: { RealValue?: number };
+            CurrentMeasure?: {
+              MeasureNumber?: number;
+              Duration?: { RealValue?: number };
+              ActiveTimeSignature?: { Numerator?: number; Denominator?: number; RealValue?: number };
+            };
+            CurrentSourceMeasure?: {
+              MeasureNumber?: number;
+              Duration?: { RealValue?: number };
+              ActiveTimeSignature?: { Numerator?: number; Denominator?: number; RealValue?: number };
+            };
+            CurrentVoiceEntries?: Array<{
+              ParentSourceStaffEntry?: {
+                VerticalContainerParent?: {
+                  ParentMeasure?: {
+                    MeasureNumber?: number;
+                    Duration?: { RealValue?: number };
+                    ActiveTimeSignature?: { Numerator?: number; Denominator?: number; RealValue?: number };
+                  };
+                };
+              };
+            }>;
+          };
+
+          const real = iter.currentTimeStamp?.RealValue ?? 0;
           if (step > 0 && real <= prevReal) break; // Guard against mocked/non-advancing iterator
-          snapshots.push({
-            wholeNote: real,
-            sec: wholeNotesToTimeSec(activeTimeline, real, tempoBpm),
+
+          const measureObj =
+            iter.CurrentMeasure ??
+            iter.CurrentSourceMeasure ??
+            iter.CurrentVoiceEntries?.[0]?.ParentSourceStaffEntry?.VerticalContainerParent?.ParentMeasure;
+
+          const mNum =
+            typeof measureObj?.MeasureNumber === "number"
+              ? measureObj.MeasureNumber
+              : activeTimeline.segments[0]?.measureNumber === 0 && step === 0
+                ? 0
+                : 1;
+
+          const ts = measureObj?.ActiveTimeSignature;
+          const fullBarWhole =
+            ts && typeof ts.Numerator === "number" && typeof ts.Denominator === "number" && ts.Denominator > 0
+              ? ts.Numerator / ts.Denominator
+              : typeof ts?.RealValue === "number" && ts.RealValue > 0
+                ? ts.RealValue
+                : 1.0;
+
+          const pickupDurationWhole =
+            typeof measureObj?.Duration?.RealValue === "number" && measureObj.Duration.RealValue > 0
+              ? measureObj.Duration.RealValue
+              : 0;
+
+          let hasSounding = true;
+          if (typeof osmd.cursor.NotesUnderCursor === "function") {
+            const notesUnder = osmd.cursor.NotesUnderCursor() as Array<{ isRest?: () => boolean; IsRest?: boolean }>;
+            if (Array.isArray(notesUnder) && notesUnder.length > 0) {
+              hasSounding = notesUnder.some((n) =>
+                typeof n.isRest === "function" ? !n.isRest() : !Boolean(n.IsRest),
+              );
+            }
+          }
+
+          rawEntries.push({
+            rawReal: real,
+            measureNumber: mNum,
+            fullBarWhole,
+            pickupDurationWhole,
+            hasSounding,
             stepIndex: step,
           });
           prevReal = real;
@@ -345,10 +425,60 @@ export function SheetMusicViewer({
           step++;
         }
         osmd.cursor.reset();
+
+        // Detect implicit Measure 0 pickup bar and compute phantom padding: fullBarBeats - pickupBeats
+        const m0Entry = rawEntries.find((e) => e.measureNumber === 0);
+        const m1Entry = rawEntries.find((e) => e.measureNumber >= 1);
+        if (m0Entry && m1Entry) {
+          const m0TimelineSeg = activeTimeline.segments.find((s) => s.measureNumber === 0);
+          const timelinePickupWhole = m0TimelineSeg
+            ? Math.max(0, m0TimelineSeg.wholeNoteEnd - m0TimelineSeg.wholeNoteStart)
+            : 0;
+          const pickupWhole =
+            m0Entry.pickupDurationWhole > 0 && m0Entry.pickupDurationWhole < m0Entry.fullBarWhole
+              ? m0Entry.pickupDurationWhole
+              : timelinePickupWhole;
+          if (pickupWhole > 0 && pickupWhole < m0Entry.fullBarWhole) {
+            const fullBarBeats = m0Entry.fullBarWhole * 4;
+            const pickupBeats = pickupWhole * 4;
+            const expectedPaddingWhole = Math.max(0, (fullBarBeats - pickupBeats) / 4);
+            const observedSpanWhole = Math.max(0, m1Entry.rawReal - m0Entry.rawReal);
+            // Only subtract phantom padding that OSMD actually inserted between Measure 0 and Measure 1
+            phantomPaddingWhole =
+              observedSpanWhole > pickupWhole + 1e-4
+                ? Math.min(expectedPaddingWhole, observedSpanWhole - pickupWhole)
+                : 0;
+          }
+        }
+
+        for (const entry of rawEntries) {
+          const correctedWhole =
+            entry.measureNumber >= 1
+              ? Math.max(0, entry.rawReal - phantomPaddingWhole)
+              : entry.rawReal;
+          const sec = wholeNotesToTimeSec(activeTimeline, correctedWhole, tempoBpm);
+          if (firstSoundingSec === null && entry.hasSounding) {
+            firstSoundingSec = sec;
+          }
+          snapshots.push({
+            wholeNote: entry.rawReal,
+            sec,
+            stepIndex: entry.stepIndex,
+          });
+        }
+
+        const anchorSec = firstSoundingSec ?? snapshots[0]?.sec ?? 0;
+        firstSoundingSecRef.current = anchorSec;
+        if (anchorSec > 0) {
+          for (const snap of snapshots) {
+            snap.sec = Math.max(0, snap.sec - anchorSec);
+          }
+        }
       } catch {
         // Ignore iterator indexing errors
       }
     }
+    pickupPaddingWholeRef.current = phantomPaddingWhole;
     cursorSnapshotsRef.current = snapshots;
 
     // Map rendered SVG notehead elements to XmlNoteTarget for direct editing
@@ -662,15 +792,17 @@ export function SheetMusicViewer({
       const dist = Math.hypot(osmdX - cx, (osmdY - cy) * 1.5);
       if (dist < bestDist) {
         bestDist = dist;
+        const mNum = gm.MeasureNumber ?? gm.parentSourceMeasure?.MeasureNumber ?? 1;
         const mStart = gm.parentSourceMeasure?.AbsoluteTimestamp?.RealValue ?? 0;
         const mDur = gm.parentSourceMeasure?.Duration?.RealValue ?? 0;
         const frac = size.width > 0 ? Math.max(0, Math.min(0.95, (osmdX - pos.x) / size.width)) : 0;
-        bestWhole = mStart + frac * mDur;
+        const rawWhole = mStart + frac * mDur;
+        bestWhole = mNum >= 1 ? Math.max(0, rawWhole - pickupPaddingWholeRef.current) : rawWhole;
       }
     }
 
     if (Number.isFinite(bestDist) && bestDist < Infinity) {
-      const targetSec = wholeNotesToTimeSec(timeline, bestWhole, tempoBpm);
+      const targetSec = Math.max(0, wholeNotesToTimeSec(timeline, bestWhole, tempoBpm) - firstSoundingSecRef.current);
       onSeek(targetSec);
     }
   };
@@ -703,6 +835,7 @@ export function SheetMusicViewer({
               <Button
                 size="sm"
                 onClick={onTogglePlay}
+                title="Play / Stop (Space)"
                 aria-label={isPlaying ? "Pause sheet music" : "Play sheet music"}
               >
                 {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}

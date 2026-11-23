@@ -62,7 +62,12 @@ export class MidiSynthesizer {
   private convolver: ConvolverNode | null = null;
   private pianoSampler: SplendidGrandPiano | null = null;
   private pianoLoaded = false;
-  private sfSamplers = new Map<number, { inst: Soundfont; loaded: boolean }>();
+  private pianoLoadFailed = false;
+  private pianoLoadPromise: Promise<boolean> | null = null;
+  private sfSamplers = new Map<
+    number,
+    { inst: Soundfont; loaded: boolean; failed: boolean; loadPromise: Promise<boolean> }
+  >();
   private activeOscs: Set<{ stop: () => void }> = new Set();
   private sustainedVoices: Map<number, { release: () => void }> = new Map();
   private rafId: number | null = null;
@@ -72,6 +77,10 @@ export class MidiSynthesizer {
   private currentPlaybackRate = 1;
   private scheduledNotes = new Set<string>();
   private lastBeatTick = -1;
+  private startToken = 0;
+  private sessionAllowPianoSampler = true;
+  private sessionAllowSfSamplers = new Set<number>();
+  private gestureListenersAttached = false;
 
   public getPlaybackClock(): { isPlaying: boolean; currentSec: number } {
     if (!this.isPlaying) {
@@ -130,15 +139,25 @@ export class MidiSynthesizer {
     if (typeof fetch !== "function") return;
     const dest = this.getOutputNode(ctx);
     if (program === 0) {
-      if (!this.pianoSampler) {
+      if (!this.pianoSampler && !this.pianoLoadFailed) {
         try {
           const piano = new SplendidGrandPiano(ctx, { destination: dest });
           this.pianoSampler = piano;
-          void piano.load.then(() => {
-            this.pianoLoaded = true;
-          }).catch(() => {});
+          const maybeLoaded = (piano as unknown as { loaded?: () => Promise<unknown> }).loaded;
+          const rawPromise =
+            typeof maybeLoaded === "function" ? maybeLoaded.call(piano) : piano.load;
+          this.pianoLoadPromise = Promise.resolve(rawPromise)
+            .then(() => {
+              this.pianoLoaded = true;
+              this.pianoLoadFailed = false;
+              return true;
+            })
+            .catch(() => {
+              this.pianoLoadFailed = true;
+              return false;
+            });
         } catch {
-          // Fallback to WebAudio synth
+          this.pianoLoadFailed = true;
         }
       }
       return;
@@ -150,14 +169,58 @@ export class MidiSynthesizer {
           instrument: programToSoundfontName(program),
           destination: dest,
         });
-        const entry = { inst: sf, loaded: false };
+        const entry = {
+          inst: sf,
+          loaded: false,
+          failed: false,
+          loadPromise: Promise.resolve(false),
+        };
+        const maybeLoaded = (sf as unknown as { loaded?: () => Promise<unknown> }).loaded;
+        const rawPromise = typeof maybeLoaded === "function" ? maybeLoaded.call(sf) : sf.load;
+        entry.loadPromise = Promise.resolve(rawPromise)
+          .then(() => {
+            entry.loaded = true;
+            entry.failed = false;
+            return true;
+          })
+          .catch(() => {
+            entry.failed = true;
+            return false;
+          });
         this.sfSamplers.set(program, entry);
-        void sf.load.then(() => {
-          entry.loaded = true;
-        }).catch(() => {});
       } catch {
         // Fallback to WebAudio synth
       }
+    }
+  }
+
+  private attachGestureResumeListeners() {
+    if (this.gestureListenersAttached || typeof window === "undefined") return;
+    this.gestureListenersAttached = true;
+
+    const events = ["pointerdown", "keydown", "touchstart"] as const;
+    const cleanup = () => {
+      for (const evt of events) {
+        window.removeEventListener(evt, onGesture);
+      }
+      this.gestureListenersAttached = false;
+    };
+    const onGesture = () => {
+      if (!this.ctx) return;
+      if (this.ctx.state === "suspended") {
+        void this.ctx
+          .resume()
+          .then(() => {
+            if (this.ctx?.state === "running") cleanup();
+          })
+          .catch(() => {});
+      } else if (this.ctx.state === "running") {
+        cleanup();
+      }
+    };
+
+    for (const evt of events) {
+      window.addEventListener(evt, onGesture, { passive: true });
     }
   }
 
@@ -167,11 +230,76 @@ export class MidiSynthesizer {
       this.ctx = new AudioCtx();
     }
     if (this.ctx.state === "suspended") {
-      void this.ctx.resume();
+      void this.ctx.resume().catch(() => {});
     }
+    this.attachGestureResumeListeners();
     this.setupOutputBus(this.ctx);
     this.ensureSampler(this.ctx, 0);
     return this.ctx;
+  }
+
+  public preloadPiano(): void {
+    if (typeof window === "undefined") return;
+    try {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      if (!this.ctx) {
+        this.ctx = new AudioCtx();
+      }
+      this.attachGestureResumeListeners();
+      this.setupOutputBus(this.ctx);
+      this.ensureSampler(this.ctx, 0);
+    } catch {
+      // Ignore in restricted environments
+    }
+  }
+
+  public isPianoReady(): boolean {
+    return this.pianoLoaded;
+  }
+
+  public needsSamplerWait(programs: number[] = [0]): boolean {
+    const unique = programs.length > 0 ? Array.from(new Set(programs)) : [0];
+    for (const prog of unique) {
+      if (prog === 0) {
+        if (this.pianoLoadPromise !== null && !this.pianoLoaded && !this.pianoLoadFailed) {
+          return true;
+        }
+      } else {
+        const entry = this.sfSamplers.get(prog);
+        if (entry && !entry.loaded && !entry.failed) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  public async loaded(programs: number[] = [0]): Promise<boolean> {
+    try {
+      const ctx = this.ensureContext();
+      const unique = programs.length > 0 ? Array.from(new Set(programs)) : [0];
+      const waits: Promise<boolean>[] = [];
+      for (const prog of unique) {
+        this.ensureSampler(ctx, prog);
+        if (prog === 0) {
+          if (this.pianoLoadPromise && !this.pianoLoaded && !this.pianoLoadFailed) {
+            waits.push(this.pianoLoadPromise);
+          }
+        } else {
+          const entry = this.sfSamplers.get(prog);
+          if (entry && !entry.loaded && !entry.failed) {
+            waits.push(entry.loadPromise);
+          }
+        }
+      }
+      if (waits.length > 0) {
+        await Promise.all(waits);
+      }
+    } catch {
+      // Ignore in restricted environments
+    }
+    return this.pianoLoaded;
   }
 
   public triggerNote(
@@ -189,7 +317,8 @@ export class MidiSynthesizer {
     const scaledVel = Math.max(1, Math.min(127, Math.round(clampedVel * Math.max(0.1, Math.min(1.4, volume)))));
     const holdSec = Math.max(0.06, durationSec);
 
-    if (program === 0 && this.pianoSampler && this.pianoLoaded) {
+    const allowPiano = !this.isPlaying || this.sessionAllowPianoSampler;
+    if (program === 0 && allowPiano && this.pianoSampler && this.pianoLoaded) {
       const stopFn = this.pianoSampler.start({
         note: pitchMidi,
         velocity: scaledVel,
@@ -203,7 +332,8 @@ export class MidiSynthesizer {
     }
 
     const sfEntry = this.sfSamplers.get(program);
-    if (sfEntry && sfEntry.loaded) {
+    const allowSf = !this.isPlaying || this.sessionAllowSfSamplers.has(program);
+    if (sfEntry && allowSf && sfEntry.loaded) {
       const stopFn = sfEntry.inst.start({
         note: pitchMidi,
         velocity: scaledVel,
@@ -416,9 +546,51 @@ export class MidiSynthesizer {
     trackVolumes?: Record<number, number>;
     onPosition: (sec: number) => void;
     onEnd: () => void;
-  }) {
-    this.stop();
-    this.ensureContext();
+  }): Promise<void> | void {
+    const token = ++this.startToken;
+    this.stopPlaybackOnly();
+    const ctx = this.ensureContext();
+    const requiredPrograms = Array.from(
+      new Set([0, ...Object.values(options.trackPrograms ?? {})])
+    );
+    for (const prog of requiredPrograms) {
+      this.ensureSampler(ctx, prog);
+    }
+
+    if (this.needsSamplerWait(requiredPrograms)) {
+      return this.loaded(requiredPrograms).then(() => {
+        if (token !== this.startToken) return;
+        this.beginPlaybackLoop(options, requiredPrograms);
+      });
+    }
+    this.beginPlaybackLoop(options, requiredPrograms);
+  }
+
+  private beginPlaybackLoop(
+    options: {
+      notes: ScoreNote[];
+      fromSec: number;
+      durationSec: number;
+      tempoBpm: number;
+      playbackRate: number;
+      volume: number;
+      loop: boolean;
+      metronome: boolean;
+      trackPrograms?: Record<number, number>;
+      trackVolumes?: Record<number, number>;
+      onPosition: (sec: number) => void;
+      onEnd: () => void;
+    },
+    requiredPrograms: number[]
+  ) {
+    this.sessionAllowPianoSampler = this.pianoLoaded;
+    this.sessionAllowSfSamplers.clear();
+    for (const prog of requiredPrograms) {
+      if (prog !== 0 && this.sfSamplers.get(prog)?.loaded) {
+        this.sessionAllowSfSamplers.add(prog);
+      }
+    }
+
     this.isPlaying = true;
     this.startPerfMs = performance.now();
     this.startOffsetSec = options.fromSec;
@@ -430,7 +602,6 @@ export class MidiSynthesizer {
       options.durationSec,
       options.notes.reduce((m, n) => Math.max(m, n.offset_sec), 0) + 0.35
     );
-    const secPerBeat = 60 / Math.max(20, options.tempoBpm);
     let prevSec = options.fromSec - 0.01;
 
     const tick = () => {
@@ -480,7 +651,7 @@ export class MidiSynthesizer {
     this.rafId = requestAnimationFrame(tick);
   }
 
-  public stop() {
+  private stopPlaybackOnly() {
     this.isPlaying = false;
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
@@ -488,6 +659,11 @@ export class MidiSynthesizer {
     }
     this.activeOscs.forEach((o) => o.stop());
     this.activeOscs.clear();
+  }
+
+  public stop() {
+    this.startToken++;
+    this.stopPlaybackOnly();
   }
 }
 

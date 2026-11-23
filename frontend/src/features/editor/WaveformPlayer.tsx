@@ -152,6 +152,7 @@ export function WaveformPlayer({
   }, [playbackRate, volume]);
 
   useEffect(() => {
+    midiSynth.preloadPiano();
     return () => {
       midiSynth.stop();
       if (metronomeEngine.getMode() !== "standalone") {
@@ -207,11 +208,21 @@ export function WaveformPlayer({
     }
   }, [isPlaying, sourceMode, metronomeSettings, tempoBpm, playbackRate, timeSignature]);
 
-  const startMidiPlayback = (fromSec: number) => {
+  const playAttemptRef = useRef(0);
+
+  const startMidiPlayback = async (fromSec: number) => {
+    const attemptId = ++playAttemptRef.current;
     if (wsRef.current?.isPlaying()) wsRef.current.pause();
+
+    if (midiSynth.needsSamplerWait()) {
+      await midiSynth.loaded();
+      if (attemptId !== playAttemptRef.current) return;
+    }
+
     const beginSynth = () => {
+      if (attemptId !== playAttemptRef.current) return;
       setIsPlaying(true);
-      midiSynth.start({
+      void midiSynth.start({
         notes,
         fromSec,
         durationSec: durationSeconds,
@@ -264,6 +275,7 @@ export function WaveformPlayer({
   }, [seekRequest?.nonce]);
 
   const stopAll = () => {
+    playAttemptRef.current++;
     midiSynth.stop();
     if (metronomeEngine.getMode() !== "standalone") {
       metronomeEngine.stop();
@@ -278,13 +290,40 @@ export function WaveformPlayer({
       return;
     }
     if (sourceMode === "original" && wsRef.current) {
+      playAttemptRef.current++;
       midiSynth.stop();
       wsRef.current.play();
       setIsPlaying(true);
     } else {
-      startMidiPlayback(playheadSec);
+      void startMidiPlayback(playheadSec);
     }
   };
+
+  const togglePlayRef = useRef(togglePlay);
+  togglePlayRef.current = togglePlay;
+
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== "Space" && e.key !== " ") return;
+      if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable ||
+          (typeof target.closest === "function" &&
+            target.closest('input, textarea, select, [contenteditable="true"]') !== null))
+      ) {
+        return;
+      }
+      e.preventDefault();
+      togglePlayRef.current();
+    };
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, []);
 
   const handleStopReset = () => {
     stopAll();
@@ -336,7 +375,12 @@ export function WaveformPlayer({
     <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-3 sm:p-4 space-y-3 w-full min-w-0 overflow-visible">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <Button size="sm" onClick={togglePlay} aria-label={isPlaying ? "Pause playback" : "Play"}>
+          <Button
+            size="sm"
+            onClick={togglePlay}
+            title="Play / Stop (Space)"
+            aria-label={isPlaying ? "Pause playback" : "Play"}
+          >
             {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
             {isPlaying ? "Pause" : "Play"}
           </Button>
@@ -358,9 +402,8 @@ export function WaveformPlayer({
                 stopAll();
                 setSourceMode("original");
               }}
-              className={`rounded-md px-3 py-1 transition-colors disabled:opacity-40 ${
-                sourceMode === "original" ? "bg-[#8B5CF6] text-[#F5F3FF]" : "text-[#A1A1AA]"
-              }`}
+              className={`rounded-md px-3 py-1 transition-colors disabled:opacity-40 ${sourceMode === "original" ? "bg-[#8B5CF6] text-[#F5F3FF]" : "text-[#A1A1AA]"
+                }`}
             >
               Original Audio
             </button>
@@ -371,9 +414,8 @@ export function WaveformPlayer({
               stopAll();
               setSourceMode("midi");
             }}
-            className={`rounded-md px-3 py-1 transition-colors ${
-              sourceMode === "midi" ? "bg-[#8B5CF6] text-[#F5F3FF]" : "text-[#A1A1AA]"
-            }`}
+            className={`rounded-md px-3 py-1 transition-colors ${sourceMode === "midi" ? "bg-[#8B5CF6] text-[#F5F3FF]" : "text-[#A1A1AA]"
+              }`}
           >
             {isScoreOnly ? "Synthesized Score Playback" : "Transcribed MIDI"}
           </button>
@@ -383,9 +425,8 @@ export function WaveformPlayer({
           <button
             type="button"
             onClick={() => setLoop(!loop)}
-            className={`inline-flex items-center gap-1 rounded px-2 py-1 border ${
-              loop ? "border-[#A78BFA] text-[#A78BFA] bg-[#181825]" : "border-[#27273A]"
-            }`}
+            className={`inline-flex items-center gap-1 rounded px-2 py-1 border ${loop ? "border-[#A78BFA] text-[#A78BFA] bg-[#181825]" : "border-[#27273A]"
+              }`}
           >
             <Repeat className="h-3.5 w-3.5" />
             Loop
