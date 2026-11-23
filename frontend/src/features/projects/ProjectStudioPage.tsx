@@ -641,14 +641,20 @@ export function ProjectStudioPage() {
                     <Redo2 className="h-4 w-4" />
                   </Button>
                   <span className="text-xs text-[#A1A1AA] hidden md:inline px-2 whitespace-nowrap">
-                    {saveStatus === "saving" && "Saving..."}
+                    {saveStatus === "saving" && (
+                      <span className="text-violet-700 font-medium dark:text-violet-400">Saving...</span>
+                    )}
                     {saveStatus === "saved" && (
-                      <span className="inline-flex items-center gap-1 text-emerald-400">
+                      <span className="inline-flex items-center gap-1 text-emerald-700 font-medium dark:text-emerald-400">
                         <Check className="h-3.5 w-3.5" /> Saved
                       </span>
                     )}
-                    {saveStatus === "unsaved" && <span className="text-amber-300">Unsaved changes</span>}
-                    {saveStatus === "error" && <span className="text-red-400">{saveError || "Save error"}</span>}
+                    {saveStatus === "unsaved" && (
+                      <span className="text-amber-700 font-medium dark:text-amber-400">Unsaved changes</span>
+                    )}
+                    {saveStatus === "error" && (
+                      <span className="text-red-700 font-medium dark:text-red-400">{saveError || "Save error"}</span>
+                    )}
                   </span>
                   <Button
                     size="sm"
@@ -708,7 +714,7 @@ export function ProjectStudioPage() {
                     <Pencil className="h-3.5 w-3.5" />
                   </button>
                   {renameStatus === "saved" && (
-                    <span className="inline-flex items-center gap-1 text-xs text-emerald-400 whitespace-nowrap shrink-0">
+                    <span className="inline-flex items-center gap-1 text-xs text-emerald-700 font-medium dark:text-emerald-400 whitespace-nowrap shrink-0">
                       <Check className="h-3 w-3" /> Renamed
                     </span>
                   )}

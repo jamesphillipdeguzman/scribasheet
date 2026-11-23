@@ -237,6 +237,11 @@ describe("Light Mode Contrast & Hover-State Fixes", () => {
     expect(extMsg.className).toContain("font-medium");
     expect(extMsg.className).toContain("dark:text-amber-300");
 
+    const localDot = screen.getByTestId("local-process-dot");
+    expect(localDot.className).toContain("bg-emerald-600");
+    expect(localDot.className).toContain("ring-2");
+    expect(localDot.className).toContain("dark:bg-emerald-400");
+
     fireEvent.click(screen.getByRole("button", { name: /Stop Worker/i }));
     const stoppedNotice = await screen.findByText("Worker stopped.");
     expect(stoppedNotice.className).toContain("text-emerald-800");

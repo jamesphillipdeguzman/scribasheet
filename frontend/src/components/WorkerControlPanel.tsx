@@ -230,8 +230,11 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
             <div className="space-y-1 text-xs">
               <div className="flex flex-wrap items-center gap-2">
                 <span
+                  data-testid="local-process-dot"
                   className={`h-2 w-2 rounded-full ${
-                    controllerStatus.worker_running ? "bg-emerald-400" : "bg-zinc-500"
+                    controllerStatus.worker_running
+                      ? "bg-emerald-600 ring-2 ring-emerald-500/20 dark:bg-emerald-400 dark:ring-0"
+                      : "bg-zinc-500"
                   }`}
                 />
                 <span className="font-medium text-[#F5F3FF]">
