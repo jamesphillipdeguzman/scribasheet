@@ -180,6 +180,39 @@ function setElementText(doc: Document, parent: Element, tagName: string, value: 
   return el;
 }
 
+export function getXmlNoteInfo(
+  xmlStr: string,
+  target: XmlNoteTarget,
+): { durationType: EditableNoteType | null; accidental: "sharp" | "flat" | "natural" | null } | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+  const found = findTargetNoteElement(doc, target);
+  if (!found) return null;
+
+  const rawType = (found.noteEl.getElementsByTagName("type")[0]?.textContent || "").trim().toLowerCase();
+  const durationType: EditableNoteType | null =
+    rawType === "whole" ||
+    rawType === "half" ||
+    rawType === "quarter" ||
+    rawType === "eighth" ||
+    rawType === "16th"
+      ? rawType
+      : null;
+
+  const accText = (found.noteEl.getElementsByTagName("accidental")[0]?.textContent || "").trim().toLowerCase();
+  let accidental: "sharp" | "flat" | "natural" | null = null;
+  if (accText === "sharp" || accText === "flat" || accText === "natural") {
+    accidental = accText;
+  } else {
+    const alterEl = found.noteEl.getElementsByTagName("alter")[0];
+    const alterVal = alterEl ? Number.parseInt(alterEl.textContent || "0", 10) : 0;
+    if (alterVal === 1) accidental = "sharp";
+    else if (alterVal === -1) accidental = "flat";
+  }
+
+  return { durationType, accidental };
+}
+
 export function transposeXmlNote(
   xmlStr: string,
   target: XmlNoteTarget,

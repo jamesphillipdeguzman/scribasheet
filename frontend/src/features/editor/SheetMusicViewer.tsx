@@ -25,6 +25,7 @@ import {
   convertXmlNoteToRest,
   deleteMeasureFromAllParts,
   type EditableNoteType,
+  getXmlNoteInfo,
   setXmlNoteAccidental,
   setXmlNoteDuration,
   transposeXmlNote,
@@ -231,6 +232,18 @@ export function SheetMusicViewer({
   const [followCursor, setFollowCursor] = useState(true);
   const [editMode, setEditMode] = useState(false);
   const [selectedTarget, setSelectedTarget] = useState<XmlNoteTarget | null>(null);
+  const selectedTargetRef = useRef<XmlNoteTarget | null>(null);
+  selectedTargetRef.current = selectedTarget;
+  const lastEditedXmlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (musicxml && lastEditedXmlRef.current && musicxml === lastEditedXmlRef.current) {
+      return;
+    }
+    lastEditedXmlRef.current = null;
+    clearSelectedHighlight();
+    setSelectedTarget(null);
+  }, [musicxml]);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [resolvedXml, setResolvedXml] = useState<string | null>(null);
@@ -270,8 +283,20 @@ export function SheetMusicViewer({
     for (const item of selectedSvgRef.current) {
       if (item.origFill === null) item.el.removeAttribute("fill");
       else item.el.setAttribute("fill", item.origFill);
+      item.el.removeAttribute("data-selected-note");
     }
     selectedSvgRef.current = [];
+  };
+
+  const applySelectedHighlight = (node: Element) => {
+    clearSelectedHighlight();
+    const els = Array.from(node.querySelectorAll("path, ellipse"));
+    const targets = els.length > 0 ? els : [node];
+    for (const el of targets) {
+      selectedSvgRef.current.push({ el, origFill: el.getAttribute("fill") });
+      el.setAttribute("fill", "#7c3aed");
+      el.setAttribute("data-selected-note", "true");
+    }
   };
 
   const computePlayheadGeometry = (osmd: OpenSheetMusicDisplay): PlayheadRect => {
@@ -859,6 +884,13 @@ export function SheetMusicViewer({
                   };
                   newMap.set(svgEl, target);
                   svgEl.setAttribute("data-mxml-note", "true");
+                  // Also map individual child noteheads (e.g., g.vf-notehead inside g.vf-stavenote)
+                  for (const nh of Array.from(svgEl.querySelectorAll("g.vf-notehead"))) {
+                    if (!newMap.has(nh)) {
+                      newMap.set(nh, target);
+                    }
+                    nh.setAttribute("data-mxml-note", "true");
+                  }
 
                   if (isRest) continue;
 
@@ -923,6 +955,23 @@ export function SheetMusicViewer({
     renderedEventsRef.current = Array.from(eventBuckets.values()).sort(
       (a, b) => a.onsetSec - b.onsetSec,
     );
+
+    const activeSel = selectedTargetRef.current;
+    if (activeSel && containerRef.current) {
+      for (const el of Array.from(containerRef.current.querySelectorAll('[data-mxml-note="true"]'))) {
+        const mapped = newMap.get(el);
+        if (
+          mapped &&
+          mapped.partIndex === activeSel.partIndex &&
+          mapped.measureNumber === activeSel.measureNumber &&
+          Math.abs(mapped.onsetWhole - activeSel.onsetWhole) < 0.015 &&
+          mapped.pitchMidi === activeSel.pitchMidi
+        ) {
+          applySelectedHighlight(el);
+          break;
+        }
+      }
+    }
   };
 
   const disposeOsmdInstance = useCallback(() => {
@@ -1188,6 +1237,7 @@ export function SheetMusicViewer({
       if (nextTarget !== undefined) {
         setSelectedTarget(nextTarget);
       }
+      lastEditedXmlRef.current = resultXml;
       onMusicXmlChange(resultXml);
     },
     [isPlaying, onMusicXmlChange, onTogglePlay],
@@ -1195,10 +1245,18 @@ export function SheetMusicViewer({
 
   // Keyboard shortcuts when Edit Notation is active
   useEffect(() => {
-    if (!editMode || !selectedTarget || !resolvedXml) return;
+    if (!editMode || !resolvedXml) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      const targetEl = e.target as HTMLElement | null;
+      const tag = targetEl?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || targetEl?.isContentEditable) return;
+      if (e.key === "Escape" && selectedTarget) {
+        e.preventDefault();
+        clearSelectedHighlight();
+        setSelectedTarget(null);
+        return;
+      }
+      if (!selectedTarget) return;
       if (e.key === "ArrowUp") {
         e.preventDefault();
         const res = transposeXmlNote(resolvedXml, selectedTarget, e.shiftKey ? 12 : 1);
@@ -1223,27 +1281,27 @@ export function SheetMusicViewer({
   };
 
   const handleScoreClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    // In Edit Notation mode, select clicked SVG notehead
-    if (editMode) {
+    // Direct single-notehead selection works even before Edit Notation is toggled on
+    if (onMusicXmlChange) {
       let node: Element | null = e.target as Element | null;
       while (node && node !== containerRef.current) {
         const mapped = svgNoteTargetMapRef.current.get(node);
         if (mapped) {
-          clearSelectedHighlight();
-          const els = Array.from(node.querySelectorAll("path, ellipse"));
-          const targets = els.length > 0 ? els : [node];
-          for (const el of targets) {
-            selectedSvgRef.current.push({ el, origFill: el.getAttribute("fill") });
-            el.setAttribute("fill", "#f59e0b");
+          if (isPlaying) {
+            onTogglePlay?.();
           }
+          setEditMode(true);
+          applySelectedHighlight(node);
           setSelectedTarget(mapped);
           return;
         }
         node = node.parentElement;
       }
-      clearSelectedHighlight();
-      setSelectedTarget(null);
-      return;
+      if (editMode) {
+        clearSelectedHighlight();
+        setSelectedTarget(null);
+        return;
+      }
     }
 
     if (!onSeek || !osmdRef.current || !containerRef.current) return;
@@ -1391,9 +1449,9 @@ export function SheetMusicViewer({
                 clearSelectedHighlight();
                 setSelectedTarget(null);
               }}
-              className={`inline-flex items-center gap-1 h-8 rounded-lg border px-2.5 text-xs font-medium transition-colors ${editMode
-                ? "border-amber-400/60 bg-amber-500/20 text-amber-200"
-                : "border-[#27273A] bg-[#11111B] text-[#A1A1AA] hover:text-[#F5F3FF]"
+              className={`inline-flex items-center gap-1 h-8 rounded-lg border px-2.5 text-xs transition-colors ${editMode
+                ? "bg-amber-100 text-amber-950 border-amber-400 font-semibold shadow-xs dark:bg-amber-500/20 dark:text-amber-200 dark:border-amber-500/40"
+                : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF]"
                 }`}
             >
               <Pencil className="h-3.5 w-3.5" />
@@ -1480,163 +1538,188 @@ export function SheetMusicViewer({
       )}
 
       {/* Direct Notation Editing Toolbar (only visible when Edit Notation is enabled) */}
-      {editMode && (
-        <div
-          data-testid="notation-edit-toolbar"
-          className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-[#181825] px-3 py-2 text-xs shrink-0"
-        >
-          {isPlaying ? (
-            <span className="text-amber-300">Pause playback before editing notation.</span>
-          ) : (
-            <>
-              <span className="font-mono text-amber-200">
-                {selectedTarget
-                  ? `${selectedTarget.pitchMidi !== null ? midiToNoteName(selectedTarget.pitchMidi) : "Rest"} • m.${selectedTarget.measureNumber}`
-                  : "Click a notehead to edit"}
+      {editMode && (() => {
+        const noteInfo = selectedTarget && activeXml ? getXmlNoteInfo(activeXml, selectedTarget) : null;
+        const formatDur = (dur: EditableNoteType | null | undefined) =>
+          !dur ? "" : dur === "16th" ? "16th" : dur.charAt(0).toUpperCase() + dur.slice(1);
+        const editBtnClass = (isActive: boolean, isDisabled: boolean) =>
+          `inline-flex items-center justify-center gap-1 h-7 rounded-md border px-2 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-violet-500/40 ${
+            isDisabled
+              ? "bg-stone-100 text-stone-500 border-stone-200 cursor-not-allowed dark:bg-white/5 dark:text-slate-500 dark:border-white/10"
+              : isActive
+                ? "bg-violet-600 text-white border-violet-700 font-semibold dark:bg-violet-500 dark:text-white dark:border-violet-400"
+                : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:bg-white/5 dark:hover:bg-white/10 dark:text-slate-200 dark:border-white/15"
+          }`;
+        const durLabel = formatDur(noteInfo?.durationType);
+        return (
+          <div
+            data-testid="notation-edit-toolbar"
+            className="flex flex-wrap items-center gap-2 rounded-lg bg-amber-50/90 border border-amber-300 px-3 py-2 text-xs shrink-0 dark:bg-amber-500/10 dark:border-amber-500/25"
+          >
+            {isPlaying ? (
+              <span className="text-amber-950 font-medium dark:text-amber-300">
+                Pause playback before editing notation.
               </span>
+            ) : (
+              <>
+                <span
+                  data-testid="notation-edit-readout"
+                  className="font-mono text-amber-950 font-medium dark:text-amber-200"
+                >
+                  {selectedTarget
+                    ? `Selected: ${selectedTarget.pitchMidi !== null ? midiToNoteName(selectedTarget.pitchMidi) : "Rest"}${durLabel ? ` (${durLabel})` : ""} • m.${selectedTarget.measureNumber}`
+                    : "Click a notehead to edit"}
+                </span>
 
-              <div className="flex items-center gap-1 border-l border-[#27273A] pl-2">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={!selectedTarget}
-                  aria-label="Pitch up"
-                  onClick={() => {
-                    if (!selectedTarget) return;
-                    const res = transposeXmlNote(activeXml, selectedTarget, 1);
-                    if (res) applyXmlEdit(res.xml, res.nextTarget);
-                  }}
-                >
-                  <ArrowUp className="h-3 w-3" />
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={!selectedTarget}
-                  aria-label="Pitch down"
-                  onClick={() => {
-                    if (!selectedTarget) return;
-                    const res = transposeXmlNote(activeXml, selectedTarget, -1);
-                    if (res) applyXmlEdit(res.xml, res.nextTarget);
-                  }}
-                >
-                  <ArrowDown className="h-3 w-3" />
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={!selectedTarget}
-                  aria-label="Octave up"
-                  onClick={() => {
-                    if (!selectedTarget) return;
-                    const res = transposeXmlNote(activeXml, selectedTarget, 12);
-                    if (res) applyXmlEdit(res.xml, res.nextTarget);
-                  }}
-                >
-                  +8va
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={!selectedTarget}
-                  aria-label="Octave down"
-                  onClick={() => {
-                    if (!selectedTarget) return;
-                    const res = transposeXmlNote(activeXml, selectedTarget, -12);
-                    if (res) applyXmlEdit(res.xml, res.nextTarget);
-                  }}
-                >
-                  -8va
-                </Button>
-              </div>
-
-              <div className="flex items-center gap-1 border-l border-[#27273A] pl-2">
-                {(["sharp", "flat", "natural"] as const).map((acc) => (
-                  <Button
-                    key={acc}
-                    size="sm"
-                    variant="secondary"
+                <div className="flex items-center gap-1 border-l border-amber-300/70 pl-2 dark:border-[#27273A]">
+                  <button
+                    type="button"
                     disabled={!selectedTarget}
-                    aria-label={`Set accidental ${acc}`}
+                    aria-label="Pitch up"
+                    className={editBtnClass(false, !selectedTarget)}
                     onClick={() => {
                       if (!selectedTarget) return;
-                      const res = setXmlNoteAccidental(activeXml, selectedTarget, acc);
+                      const res = transposeXmlNote(activeXml, selectedTarget, 1);
                       if (res) applyXmlEdit(res.xml, res.nextTarget);
                     }}
                   >
-                    {acc === "sharp" ? "♯" : acc === "flat" ? "♭" : "♮"}
-                  </Button>
-                ))}
-              </div>
-
-              <div className="flex items-center gap-1 border-l border-[#27273A] pl-2">
-                {(["whole", "half", "quarter", "eighth", "16th"] as EditableNoteType[]).map((dur) => (
-                  <Button
-                    key={dur}
-                    size="sm"
-                    variant="secondary"
+                    <ArrowUp className="h-3 w-3" />
+                  </button>
+                  <button
+                    type="button"
                     disabled={!selectedTarget}
-                    aria-label={`Set duration ${dur}`}
+                    aria-label="Pitch down"
+                    className={editBtnClass(false, !selectedTarget)}
                     onClick={() => {
                       if (!selectedTarget) return;
-                      const res = setXmlNoteDuration(activeXml, selectedTarget, dur);
+                      const res = transposeXmlNote(activeXml, selectedTarget, -1);
                       if (res) applyXmlEdit(res.xml, res.nextTarget);
                     }}
                   >
-                    {dur === "16th" ? "16th" : dur.charAt(0).toUpperCase() + dur.slice(1)}
-                  </Button>
-                ))}
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={!selectedTarget}
-                  aria-label="Convert note to rest"
-                  onClick={() => {
-                    if (!selectedTarget) return;
-                    const res = convertXmlNoteToRest(activeXml, selectedTarget);
-                    if (res) applyXmlEdit(res.xml, null);
-                  }}
-                >
-                  Rest
-                </Button>
-              </div>
+                    <ArrowDown className="h-3 w-3" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!selectedTarget}
+                    aria-label="Octave up"
+                    className={editBtnClass(false, !selectedTarget)}
+                    onClick={() => {
+                      if (!selectedTarget) return;
+                      const res = transposeXmlNote(activeXml, selectedTarget, 12);
+                      if (res) applyXmlEdit(res.xml, res.nextTarget);
+                    }}
+                  >
+                    +8va
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!selectedTarget}
+                    aria-label="Octave down"
+                    className={editBtnClass(false, !selectedTarget)}
+                    onClick={() => {
+                      if (!selectedTarget) return;
+                      const res = transposeXmlNote(activeXml, selectedTarget, -12);
+                      if (res) applyXmlEdit(res.xml, res.nextTarget);
+                    }}
+                  >
+                    -8va
+                  </button>
+                </div>
 
-              <div className="flex items-center gap-1 border-l border-[#27273A] pl-2">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  aria-label="Add measure"
-                  onClick={() => {
-                    const nextXml = addMeasureToAllParts(activeXml, selectedTarget?.measureNumber);
-                    if (nextXml) applyXmlEdit(nextXml);
-                  }}
-                >
-                  <Plus className="h-3 w-3" /> Add Measure
-                </Button>
-                <Button
-                  size="sm"
-                  variant="danger"
-                  disabled={!selectedTarget}
-                  aria-label="Delete measure"
-                  onClick={() => {
-                    if (!selectedTarget) return;
-                    if (
-                      typeof window.confirm === "function" &&
-                      !window.confirm(`Delete measure ${selectedTarget.measureNumber} across all parts?`)
-                    ) {
-                      return;
-                    }
-                    const nextXml = deleteMeasureFromAllParts(activeXml, selectedTarget.measureNumber);
-                    if (nextXml) applyXmlEdit(nextXml, null);
-                  }}
-                >
-                  <Trash2 className="h-3 w-3" /> Delete Measure
-                </Button>
-              </div>
-            </>
-          )}
-        </div>
-      )}
+                <div className="flex items-center gap-1 border-l border-amber-300/70 pl-2 dark:border-[#27273A]">
+                  {(["sharp", "flat", "natural"] as const).map((acc) => (
+                    <button
+                      key={acc}
+                      type="button"
+                      disabled={!selectedTarget}
+                      aria-label={`Set accidental ${acc}`}
+                      aria-pressed={noteInfo?.accidental === acc}
+                      className={editBtnClass(noteInfo?.accidental === acc, !selectedTarget)}
+                      onClick={() => {
+                        if (!selectedTarget) return;
+                        const res = setXmlNoteAccidental(activeXml, selectedTarget, acc);
+                        if (res) applyXmlEdit(res.xml, res.nextTarget);
+                      }}
+                    >
+                      {acc === "sharp" ? "♯" : acc === "flat" ? "♭" : "♮"}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-1 border-l border-amber-300/70 pl-2 dark:border-[#27273A]">
+                  {(["whole", "half", "quarter", "eighth", "16th"] as EditableNoteType[]).map((dur) => (
+                    <button
+                      key={dur}
+                      type="button"
+                      disabled={!selectedTarget}
+                      aria-label={`Set duration ${dur}`}
+                      aria-pressed={noteInfo?.durationType === dur}
+                      className={editBtnClass(noteInfo?.durationType === dur, !selectedTarget)}
+                      onClick={() => {
+                        if (!selectedTarget) return;
+                        const res = setXmlNoteDuration(activeXml, selectedTarget, dur);
+                        if (res) applyXmlEdit(res.xml, res.nextTarget);
+                      }}
+                    >
+                      {dur === "16th" ? "16th" : dur.charAt(0).toUpperCase() + dur.slice(1)}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    disabled={!selectedTarget}
+                    aria-label="Convert note to rest"
+                    className={editBtnClass(false, !selectedTarget)}
+                    onClick={() => {
+                      if (!selectedTarget) return;
+                      const res = convertXmlNoteToRest(activeXml, selectedTarget);
+                      if (res) applyXmlEdit(res.xml, null);
+                    }}
+                  >
+                    Rest
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1 border-l border-amber-300/70 pl-2 dark:border-[#27273A]">
+                  <button
+                    type="button"
+                    aria-label="Add measure"
+                    className={editBtnClass(false, false)}
+                    onClick={() => {
+                      const nextXml = addMeasureToAllParts(activeXml, selectedTarget?.measureNumber);
+                      if (nextXml) applyXmlEdit(nextXml);
+                    }}
+                  >
+                    <Plus className="h-3 w-3" /> Add Measure
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!selectedTarget}
+                    aria-label="Delete measure"
+                    className={`inline-flex items-center justify-center gap-1 h-7 rounded-md border px-2 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-red-500/40 ${
+                      !selectedTarget
+                        ? "bg-stone-100 text-stone-500 border-stone-200 cursor-not-allowed dark:bg-white/5 dark:text-slate-500 dark:border-white/10"
+                        : "bg-white hover:bg-red-50 text-red-800 border-red-300 font-medium dark:bg-red-500/15 dark:hover:bg-red-500/25 dark:text-red-300 dark:border-red-500/35"
+                    }`}
+                    onClick={() => {
+                      if (!selectedTarget) return;
+                      if (
+                        typeof window.confirm === "function" &&
+                        !window.confirm(`Delete measure ${selectedTarget.measureNumber} across all parts?`)
+                      ) {
+                        return;
+                      }
+                      const nextXml = deleteMeasureFromAllParts(activeXml, selectedTarget.measureNumber);
+                      if (nextXml) applyXmlEdit(nextXml, null);
+                    }}
+                  >
+                    <Trash2 className="h-3 w-3" /> Delete Measure
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })()}
 
       {renderError && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
@@ -1647,6 +1730,7 @@ export function SheetMusicViewer({
       <div
         ref={scrollContainerRef}
         data-testid="sheet-music-scroll-container"
+        data-editable={onMusicXmlChange ? "true" : "false"}
         onClick={handleScoreClick}
         onWheel={handleManualScrollSignal}
         onTouchMove={handleManualScrollSignal}

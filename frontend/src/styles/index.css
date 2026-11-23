@@ -131,3 +131,15 @@ html.light ::-webkit-scrollbar-thumb:hover {
 ::-webkit-scrollbar-thumb:hover {
   background: #3f3f5c;
 }
+
+/* Narrowly scoped hover cursor & subtle highlight for selectable OSMD noteheads */
+[data-testid="sheet-music-scroll-container"][data-editable="true"] [data-mxml-note="true"],
+[data-testid="sheet-music-scroll-container"][data-editable="true"] g.vf-notehead {
+  cursor: pointer;
+  transition: filter 120ms ease;
+}
+
+[data-testid="sheet-music-scroll-container"][data-editable="true"] [data-mxml-note="true"]:hover,
+[data-testid="sheet-music-scroll-container"][data-editable="true"] g.vf-notehead:hover {
+  filter: drop-shadow(0 0 3px rgba(124, 58, 237, 0.65));
+}
