@@ -16,7 +16,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       outline:
         "bg-white text-stone-800 hover:bg-stone-100 border border-stone-300 shadow-sm font-medium dark:bg-transparent dark:text-[#F5F3FF] dark:hover:bg-[#181825] dark:border-[#27273A] dark:hover:border-[#A78BFA]/50",
       ghost:
-        "bg-transparent text-stone-700 hover:text-stone-950 hover:bg-stone-200/70 disabled:text-stone-400 dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-[#181825] dark:disabled:text-[#A1A1AA]",
+        "bg-transparent text-stone-600 hover:bg-stone-200/80 hover:text-stone-950 disabled:text-stone-400 dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white dark:disabled:text-[#A1A1AA]",
       danger:
         "bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 font-medium disabled:bg-stone-100 disabled:text-stone-400 disabled:border-stone-200 disabled:cursor-not-allowed disabled:opacity-100 dark:bg-red-500/15 dark:text-red-300 dark:hover:bg-red-500/25 dark:border-red-500/30 dark:disabled:opacity-50",
     };

@@ -751,7 +751,8 @@ export function PianoRollEditor({
       {viewMode === "grid" ? (
         /* Piano Roll Grid Canvas */
         <div
-          className={`relative flex w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#09090F] select-none touch-pan-x touch-pan-y ${
+          data-testid="piano-roll-grid-canvas"
+          className={`relative flex w-full max-w-full overflow-auto rounded-xl border border-stone-300 bg-white dark:border-[#27273A] dark:bg-[#09090F] select-none touch-pan-x touch-pan-y ${
             isFocusMode ? "flex-1 min-h-0" : "max-h-[340px]"
           }`}
           onMouseMove={handleMouseMove}
@@ -759,7 +760,7 @@ export function PianoRollEditor({
           onMouseLeave={handleMouseUp}
         >
         {/* Pitch Keys Column */}
-        <div className="sticky left-0 z-20 w-12 shrink-0 border-r border-[#27273A] bg-[#11111B]">
+        <div className="sticky left-0 z-20 w-12 shrink-0 border-r border-stone-300 bg-stone-50 dark:border-[#27273A] dark:bg-[#11111B]">
           {pitchRows.map((p) => {
             const isSharp = [1, 3, 6, 8, 10].includes(p % 12);
             const isC = p % 12 === 0;
@@ -768,9 +769,13 @@ export function PianoRollEditor({
                 key={p}
                 style={{ height: ROW_H }}
                 onClick={() => midiSynth.triggerNote(p, 0.25, 85)}
-                className={`flex items-center justify-end pr-1.5 text-[10px] font-mono border-b border-[#1E1E2E] cursor-pointer ${
-                  isSharp ? "bg-[#0B0B12] text-[#71717A]" : "bg-[#181825] text-[#A1A1AA]"
-                } ${isC ? "text-[#A78BFA] font-semibold" : ""}`}
+                className={`flex items-center justify-end pr-1.5 text-[10px] font-mono border-b border-stone-200 dark:border-[#1E1E2E] cursor-pointer ${
+                  isC
+                    ? "bg-violet-50 text-violet-900 font-bold dark:bg-[#181825] dark:text-[#A78BFA] dark:font-semibold"
+                    : isSharp
+                      ? "bg-stone-200/80 text-stone-700 dark:bg-[#0B0B12] dark:text-[#71717A]"
+                      : "bg-stone-50 text-stone-800 dark:bg-[#181825] dark:text-[#A1A1AA]"
+                }`}
               >
                 {isC || isSharp === false ? midiToNoteName(p) : ""}
               </div>
@@ -796,23 +801,32 @@ export function PianoRollEditor({
             return (
               <div
                 key={p}
+                data-pitch-lane={p}
                 style={{ top: idx * ROW_H, height: ROW_H }}
-                className={`absolute left-0 right-0 border-b border-[#181825] ${
-                  isSharp ? "bg-[#0D0D15]" : "bg-[#09090F]"
+                className={`absolute left-0 right-0 border-b border-stone-200/75 dark:border-[#181825] ${
+                  isSharp ? "bg-[#eceae4] dark:bg-[#121524]" : "bg-white dark:bg-[#09090F]"
                 }`}
               />
             );
           })}
 
-          {/* Beat Vertical Lines */}
-          {Array.from({ length: Math.ceil(totalDur / (60 / Math.max(20, tempoBpm))) }).map((_, bIdx) => {
-            const x = bIdx * (60 / Math.max(20, tempoBpm)) * pxPerSec;
-            const isBar = bIdx % 4 === 0;
+          {/* Measure, Beat & 1/16 Subdivision Vertical Lines */}
+          {Array.from({ length: Math.ceil(totalDur / ((60 / Math.max(20, tempoBpm)) / 4)) }).map((_, sIdx) => {
+            const stepSec = 60 / Math.max(20, tempoBpm) / 4;
+            const x = sIdx * stepSec * pxPerSec;
+            const isBar = sIdx % 16 === 0;
+            const isBeat = sIdx % 4 === 0;
             return (
               <div
-                key={bIdx}
+                key={sIdx}
                 style={{ left: x }}
-                className={`absolute top-0 bottom-0 w-px ${isBar ? "bg-[#2E2E45]" : "bg-[#181825]"}`}
+                className={`absolute top-0 bottom-0 pointer-events-none ${
+                  isBar
+                    ? "w-[1.5px] bg-[rgba(15,23,42,0.28)] dark:bg-[#2E2E45]"
+                    : isBeat
+                      ? "w-px bg-[rgba(15,23,42,0.14)] dark:bg-[#181825]"
+                      : "w-px bg-[rgba(15,23,42,0.06)] dark:bg-[#181825]/40"
+                }`}
               />
             );
           })}
@@ -824,10 +838,12 @@ export function PianoRollEditor({
             const left = n.onset_sec * pxPerSec;
             const width = Math.max(8, (n.offset_sec - n.onset_sec) * pxPerSec);
             const selected = selectedNoteIds.has(n.id) || n.id === selectedNoteId;
+            const isSounding = isPlaying && playheadSec >= n.onset_sec && playheadSec <= n.offset_sec;
             const isAccomp = n.track_index > 0;
             return (
               <div
                 key={n.id}
+                data-note-id={n.id}
                 style={{ top, left, width, height: ROW_H - 2 }}
                 onClick={(e) => e.stopPropagation()}
                 onMouseDown={(e) => {
@@ -855,12 +871,14 @@ export function PianoRollEditor({
                     origPitch: n.pitch_midi,
                   });
                 }}
-                className={`absolute rounded-sm border text-[9px] leading-none flex items-center pl-1 overflow-hidden cursor-grab active:cursor-grabbing ${
+                className={`absolute rounded-sm text-[9px] leading-none flex items-center pl-1 overflow-hidden cursor-grab active:cursor-grabbing ${
                   selected
-                    ? "bg-[#A78BFA] border-[#F5F3FF] text-[#09090F] font-semibold z-10"
-                    : isAccomp
-                      ? "bg-sky-500/80 border-sky-300/60 text-[#F5F3FF] hover:bg-sky-400"
-                      : "bg-[#8B5CF6]/85 border-[#A78BFA]/60 text-[#F5F3FF] hover:bg-[#A78BFA]"
+                    ? "bg-[#4f46e5] border-2 border-[#1e1b4b] text-white font-semibold z-10 dark:bg-[#A78BFA] dark:border-[#F5F3FF] dark:text-[#09090F]"
+                    : isSounding
+                      ? "bg-[#059669] border border-emerald-900 text-white font-semibold ring-2 ring-emerald-400/60 shadow-sm z-10"
+                      : isAccomp
+                        ? "bg-sky-600 border border-sky-900 text-white font-semibold hover:bg-sky-500 dark:bg-sky-500/80 dark:border-sky-300/60 dark:hover:bg-sky-400"
+                        : "bg-[#6d28d9] border border-[#4c1d95] text-white font-semibold hover:bg-violet-600 dark:bg-[#8B5CF6]/85 dark:border-[#A78BFA]/60 dark:hover:bg-[#A78BFA]"
                 }`}
               >
                 <span className="truncate pointer-events-none">

@@ -616,7 +616,7 @@ export function ProjectStudioPage() {
             <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 sm:order-1">
               <Link
                 to="/dashboard"
-                className="rounded-lg p-2 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] shrink-0"
+                className="rounded-lg p-2 text-stone-600 hover:bg-stone-200/80 hover:text-stone-950 transition-colors dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white shrink-0"
                 aria-label="Back to Dashboard"
               >
                 <ArrowLeft className="h-4 w-4" />
@@ -624,7 +624,7 @@ export function ProjectStudioPage() {
               <button
                 type="button"
                 onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="rounded-lg p-2 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] shrink-0"
+                className="rounded-lg p-2 text-stone-600 hover:bg-stone-200/80 hover:text-stone-950 transition-colors dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white shrink-0"
                 aria-label="Toggle ingestion panel"
               >
                 {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
@@ -694,7 +694,7 @@ export function ProjectStudioPage() {
                   <h1
                     onClick={startEditingTitle}
                     title="Rename project"
-                    className="text-sm sm:text-base font-semibold truncate min-w-0 max-w-full cursor-pointer hover:text-indigo-200 transition-colors"
+                    className="text-sm sm:text-base font-semibold truncate min-w-0 max-w-full cursor-pointer text-stone-950 hover:text-violet-700 dark:text-[#F5F3FF] dark:hover:text-indigo-200 transition-colors"
                   >
                     {optimisticTitle ?? project.title}
                   </h1>
@@ -703,7 +703,7 @@ export function ProjectStudioPage() {
                     onClick={startEditingTitle}
                     aria-label="Rename project"
                     title="Rename project"
-                    className="rounded p-1 text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] focus:outline-none focus:ring-2 focus:ring-indigo-500 shrink-0"
+                    className="rounded-lg p-1 text-stone-600 hover:bg-stone-200/80 hover:text-stone-950 transition-colors dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 shrink-0"
                   >
                     <Pencil className="h-3.5 w-3.5" />
                   </button>

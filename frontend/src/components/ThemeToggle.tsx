@@ -18,7 +18,7 @@ export function ThemeToggle({ className }: ThemeToggleProps) {
       aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
       title={isDark ? "Switch to light mode" : "Switch to dark mode"}
       className={cn(
-        "inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#27273A] bg-[#11111B] text-[#A1A1AA] transition-colors hover:bg-[#181825] hover:text-[#F5F3FF]",
+        "inline-flex h-9 w-9 items-center justify-center rounded-lg border border-stone-300 bg-white text-stone-600 transition-colors hover:bg-stone-200/75 hover:text-stone-950 dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#A1A1AA] dark:hover:bg-white/10 dark:hover:text-white",
         className,
       )}
     >

@@ -86,7 +86,7 @@ export function VirtualPianoKeyboard({
   return (
     <div
       data-testid="virtual-piano-keyboard"
-      className="w-full overflow-x-auto rounded-lg border border-[#27273A] bg-[#09090F] p-1.5 select-none"
+      className="w-full overflow-x-auto rounded-lg border border-stone-300 bg-stone-200/80 p-1.5 select-none dark:border-[#27273A] dark:bg-[#09090F]"
     >
       <div
         ref={keyboardBodyRef}
@@ -104,15 +104,16 @@ export function VirtualPianoKeyboard({
             const isAccompPlaying = playbackTrack !== undefined && playbackTrack > 0;
             const label = midiToNoteName(pitch);
 
-            let bgClass = "bg-[#E4E4E7] hover:bg-[#F4F4F5] text-[#52525B]";
+            let bgClass =
+              "bg-white hover:bg-stone-50 text-stone-600 shadow-[inset_0_-2px_0_rgba(15,23,42,0.12)] dark:bg-[#E4E4E7] dark:hover:bg-[#F4F4F5] dark:text-[#52525B]";
             if (isMidiActive) {
               bgClass = rePitchArmed
-                ? "bg-amber-300 text-[#09090F] ring-1 ring-amber-400"
-                : "bg-[#A78BFA] text-[#09090F]";
+                ? "bg-amber-300 text-slate-950 ring-1 ring-amber-400"
+                : "bg-[#7c3aed] text-white dark:bg-[#A78BFA] dark:text-[#09090F]";
             } else if (isVocalPlaying) {
-              bgClass = "bg-[#C4B5FD] text-[#1E1B4B]";
+              bgClass = "bg-[#7c3aed] text-white dark:bg-[#C4B5FD] dark:text-[#1E1B4B]";
             } else if (isAccompPlaying) {
-              bgClass = "bg-[#7DD3FC] text-[#082F49]";
+              bgClass = "bg-[#2563eb] text-white dark:bg-[#7DD3FC] dark:text-[#082F49]";
             }
 
             return (
@@ -128,7 +129,7 @@ export function VirtualPianoKeyboard({
                 onTouchEnd={() => handlePressEnd(pitch)}
                 onTouchCancel={() => handlePressEnd(pitch)}
                 style={{ width: `${whiteWidthPercent}%` }}
-                className={`relative h-full border-r border-b border-[#27273A] last:border-r-0 rounded-b-sm flex items-end justify-center pb-1 text-[9px] font-mono transition-colors ${bgClass}`}
+                className={`relative h-full border-r border-b border-slate-300 dark:border-[#27273A] last:border-r-0 rounded-b-sm flex items-end justify-center pb-1 text-[9px] font-mono transition-colors ${bgClass}`}
               >
                 {isC && (
                   <span className="font-semibold leading-none pointer-events-none">
@@ -148,15 +149,15 @@ export function VirtualPianoKeyboard({
           const isAccompPlaying = playbackTrack !== undefined && playbackTrack > 0;
           const label = midiToNoteName(pitch);
 
-          let bgClass = "bg-[#181825] hover:bg-[#27273A] border-[#09090F]";
+          let bgClass = "bg-[#1e293b] hover:bg-slate-700 border-[#0f172a]";
           if (isMidiActive) {
             bgClass = rePitchArmed
               ? "bg-amber-400 border-amber-200"
-              : "bg-[#8B5CF6] border-[#C4B5FD]";
+              : "bg-[#8b5cf6] border-violet-300";
           } else if (isVocalPlaying) {
-            bgClass = "bg-[#7C3AED] border-[#DDD6FE]";
+            bgClass = "bg-[#8b5cf6] border-violet-300";
           } else if (isAccompPlaying) {
-            bgClass = "bg-[#0284C7] border-[#BAE6FD]";
+            bgClass = "bg-[#ec4899] border-pink-300";
           }
 
           return (

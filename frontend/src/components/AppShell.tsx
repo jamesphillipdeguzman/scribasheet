@@ -43,8 +43,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     className={cn(
                       "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors",
                       active
-                        ? "bg-[#181825] text-[#F5F3FF] border border-[#27273A]"
-                        : "text-[#A1A1AA] hover:text-[#F5F3FF] hover:bg-[#11111B]"
+                        ? "bg-stone-200/90 text-stone-950 font-semibold border border-stone-300/80 dark:bg-white/10 dark:text-white dark:border-[#27273A]"
+                        : "text-stone-600 hover:bg-stone-200/75 hover:text-stone-950 dark:text-[#A1A1AA] dark:hover:bg-white/10 dark:hover:text-white"
                     )}
                   >
                     <Icon className="h-4 w-4 text-[#A78BFA]" />
@@ -96,7 +96,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               onClick={() => setMobileMenuOpen((v) => !v)}
               aria-label={mobileMenuOpen ? "Close navigation menu" : "Open navigation menu"}
               aria-expanded={mobileMenuOpen}
-              className="sm:hidden inline-flex h-11 w-11 items-center justify-center rounded-lg border border-[#27273A] bg-[#11111B] text-[#F5F3FF]"
+              className="sm:hidden inline-flex h-11 w-11 items-center justify-center rounded-lg border border-stone-300 bg-white text-stone-700 hover:bg-stone-200/80 hover:text-stone-950 transition-colors dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#F5F3FF] dark:hover:bg-white/10"
             >
               {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
             </button>
@@ -123,10 +123,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     to={item.to}
                     onClick={() => setMobileMenuOpen(false)}
                     className={cn(
-                      "flex min-h-[44px] items-center gap-2.5 rounded-lg px-3 text-sm font-medium",
+                      "flex min-h-[44px] items-center gap-2.5 rounded-lg px-3 text-sm font-medium transition-colors",
                       active
-                        ? "bg-[#181825] text-[#F5F3FF] border border-[#27273A]"
-                        : "text-[#A1A1AA] hover:text-[#F5F3FF]"
+                        ? "bg-stone-200/90 text-stone-950 font-semibold border border-stone-300/80 dark:bg-white/10 dark:text-white dark:border-[#27273A]"
+                        : "text-stone-600 hover:bg-stone-200/75 hover:text-stone-950 dark:text-[#A1A1AA] dark:hover:bg-white/10 dark:hover:text-white"
                     )}
                   >
                     <Icon className="h-4 w-4 text-[#A78BFA]" />
@@ -137,7 +137,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <button
                 type="button"
                 onClick={handleLogout}
-                className="flex min-h-[44px] items-center gap-2.5 rounded-lg px-3 text-sm font-medium text-red-300 hover:bg-red-500/10 text-left"
+                className="flex min-h-[44px] items-center gap-2.5 rounded-lg px-3 text-sm font-medium text-red-700 hover:bg-red-50 dark:text-red-300 dark:hover:bg-red-500/10 text-left transition-colors"
               >
                 <LogOut className="h-4 w-4" />
                 Sign Out
