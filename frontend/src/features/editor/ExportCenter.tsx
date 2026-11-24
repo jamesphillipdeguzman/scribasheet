@@ -80,13 +80,16 @@ export function ExportCenter({
   const [error, setError] = useState<string | null>(null);
   const [activeFmt, setActiveFmt] = useState<string | null>(null);
   const [localIncludeChords, setLocalIncludeChords] = useState<boolean>(true);
-  const [localTranscribedBy, setLocalTranscribedBy] = useState<string>(() => user?.display_name || "");
+  const DEFAULT_TRANSCRIBED_BY = "James De Guzman";
+  const [localTranscribedBy, setLocalTranscribedBy] = useState<string>(
+    () => user?.display_name?.trim() || DEFAULT_TRANSCRIBED_BY,
+  );
   const [localIncludeTranscribedBy, setLocalIncludeTranscribedBy] = useState<boolean>(true);
   const [creditInteracted, setCreditInteracted] = useState<boolean>(false);
 
   useEffect(() => {
-    if (transcribedBy === undefined && !localTranscribedBy && user?.display_name) {
-      setLocalTranscribedBy(user.display_name);
+    if (transcribedBy === undefined && !localTranscribedBy) {
+      setLocalTranscribedBy(user?.display_name?.trim() || DEFAULT_TRANSCRIBED_BY);
     }
   }, [user?.display_name, transcribedBy, localTranscribedBy]);
 

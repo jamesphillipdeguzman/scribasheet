@@ -224,3 +224,109 @@ def test_omr_nfkc_lyrics_key_preservation_and_arranger_credit_upsert() -> None:
 
     branded_twice = apply_scribasheet_musicxml_branding(branded, title="Amazing Grace", transcribed_by="Ada Lovelace")
     assert branded_twice.count("Transcribed by: Ada Lovelace") == 1
+
+
+def test_musicxml_and_pdf_export_parity_preserves_title_and_james_de_guzman_credit(
+    client, db_session, monkeypatch
+) -> None:
+    import io
+
+    from pypdf import PdfReader
+
+    from app.models import Project, ProjectScore, User
+    from app.storage.service import storage_service
+
+    monkeypatch.setenv("DISABLE_MUSESCORE_PDF", "1")
+
+    reg = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "parity@example.com",
+            "password": "Password123!",
+            "display_name": "James De Guzman",
+        },
+    )
+    assert reg.status_code == 201
+    token = reg.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    user = db_session.query(User).filter(User.email == "parity@example.com").first()
+
+    proj = Project(
+        user_id=user.id,
+        title="Closer Piano Cover",
+        status="ready",
+        instrument="piano",
+        transcription_mode="single_instrument",
+    )
+    db_session.add(proj)
+    db_session.flush()
+
+    omr_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <work><work-title>Closer Piano Cover</work-title></work>
+  <identification>
+    <creator type="composer">The Chainsmokers</creator>
+    <creator type="lyricist">Andrew Taggart</creator>
+  </identification>
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>-1</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>4</duration><type>quarter</type></note>
+    </measure>
+  </part>
+</score-partwise>"""
+    xml_key = storage_service.build_key(user.id, proj.id, "musicxml", "score.musicxml")
+    storage_service.save_bytes(xml_key, omr_xml.encode("utf-8"), content_type="application/vnd.recordare.musicxml+xml")
+
+    score_row = ProjectScore(
+        project_id=proj.id,
+        version=1,
+        musicxml_path=xml_key,
+        score_json={
+            "title": "Closer Piano Cover",
+            "tempo_bpm": 95.0,
+            "tempo_estimated": False,
+            "time_signature": "4/4",
+            "time_signature_estimated": False,
+            "key_signature": "F major",
+            "key_signature_estimated": False,
+            "duration_seconds": 4.0,
+            "tracks": [{"index": 0, "name": "Piano", "instrument": "piano", "clef": "treble", "program": 0, "muted": False}],
+            "notes": [{"id": "n1", "pitch_midi": 65, "onset_sec": 0.0, "offset_sec": 1.0, "velocity": 85, "track_index": 0}],
+            "chords": [],
+        },
+    )
+    db_session.add(score_row)
+    db_session.commit()
+
+    # 1. Export MusicXML with default credit
+    xml_exp = client.post(
+        f"/api/v1/projects/{proj.id}/exports",
+        json={"format": "musicxml", "include_chords": True},
+        headers=headers,
+    )
+    assert xml_exp.status_code == 201
+    xml_dl = client.get(xml_exp.json()["download_url"], headers=headers)
+    assert xml_dl.status_code == 200
+    xml_text = xml_dl.text
+    assert "<work-title>Closer Piano Cover</work-title>" in xml_text
+    assert "<movement-title>Closer Piano Cover</movement-title>" in xml_text
+    assert '<creator type="composer">The Chainsmokers</creator>' in xml_text
+    assert '<creator type="lyricist">Andrew Taggart</creator>' in xml_text
+    assert '<creator type="arranger">James De Guzman</creator>' in xml_text
+    assert "Transcribed by: James De Guzman" in xml_text
+
+    # 2. Export PDF with default credit and verify both title and credit are visibly rendered on Page 1
+    pdf_exp = client.post(
+        f"/api/v1/projects/{proj.id}/exports",
+        json={"format": "pdf", "include_chords": True},
+        headers=headers,
+    )
+    assert pdf_exp.status_code == 201
+    pdf_dl = client.get(pdf_exp.json()["download_url"], headers=headers)
+    assert pdf_dl.status_code == 200
+    reader = PdfReader(io.BytesIO(pdf_dl.content))
+    page1_text = reader.pages[0].extract_text() or ""
+    assert "Closer Piano Cover" in page1_text
+    assert "Transcribed by: James De Guzman" in page1_text

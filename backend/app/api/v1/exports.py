@@ -20,6 +20,7 @@ from app.models import (
 from app.notation.generator import (
     _render_pdf_from_musicxml_via_musescore,
     _render_pdf_via_musescore,
+    add_pdf_arranger_credit_page1,
     add_pdf_footer,
     apply_scribasheet_musicxml_branding,
     clean_score_title,
@@ -48,6 +49,56 @@ EXPORT_MIME_TYPES = {
 }
 
 
+DEFAULT_TRANSCRIBED_BY = "James De Guzman"
+
+
+def _strip_harmony_elements(xml_str: str) -> str:
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_str.lstrip("\ufeff").strip())
+    except ET.ParseError:
+        return xml_str
+    for parent in root.iter():
+        for h in [c for c in list(parent) if c.tag == "harmony"]:
+            parent.remove(h)
+    body = ET.tostring(root, encoding="unicode")
+    return body if body.lstrip().startswith("<?xml") else f'<?xml version="1.0" encoding="UTF-8"?>\n{body}'
+
+
+def _prepare_export_musicxml(
+    score: ScoreData,
+    *,
+    include_chords: bool = True,
+    musicxml_path: str | None = None,
+    transcribed_by: str | None = None,
+) -> str:
+    """Centralized, idempotent metadata & MusicXML pipeline shared by MusicXML and PDF exports."""
+    base_xml: str | None = None
+    if musicxml_path:
+        try:
+            saved_xml = storage_service.read_bytes(musicxml_path).decode("utf-8-sig", errors="replace")
+            if "<score-" in saved_xml:
+                cleaned_xml, _ = sanitize_omr_musicxml(
+                    saved_xml,
+                    fallback_key_signature=score.key_signature,
+                )
+                if not include_chords:
+                    cleaned_xml = _strip_harmony_elements(cleaned_xml)
+                base_xml = cleaned_xml
+        except FileNotFoundError:
+            pass
+
+    if base_xml is None:
+        base_xml = score_data_to_musicxml(score, include_chords=include_chords)
+
+    return apply_scribasheet_musicxml_branding(
+        base_xml,
+        title=score.title,
+        transcribed_by=transcribed_by,
+    )
+
+
 def _resolve_pdf_export_bytes(
     db: Session,
     project_id: str,
@@ -58,32 +109,20 @@ def _resolve_pdf_export_bytes(
     musicxml_path: str | None = None,
     transcribed_by: str | None = None,
 ) -> bytes:
-    """Prefer MuseScore 4 PDF (from saved MusicXML when available, or ScoreData) over ReportLab fallback."""
-    if musicxml_path:
-        try:
-            saved_xml = storage_service.read_bytes(musicxml_path).decode("utf-8-sig", errors="replace")
-            if "<score-" in saved_xml:
-                cleaned_xml, _ = sanitize_omr_musicxml(
-                    saved_xml,
-                    fallback_key_signature=score.key_signature,
-                )
-                musescore_from_xml = _render_pdf_from_musicxml_via_musescore(
-                    cleaned_xml,
-                    title=score.title,
-                    transcribed_by=transcribed_by,
-                )
-                if musescore_from_xml is not None:
-                    return musescore_from_xml
-        except FileNotFoundError:
-            pass
-
-    musescore_local = _render_pdf_via_musescore(
+    """Prefer MuseScore 4 PDF (from centralized MusicXML) over ReportLab fallback, preserving arranger credit."""
+    final_xml = _prepare_export_musicxml(
         score,
         include_chords=include_chords,
+        musicxml_path=musicxml_path,
         transcribed_by=transcribed_by,
     )
-    if musescore_local is not None:
-        return musescore_local
+    musescore_from_xml = _render_pdf_from_musicxml_via_musescore(
+        final_xml,
+        title=score.title,
+        transcribed_by=transcribed_by,
+    )
+    if musescore_from_xml is not None:
+        return musescore_from_xml
 
     # Look for a worker-generated MuseScore PDF matching this score version & chord visibility
     results = (
@@ -110,11 +149,12 @@ def _resolve_pdf_export_bytes(
                 try:
                     data = storage_service.read_bytes(asset.storage_path)
                     if data.startswith(b"%PDF-") and count_pdf_pages(data) >= 1:
-                        return add_pdf_footer(data, title=score.title)
+                        with_footer = add_pdf_footer(data, title=score.title)
+                        return add_pdf_arranger_credit_page1(with_footer, transcribed_by)
                 except FileNotFoundError:
                     pass
 
-    return render_score_pdf(score, include_chords=include_chords)
+    return render_score_pdf(score, include_chords=include_chords, transcribed_by=transcribed_by)
 
 
 @router.get("/projects/{project_id}/exports", response_model=list[ExportResponse])
@@ -174,10 +214,18 @@ def create_export(
 
     try:
         score = ScoreData(**score_row.score_json)
-        score.title = clean_score_title(project.title)
+        generic_titles = {"", "untitled", "untitled score", "scribasheet", "score"}
+        raw_score_title = clean_score_title(score.title or "")
+        raw_proj_title = clean_score_title(project.title or "")
+        if raw_proj_title and raw_proj_title.lower() not in generic_titles:
+            score.title = raw_proj_title
+        elif raw_score_title:
+            score.title = raw_score_title
+        else:
+            score.title = clean_score_title(project.title)
         mime_type, ext = EXPORT_MIME_TYPES[payload.format]
 
-        raw_credit = payload.transcribed_by if payload.transcribed_by is not None else current_user.display_name
+        raw_credit = payload.transcribed_by if payload.transcribed_by is not None else DEFAULT_TRANSCRIBED_BY
         effective_transcribed_by = (
             (raw_credit or "").strip() if payload.include_transcribed_by else ""
         ) or None
@@ -185,13 +233,12 @@ def create_export(
         if payload.format == "midi":
             content = score_data_to_midi_bytes(score)
         elif payload.format == "musicxml":
-            xml_out = score_data_to_musicxml(score, include_chords=payload.include_chords)
-            if effective_transcribed_by:
-                xml_out = apply_scribasheet_musicxml_branding(
-                    xml_out,
-                    title=score.title,
-                    transcribed_by=effective_transcribed_by,
-                )
+            xml_out = _prepare_export_musicxml(
+                score,
+                include_chords=payload.include_chords,
+                musicxml_path=score_row.musicxml_path,
+                transcribed_by=effective_transcribed_by,
+            )
             content = xml_out.encode("utf-8")
         elif payload.format == "pdf":
             content = _resolve_pdf_export_bytes(

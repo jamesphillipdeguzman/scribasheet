@@ -415,17 +415,45 @@ def apply_scribasheet_musicxml_branding(
     except ET.ParseError:
         return xml_str
 
-    cleaned_title = clean_score_title(title) if title is not None else None
+    cleaned_title = clean_score_title(title) if (title and title.strip()) else None
+    generic_titles = {"", "untitled", "untitled score", "music21", "scribasheet", "score"}
 
-    work_title_el = root.find("./work/work-title")
-    if work_title_el is not None:
-        raw_wt = (work_title_el.text or "").strip()
-        work_title_el.text = cleaned_title if cleaned_title is not None else clean_score_title(raw_wt)
-
+    work_el = root.find("work")
+    work_title_el = work_el.find("work-title") if work_el is not None else None
     mov_title_el = root.find("./movement-title")
-    if mov_title_el is not None:
-        raw_mt = (mov_title_el.text or "").strip()
-        mov_title_el.text = cleaned_title if cleaned_title is not None else clean_score_title(raw_mt)
+
+    existing_wt = clean_score_title((work_title_el.text or "").strip()) if (work_title_el is not None and work_title_el.text) else ""
+    existing_mt = clean_score_title((mov_title_el.text or "").strip()) if (mov_title_el is not None and mov_title_el.text) else ""
+    existing_non_generic = next(
+        (t for t in (existing_wt, existing_mt) if t and t.lower() not in generic_titles),
+        "",
+    )
+    final_title = (
+        existing_non_generic
+        if (cleaned_title is None or (cleaned_title.lower() in generic_titles and existing_non_generic))
+        else cleaned_title
+    ) or existing_wt or existing_mt
+
+    if final_title:
+        if work_el is None:
+            work_el = ET.Element("work")
+            root.insert(0, work_el)
+        if work_title_el is None:
+            work_title_el = ET.SubElement(work_el, "work-title")
+        work_title_el.text = final_title
+
+        if mov_title_el is None:
+            mov_title_el = ET.Element("movement-title")
+            children = list(root)
+            work_idx = next((i for i, ch in enumerate(children) if ch.tag == "work"), -1)
+            root.insert(work_idx + 1, mov_title_el)
+        mov_title_el.text = final_title
+
+        for credit_el in root.findall("credit"):
+            ctype = (credit_el.findtext("credit-type") or "").strip().lower()
+            if ctype == "title":
+                for cw in credit_el.findall("credit-words"):
+                    cw.text = final_title
 
     ident = root.find("identification")
     if ident is None:
@@ -1370,6 +1398,54 @@ def add_pdf_footer(pdf_bytes: bytes, title: str | None = None) -> bytes:
     return out_buf.getvalue()
 
 
+def add_pdf_arranger_credit_page1(pdf_bytes: bytes, transcribed_by: str | None) -> bytes:
+    """Ensure Page 1 visibly displays 'Transcribed by: <name>' flush-left beneath the title if not already present."""
+    cleaned = (transcribed_by or "").strip()
+    if not cleaned or not pdf_bytes or not pdf_bytes.startswith(b"%PDF-"):
+        return pdf_bytes
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    if not reader.pages:
+        return pdf_bytes
+
+    page1_text = reader.pages[0].extract_text() or ""
+    if "transcribed by:" in page1_text.lower():
+        return pdf_bytes
+
+    writer = PdfWriter()
+    meta = dict(reader.metadata or {})
+    credit_label = f"Transcribed by: {cleaned}"
+
+    for page_idx, page in enumerate(reader.pages, start=1):
+        if page_idx == 1:
+            box = page.mediabox
+            left_x = float(box.left)
+            bottom_y = float(box.bottom)
+            page_w = float(box.width)
+            page_h = float(box.height)
+            margin_x = max(36.0, min(48.0, page_w * 0.06))
+            credit_y = bottom_y + page_h - 80.0
+
+            overlay_buf = io.BytesIO()
+            ov = canvas.Canvas(overlay_buf, pagesize=(page_w, page_h))
+            ov.setFont("Helvetica", 9.5)
+            ov.setFillColorRGB(0.22, 0.25, 0.32)
+            ov.drawString(left_x + margin_x, credit_y, credit_label)
+            ov.save()
+
+            overlay_reader = PdfReader(io.BytesIO(overlay_buf.getvalue()))
+            attached = writer.add_page(page)
+            attached.merge_page(overlay_reader.pages[0])
+        else:
+            writer.add_page(page)
+
+    out_meta = {k: v for k, v in meta.items() if isinstance(k, str) and isinstance(v, str)}
+    writer.add_metadata(out_meta)
+    out_buf = io.BytesIO()
+    writer.write(out_buf)
+    return out_buf.getvalue()
+
+
 def _render_pdf_from_musicxml_via_musescore(
     xml_str: str,
     *,
@@ -1399,7 +1475,8 @@ def _render_pdf_from_musicxml_via_musescore(
                 pdf_bytes = pdf_path.read_bytes()
                 if pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 500 and count_pdf_pages(pdf_bytes) >= 1:
                     resolved_title = title if (title and title.strip()) else _extract_title_from_musicxml(xml_str)
-                    return add_pdf_footer(pdf_bytes, title=resolved_title)
+                    with_footer = add_pdf_footer(pdf_bytes, title=resolved_title)
+                    return add_pdf_arranger_credit_page1(with_footer, transcribed_by)
     except Exception:
         return None
     return None
@@ -1426,15 +1503,26 @@ def _render_pdf_via_musescore(
         return None
 
 
-def render_score_pdf(score: ScoreData, *, include_chords: bool = True) -> bytes:
+def render_score_pdf(
+    score: ScoreData,
+    *,
+    include_chords: bool = True,
+    transcribed_by: str | None = None,
+) -> bytes:
     """Render a clean, printable multi-page PDF sheet music document.
 
     Uses MuseScore CLI engraving from MusicXML when available locally,
     falling back to the ReportLab grand-staff renderer in headless environments.
     """
-    musescore_pdf = _render_pdf_via_musescore(score, include_chords=include_chords)
+    musescore_pdf = _render_pdf_via_musescore(
+        score,
+        include_chords=include_chords,
+        transcribed_by=transcribed_by,
+    )
     if musescore_pdf is not None:
         return musescore_pdf
+
+    cleaned_arranger = (transcribed_by or "").strip()
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=letter)
@@ -1482,6 +1570,10 @@ def render_score_pdf(score: ScoreData, *, include_chords: bool = True) -> bytes:
             f"Key: {score.key_signature}  |  Notes: {len(score.notes)}"
         )
         c.drawCentredString(width / 2, height - 64, meta)
+        if page_num == 1 and cleaned_arranger:
+            c.setFont("Helvetica", 9.5)
+            c.drawString(left_margin, height - 80, f"Transcribed by: {cleaned_arranger}")
+            return height - 116
         return height - 108
 
     def draw_staff_system(y_treble_top: float, measures_in_sys: int) -> None:
