@@ -31,12 +31,15 @@ from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit
 import httpx
 
 from app.audio.processor import get_preprocessing_profile, preprocess_to_wav, probe_media
-from app.audio.separator import classify_audio_content, detect_audio_source_route, separate_audio_stems
+from app.audio.separator import (
+    classify_audio_content,
+    detect_audio_source_route,
+    separate_audio_stems,
+)
 from app.core.config import get_settings
 from app.notation.analyzer import (
     detect_chords,
     estimate_key_signature,
-    get_instrument_program_and_clef,
     select_chord_source_notes,
 )
 from app.notation.arrangement import simplify_arrangement
@@ -70,14 +73,13 @@ from app.transcription.core_pipeline import (
     transcribe_and_refine_audio,
 )
 from app.transcription.lyrics import LyricsTranscriptionError, transcribe_lyrics
-from app.transcription.note_refiner import NoteRefinerConfig, refine_detected_notes
+from app.transcription.note_refiner import NoteRefinerConfig
 from app.transcription.provider_factory import (
     get_target_sample_rate_for_engine,
     get_transcription_provider,
     is_fallback_allowed,
     resolve_engine_for_instrument,
     resolve_requested_engine,
-    transcribe_with_provider,
 )
 from app.transcription.versioning import build_transcription_provenance
 from app.worker_lock import WorkerSingleInstanceLock
@@ -488,22 +490,33 @@ class RealTranscriptionHandler:
             # 3b. Optional Demucs stem separation (30%)
             sep_res = None
             norm_mode_pre = normalize_transcription_mode(settings.mode)
-            pre_content_class = classify_audio_content(processed_wav) if settings.enable_source_separation else None
+            req_source_pre = (settings.audio_source_type or "auto").strip().lower()
+            force_vocal_sep = is_lead_melody_mode(settings.mode) and req_source_pre != "solo_piano"
+            pre_content_class = (
+                classify_audio_content(processed_wav)
+                if (settings.enable_source_separation and not force_vocal_sep)
+                else None
+            )
             skip_for_clean_solo = bool(
-                settings.enable_source_separation
-                and (settings.audio_source_type or "auto").strip().lower() == "auto"
+                not force_vocal_sep
+                and settings.enable_source_separation
+                and req_source_pre == "auto"
                 and norm_mode_pre in ("piano", "single_instrument")
                 and pre_content_class is not None
                 and pre_content_class.get("content_type") == "solo_piano"
                 and float(pre_content_class.get("solo_confidence", 0.0)) >= 0.80
             )
-            if settings.enable_source_separation and not skip_for_clean_solo:
+            if force_vocal_sep or (settings.enable_source_separation and not skip_for_clean_solo):
                 self._check_cancelled(job_id, cancel_event)
                 report_progress(
                     "separating",
                     30,
-                    "Separating Stems",
-                    f"Separating vocals, bass, drums, and other instruments using Demucs ({settings.demucs_model}).",
+                    "Isolating Vocals Stem for Lead Melody" if force_vocal_sep else "Separating Stems",
+                    (
+                        f"Isolating vocals stem using Demucs ({settings.demucs_model}) for Lead Melody transcription."
+                        if force_vocal_sep
+                        else f"Separating vocals, bass, drums, and other instruments using Demucs ({settings.demucs_model})."
+                    ),
                 )
                 sep_res = separate_audio_stems(
                     local_source,
@@ -513,6 +526,11 @@ class RealTranscriptionHandler:
                     segment_sec=settings.demucs_segment_sec,
                     overlap=settings.demucs_overlap,
                 )
+                if force_vocal_sep and (not sep_res.available or "vocals" not in sep_res.stems):
+                    raise TranscriptionInferenceError(
+                        "VOCAL_STEM_UNAVAILABLE",
+                        sep_res.message or "Lead Melody requires an isolated vocals stem (vocals.wav), which is unavailable.",
+                    )
                 if not sep_res.available:
                     raise TranscriptionInferenceError(
                         sep_res.error_code or "STEM_SEPARATION_FAILED",
@@ -544,11 +562,12 @@ class RealTranscriptionHandler:
                 verify_onnx_cpu_runtime(resolve_onnx_model_path())
 
             self._check_cancelled(job_id, cancel_event)
-            is_vocal_melody_route = (
+            is_vocal_melody_route = bool(
                 sep_res is not None
                 and sep_res.available
-                and source_route.get("resolved_source_type") == "full_song"
                 and "vocals" in sep_res.stems
+                and (settings.audio_source_type or "auto").strip().lower() != "solo_piano"
+                and (source_route.get("resolved_source_type") == "full_song" or is_lead_melody_mode(settings.mode))
             )
             report_progress(
                 "transcribing",
@@ -622,7 +641,13 @@ class RealTranscriptionHandler:
                 tempo_bpm = timing_map.tempo_bpm
                 tempo_est = True
                 tempo_diag = {**timing_map.provenance, "meter_detection": meter_diag}
-            key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
+            accomp_for_ctx = [*other_refined_notes, *bass_refined_notes] or None
+            key_sig, key_est = estimate_key_signature(
+                refined_notes,
+                settings.key_signature,
+                audio_path=processed_wav,
+                accompaniment_notes=accomp_for_ctx,
+            )
 
             def _serialize_note_list(note_list: list[Any]) -> list[dict[str, Any]]:
                 return [
@@ -646,17 +671,17 @@ class RealTranscriptionHandler:
 
             if lead_melody_active or piano_vocal_active:
                 vocal_range = None
-                if piano_vocal_active or is_vocal_melody_route or (settings.instrument or "").strip().lower() == "vocals":
+                if piano_vocal_active or core_res.is_vocal_melody_route or (settings.instrument or "").strip().lower() == "vocals":
                     app_cfg = get_settings()
                     vocal_range = (app_cfg.VOCAL_RANGE_MIN_MIDI, app_cfg.VOCAL_RANGE_MAX_MIDI)
-                accomp_for_bleed = [*other_refined_notes, *bass_refined_notes] or None
                 melody_result = extract_lead_melody(
                     melody_source_notes,
                     tempo_bpm=tempo_bpm,
                     timing_map=timing_map,
                     vocal_range=vocal_range,
                     key_signature=key_sig,
-                    accompaniment_notes=accomp_for_bleed,
+                    accompaniment_notes=accomp_for_ctx,
+                    from_monophonic_vocal_tracker=core_res.vocal_from_monophonic_tracker,
                 )
                 arranged_notes = melody_result.notes or melody_source_notes
                 arrangement_detail_value = settings.arrangement_detail
@@ -707,7 +732,11 @@ class RealTranscriptionHandler:
                         arranged_notes = play_res.notes
                     playability_stats = play_res.stats
 
-            raw_detected_snapshot = _serialize_note_list(refined_notes if is_vocal_melody_route else t_out.notes)
+            raw_detected_snapshot = _serialize_note_list(
+                vocal_refined_notes
+                if (core_res.is_vocal_melody_route and vocal_refined_notes)
+                else (refined_notes if core_res.is_vocal_melody_route else t_out.notes)
+            )
 
             provenance = build_transcription_provenance(
                 source_audio_path=local_source,
@@ -752,6 +781,8 @@ class RealTranscriptionHandler:
                 },
                 "concert_pitch_hz": settings.concert_pitch_hz,
             }
+            if core_res.vocal_tracking:
+                score_analysis["vocal_tracking"] = core_res.vocal_tracking
             if vocal_refined_notes:
                 score_analysis["vocal_detected_notes"] = _serialize_note_list(vocal_refined_notes)
             if bass_refined_notes:

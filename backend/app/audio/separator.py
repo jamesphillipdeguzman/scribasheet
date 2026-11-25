@@ -6,9 +6,11 @@ worker separation functions so the Railway API never imports them at startup.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -194,6 +196,44 @@ def _run_demucs_subprocess(
     )
 
 
+def _audio_file_fingerprint(file_path: Path) -> str | None:
+    """Compute a compact SHA-256 fingerprint for Demucs stem cache reuse."""
+    try:
+        h = hashlib.sha256()
+        with Path(file_path).open("rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()[:20]
+    except Exception:
+        return None
+
+
+def _load_cached_stems(cache_stem_dir: Path) -> dict[str, Path]:
+    if not cache_stem_dir.exists():
+        return {}
+    found: dict[str, Path] = {}
+    for p in cache_stem_dir.glob("*.wav"):
+        try:
+            if p.stat().st_size > 44:
+                found[p.stem] = p
+        except OSError:
+            continue
+    return found if "vocals" in found else {}
+
+
+def _save_stems_to_cache(stems: dict[str, Path], cache_stem_dir: Path) -> None:
+    try:
+        cache_stem_dir.mkdir(parents=True, exist_ok=True)
+        for name, src_path in stems.items():
+            if src_path.exists():
+                shutil.copy2(src_path, cache_stem_dir / f"{name}.wav")
+    except Exception as exc:
+        logger.debug("Skipping stem cache write (%s)", exc)
+
+
 def separate_audio_stems(
     wav_path: Path,
     output_dir: Path,
@@ -205,9 +245,11 @@ def separate_audio_stems(
     two_stems: str | None = None,
     device: str | None = None,
     cache_dir: Path | None = None,
+    use_stem_cache: bool = True,
 ) -> SeparationResult:
     """Separate input audio into Demucs stems (vocals, drums, bass, other).
 
+    Reuses valid cached stems for the exact input file hash and model when available.
     Honestly reports availability and errors; never fabricates separated stems.
     """
     settings = get_settings()
@@ -236,6 +278,30 @@ def separate_audio_stems(
 
     resolved_cache = resolve_demucs_cache_dir(cache_dir)
     selected_device = detect_demucs_device(device)
+    stem_cache_dir: Path | None = None
+    if use_stem_cache:
+        fp = _audio_file_fingerprint(wav_path)
+        if fp:
+            stem_cache_dir = resolved_cache / "stems_cache" / f"{fp}_{model_name}"
+            cached_stems = _load_cached_stems(stem_cache_dir)
+            if cached_stems:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                copied: dict[str, Path] = {}
+                target_dir = output_dir / model_name / wav_path.stem
+                target_dir.mkdir(parents=True, exist_ok=True)
+                for stem_name, src_p in cached_stems.items():
+                    dst_p = target_dir / f"{stem_name}.wav"
+                    shutil.copy2(src_p, dst_p)
+                    copied[stem_name] = dst_p
+                return SeparationResult(
+                    available=True,
+                    backend="demucs",
+                    stems=copied,
+                    message=f"Reused {len(copied)} cached Demucs stems ({model_name}).",
+                    model_name=model_name,
+                    device=selected_device,
+                    cache_dir=str(resolved_cache),
+                )
 
     try:
         import demucs.separate  # type: ignore  # noqa: F401
@@ -244,7 +310,7 @@ def separate_audio_stems(
         if iso_python is not None:
             output_dir.mkdir(parents=True, exist_ok=True)
             stem_out_dir = output_dir / model_name / wav_path.stem
-            return _run_demucs_subprocess(
+            sub_res = _run_demucs_subprocess(
                 iso_python,
                 wav_path,
                 stem_out_dir,
@@ -254,6 +320,9 @@ def separate_audio_stems(
                 segment_sec=segment_sec,
                 cache_dir=resolved_cache,
             )
+            if sub_res.available and stem_cache_dir is not None:
+                _save_stems_to_cache(sub_res.stems, stem_cache_dir)
+            return sub_res
         logger.info("Demucs package not installed; cannot separate stems.")
         return SeparationResult(
             available=False,
@@ -304,6 +373,8 @@ def separate_audio_stems(
                 error_code="DEMUCS_NO_STEMS",
                 cache_dir=str(resolved_cache),
             )
+        if stem_cache_dir is not None:
+            _save_stems_to_cache(stems, stem_cache_dir)
         return SeparationResult(
             available=True,
             backend="demucs",
@@ -597,13 +668,28 @@ def detect_audio_source_route(
             "content_classification": content_info,
         }
 
+    norm_mode = (mode or "").strip().lower()
+    is_vocal_priority_mode = norm_mode in ("melody", "lead_melody", "vocal_melody", "piano_vocal")
+
     if stems and "vocals" in stems:
         vocal_rms = _wav_rms(stems["vocals"])
         accomp_rms = sum(_wav_rms(stems[k]) for k in ("other", "bass", "piano") if k in stems)
         ratio = vocal_rms / max(accomp_rms, 1e-6)
         non_vocal_rms = sum(_wav_rms(stems[k]) for k in ("other", "bass", "piano", "drums") if k in stems)
         drum_rms = _wav_rms(stems["drums"]) if "drums" in stems else 0.0
-        bass_rms = _wav_rms(stems["bass"]) if "bass" in stems else 0.0
+        if is_vocal_priority_mode and vocal_rms >= 0.004:
+            return {
+                "requested_source_type": "auto",
+                "resolved_source_type": "full_song",
+                "auto_detected": True,
+                "vocal_rms": round(vocal_rms, 5),
+                "accompaniment_rms": round(accomp_rms, 5),
+                "vocal_to_accompaniment_ratio": round(ratio, 3),
+                "vocal_energy_ratio": round(vocal_rms / max(vocal_rms + non_vocal_rms, 1e-6), 4),
+                "non_vocal_energy_ratio": round(non_vocal_rms / max(vocal_rms + non_vocal_rms, 1e-6), 4),
+                "reason": "lead_melody_vocal_stem_routed",
+                "content_classification": content_info,
+            }
         if vocal_rms >= 0.008 and ratio >= 0.16:
             return {
                 "requested_source_type": "auto",
@@ -617,7 +703,7 @@ def detect_audio_source_route(
                 "reason": "vocal_stem_energy_detected",
                 "content_classification": content_info,
             }
-        if drum_rms >= 0.009 or bass_rms >= 0.015:
+        if drum_rms >= 0.009:
             return {
                 "requested_source_type": "auto",
                 "resolved_source_type": "full_song",
@@ -643,8 +729,7 @@ def detect_audio_source_route(
             "content_classification": content_info,
         }
 
-    norm_mode = (mode or "").strip().lower()
-    if norm_mode in ("piano_vocal", "vocal_melody", "multi_instrument"):
+    if norm_mode in ("melody", "lead_melody", "piano_vocal", "vocal_melody", "multi_instrument"):
         return {
             "requested_source_type": "auto",
             "resolved_source_type": "full_song",

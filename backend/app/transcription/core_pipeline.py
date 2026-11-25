@@ -41,12 +41,16 @@ from app.notation.piano_playability import apply_piano_playability, normalize_pl
 from app.notation.timing_map import TimingMap, build_timing_map
 from app.schemas.score import ScoreData, ScoreNote
 from app.schemas.transcription import TranscriptionSettings
-from app.transcription.base import DetectedNote, TranscriptionProvider
+from app.transcription.base import DetectedNote, TranscriptionOutput, TranscriptionProvider
 from app.transcription.basic_pitch_provider import TranscriptionInferenceError
 from app.transcription.note_refiner import NoteRefinerConfig, refine_detected_notes
 from app.transcription.provider_factory import (
     ProviderExecutionResult,
     transcribe_with_provider,
+)
+from app.transcription.vocal_pitch_tracker import (
+    VocalPitchTrackerConfig,
+    transcribe_vocal_melody_f0,
 )
 
 logger = logging.getLogger(__name__)
@@ -169,6 +173,8 @@ class CoreTranscriptionResult:
     other_refined_notes: list[DetectedNote] = field(default_factory=list)
     is_vocal_melody_route: bool = False
     source_selection: dict[str, Any] = field(default_factory=dict)
+    vocal_tracking: dict[str, Any] = field(default_factory=dict)
+    vocal_from_monophonic_tracker: bool = False
 
 
 def transcribe_and_refine_audio(
@@ -186,18 +192,48 @@ def transcribe_and_refine_audio(
     custom_provider_engine: str | None = None,
     refiner_cfg: NoteRefinerConfig | None = None,
 ) -> CoreTranscriptionResult:
-    """Run provider-aware transcription + single-pass note refinement (direct or stem-routed)."""
+    """Run provider-aware transcription + note refinement (vocal-stem F0 or polyphonic pipeline)."""
     program, _ = get_instrument_program_and_clef(settings.instrument)
     cfg = refiner_cfg or NoteRefinerConfig()
     norm_mode = normalize_transcription_mode(settings.mode)
-    is_piano_target = norm_mode in ("piano", "single_instrument", "multi_instrument") and "piano" in (settings.instrument or "").lower()
+    lead_melody_active = is_lead_melody_mode(settings.mode)
+    piano_vocal_active = norm_mode == "piano_vocal"
+    vocal_mode_active = lead_melody_active or piano_vocal_active or norm_mode == "vocal_melody"
+    req_source_type = (settings.audio_source_type or "auto").strip().lower()
+    explicit_solo = req_source_type == "solo_piano"
+    is_piano_target = (
+        norm_mode in ("piano", "single_instrument", "multi_instrument")
+        and "piano" in (settings.instrument or "").lower()
+    )
 
-    def _run_transcribe(audio_target: Path, min_pitch: int, max_pitch: int, midi_prog: int) -> ProviderExecutionResult:
+    # Safeguard: Lead Melody with Automatic / Full Song source must receive an actual isolated vocals stem.
+    # Never silently substitute bass.wav, other.wav, or the full mix when vocal isolation fails or is missing.
+    if lead_melody_active and not explicit_solo:
+        vocals_path = sep_res.stems.get("vocals") if (sep_res is not None and sep_res.available) else None
+        if sep_res is None or not sep_res.available or vocals_path is None or not Path(vocals_path).exists():
+            raise TranscriptionInferenceError(
+                "VOCAL_STEM_UNAVAILABLE",
+                (
+                    sep_res.message
+                    if (sep_res is not None and sep_res.message and not sep_res.available)
+                    else "Lead Melody requires an isolated vocals stem (vocals.wav), which is unavailable. "
+                    "Enable Demucs separation or switch Audio Source to Solo Piano / Instrumental."
+                ),
+            )
+
+    def _run_transcribe(
+        audio_target: Path,
+        min_pitch: int,
+        max_pitch: int,
+        midi_prog: int,
+        engine_override: str | None = None,
+    ) -> ProviderExecutionResult:
+        eff_engine = engine_override or requested_engine
         return transcribe_with_provider(
             audio_target,
-            engine=requested_engine,
+            engine=eff_engine,
             allow_fallback=allow_fallback,
-            provider=custom_provider if requested_engine == custom_provider_engine else None,
+            provider=custom_provider if eff_engine == custom_provider_engine else None,
             onset_threshold=settings.onset_threshold,
             frame_threshold=settings.frame_threshold,
             min_note_length_ms=settings.min_note_length_ms,
@@ -208,6 +244,34 @@ def transcribe_and_refine_audio(
             concert_pitch_hz=settings.concert_pitch_hz,
         )
 
+    def _run_monophonic_vocal_tracker(audio_target: Path, stem_label: str) -> tuple[ProviderExecutionResult, list[DetectedNote], dict[str, Any]]:
+        v_cfg = VocalPitchTrackerConfig(
+            min_midi=max(36, int(settings.min_midi_pitch)),
+            max_midi=min(96, int(settings.max_midi_pitch)),
+            concert_pitch_hz=float(settings.concert_pitch_hz),
+            transpose_semitones=int(settings.transpose_semitones),
+        )
+        v_res = transcribe_vocal_melody_f0(audio_target, config=v_cfg)
+        v_exec = ProviderExecutionResult(
+            output=TranscriptionOutput(
+                engine="vocal_pyin",
+                notes=v_res.notes,
+                midi_bytes=b"",
+                duration_seconds=v_res.duration_seconds,
+                metadata={"model": "librosa_pyin", "source_stem": stem_label, "source_path": str(audio_target)},
+            ),
+            requested_engine="vocal_pyin",
+            actual_engine="vocal_pyin",
+            fallback_used=False,
+        )
+        tracking_info = {
+            "engine": "vocal_pyin",
+            "source_stem": stem_label,
+            "source_path": str(audio_target),
+            **v_res.stats,
+        }
+        return v_exec, v_res.notes, tracking_info
+
     content_class = (source_route or {}).get("content_classification") or classify_audio_content(
         processed_wav, sep_res.stems if sep_res and sep_res.available else None
     )
@@ -216,15 +280,23 @@ def transcribe_and_refine_audio(
     is_vocal_melody_route = bool(
         sep_res is not None
         and sep_res.available
-        and source_route is not None
-        and source_route.get("resolved_source_type") == "full_song"
         and "vocals" in sep_res.stems
-        and not is_piano_target
+        and not explicit_solo
+        and (
+            vocal_mode_active
+            or (
+                source_route is not None
+                and source_route.get("resolved_source_type") == "full_song"
+                and not is_piano_target
+            )
+        )
     )
 
     vocal_refined_notes: list[DetectedNote] = []
     bass_refined_notes: list[DetectedNote] = []
     other_refined_notes: list[DetectedNote] = []
+    vocal_tracking: dict[str, Any] = {}
+    vocal_from_monophonic_tracker = False
     source_selection: dict[str, Any] = {
         "selected": "original",
         "content_type": content_type,
@@ -232,63 +304,114 @@ def transcribe_and_refine_audio(
     }
 
     if is_vocal_melody_route and sep_res is not None:
+        raw_vocals_stem = sep_res.stems["vocals"]
         vocal_wav = tmp_path / "stems_proc_vocals.wav"
-        preprocess_to_wav(sep_res.stems["vocals"], vocal_wav, target_sr=target_sr, profile="vocals")
-        exec_res = _run_transcribe(vocal_wav, settings.min_midi_pitch, settings.max_midi_pitch, 52)
-        vocal_ref = refine_detected_notes(exec_res.output.notes, config=cfg)
-        vocal_refined_notes = vocal_ref.notes or exec_res.output.notes
+        preprocess_to_wav(raw_vocals_stem, vocal_wav, target_sr=22050, profile="vocal")
+        exec_res, vocal_refined_notes, vocal_tracking = _run_monophonic_vocal_tracker(vocal_wav, "vocals")
+        vocal_tracking["original_stem_path"] = str(raw_vocals_stem)
+        vocal_from_monophonic_tracker = True
 
-        stem_raw_count = len(exec_res.output.notes)
-        stem_stats_list = [vocal_ref.stats]
+        # Accompaniment stems use Basic Pitch (not Transkun acoustic piano) when transcribing chords/context
+        accomp_engine = "basic_pitch" if requested_engine == "transkun" else requested_engine
+        accomp_sr = 22050 if accomp_engine == "basic_pitch" else target_sr
 
         if "bass" in sep_res.stems:
             bass_wav = tmp_path / "stems_proc_bass.wav"
-            preprocess_to_wav(sep_res.stems["bass"], bass_wav, target_sr=target_sr, profile="bass")
-            bass_exec = _run_transcribe(
-                bass_wav, max(24, settings.min_midi_pitch), min(64, settings.max_midi_pitch), 32
-            )
-            bass_ref = refine_detected_notes(bass_exec.output.notes, config=cfg)
-            bass_refined_notes = bass_ref.notes or bass_exec.output.notes
-            stem_raw_count += len(bass_exec.output.notes)
-            stem_stats_list.append(bass_ref.stats)
+            preprocess_to_wav(sep_res.stems["bass"], bass_wav, target_sr=accomp_sr, profile="general")
+            try:
+                bass_exec = _run_transcribe(
+                    bass_wav, max(24, settings.min_midi_pitch), min(64, settings.max_midi_pitch), 32, engine_override=accomp_engine
+                )
+                bass_ref = refine_detected_notes(bass_exec.output.notes, config=cfg)
+                bass_refined_notes = bass_ref.notes or bass_exec.output.notes
+            except TranscriptionInferenceError:
+                bass_refined_notes = []
 
         if "other" in sep_res.stems:
             other_wav = tmp_path / "stems_proc_other.wav"
-            preprocess_to_wav(sep_res.stems["other"], other_wav, target_sr=target_sr, profile=prep_profile_name)
-            other_exec = _run_transcribe(other_wav, settings.min_midi_pitch, settings.max_midi_pitch, program)
-            other_ref = refine_detected_notes(other_exec.output.notes, config=cfg)
-            other_refined_notes = other_ref.notes or other_exec.output.notes
-            stem_raw_count += len(other_exec.output.notes)
-            stem_stats_list.append(other_ref.stats)
+            preprocess_to_wav(sep_res.stems["other"], other_wav, target_sr=accomp_sr, profile="general")
+            try:
+                other_exec = _run_transcribe(
+                    other_wav, settings.min_midi_pitch, settings.max_midi_pitch, program, engine_override=accomp_engine
+                )
+                other_ref = refine_detected_notes(other_exec.output.notes, config=cfg)
+                other_refined_notes = other_ref.notes or other_exec.output.notes
+            except TranscriptionInferenceError:
+                other_refined_notes = []
 
-        combined_stem_notes = sorted(
-            [*vocal_refined_notes, *bass_refined_notes, *other_refined_notes],
-            key=lambda n: (n.onset_sec, n.pitch_midi),
-        )
-        if not combined_stem_notes:
-            exec_res = _run_transcribe(processed_wav, settings.min_midi_pitch, settings.max_midi_pitch, program)
-            t_out = exec_res.output
-            refinement = refine_detected_notes(t_out.notes, config=cfg)
-            refined_notes = refinement.notes or t_out.notes
-            raw_notes = t_out.notes
-            refiner_stats = refinement.stats
-            source_selection = {"selected": "original", "content_type": content_type, "reason": "stems_empty_fallback"}
+        if not vocal_refined_notes:
+            if lead_melody_active:
+                raise TranscriptionInferenceError(
+                    "NO_VOCAL_MELODY_DETECTED",
+                    "No singable vocal melody was detected in the isolated vocals stem.",
+                )
+            # For piano+vocal only, allow accompaniment fallback when no vocal line exists
+            combined_accomp = sorted(
+                [*bass_refined_notes, *other_refined_notes],
+                key=lambda n: (n.onset_sec, n.pitch_midi),
+            )
+            if not combined_accomp:
+                raise TranscriptionInferenceError(
+                    "NO_NOTES_DETECTED",
+                    "No valid musical notes were detected in the audio recording.",
+                )
+            refined_notes = combined_accomp
+            raw_notes = list(combined_accomp)
+            refiner_stats = {"raw_count": len(raw_notes), "refined_count": len(refined_notes)}
+            source_selection = {
+                "selected": "separated_accompaniment_fallback",
+                "content_type": content_type,
+                "reason": "vocals_stem_empty_piano_vocal_fallback",
+            }
         else:
-            raw_notes = exec_res.output.notes
-            refined_notes = combined_stem_notes
+            raw_notes = list(vocal_refined_notes)
+            # In Lead Melody mode, keep refined_notes strictly isolated to the vocal melody
+            # (never merge bass/other accompaniment notes into the melody note list!).
+            if lead_melody_active or norm_mode == "vocal_melody":
+                refined_notes = list(vocal_refined_notes)
+            else:
+                refined_notes = sorted(
+                    [*vocal_refined_notes, *bass_refined_notes, *other_refined_notes],
+                    key=lambda n: (n.onset_sec, n.pitch_midi),
+                )
             refiner_stats = {
-                "raw_count": stem_raw_count,
-                "filtered_short_or_low_conf": sum(int(s.get("filtered_short_or_low_conf", 0)) for s in stem_stats_list),
-                "reattack_merges": sum(int(s.get("reattack_merges", 0)) for s in stem_stats_list),
-                "octave_ghosts_suppressed": sum(int(s.get("octave_ghosts_suppressed", 0)) for s in stem_stats_list),
-                "fifth_harmonics_suppressed": sum(int(s.get("fifth_harmonics_suppressed", 0)) for s in stem_stats_list),
-                "refined_count": len(combined_stem_notes),
+                "raw_count": len(vocal_refined_notes),
+                "filtered_short_or_low_conf": 0,
+                "reattack_merges": vocal_tracking.get("micro_gap_bridges", 0),
+                "octave_ghosts_suppressed": vocal_tracking.get("octave_spikes_suppressed", 0),
+                "fifth_harmonics_suppressed": 0,
+                "refined_count": len(vocal_refined_notes),
             }
             source_selection = {
-                "selected": "separated_vocal_melody",
+                "selected": "separated_vocals",
+                "vocal_stem_used": str(raw_vocals_stem),
                 "content_type": content_type,
-                "reason": "vocal_melody_or_piano_vocal_routing",
+                "reason": "isolated_vocals_f0_tracking",
             }
+
+    elif explicit_solo and (norm_mode == "vocal_melody" or (settings.instrument or "").strip().lower() == "vocals"):
+        exec_res, vocal_refined_notes, vocal_tracking = _run_monophonic_vocal_tracker(processed_wav, "original_solo_vocal")
+        if not vocal_refined_notes:
+            raise TranscriptionInferenceError(
+                "NO_VOCAL_MELODY_DETECTED",
+                "No singable vocal melody was detected in the solo vocal recording.",
+            )
+        vocal_from_monophonic_tracker = True
+        raw_notes = list(vocal_refined_notes)
+        refined_notes = list(vocal_refined_notes)
+        refiner_stats = {
+            "raw_count": len(raw_notes),
+            "filtered_short_or_low_conf": 0,
+            "reattack_merges": vocal_tracking.get("micro_gap_bridges", 0),
+            "octave_ghosts_suppressed": vocal_tracking.get("octave_spikes_suppressed", 0),
+            "fifth_harmonics_suppressed": 0,
+            "refined_count": len(refined_notes),
+        }
+        source_selection = {
+            "selected": "original",
+            "content_type": content_type,
+            "reason": "explicit_solo_vocal_f0_tracking",
+        }
 
     elif is_piano_target and sep_res is not None and sep_res.available and not (
         content_type == "solo_piano" and (settings.audio_source_type or "auto").strip().lower() != "full_song"
@@ -418,6 +541,8 @@ def transcribe_and_refine_audio(
         other_refined_notes=other_refined_notes,
         is_vocal_melody_route=is_vocal_melody_route,
         source_selection=source_selection,
+        vocal_tracking=vocal_tracking,
+        vocal_from_monophonic_tracker=vocal_from_monophonic_tracker,
     )
 
 
@@ -476,7 +601,13 @@ def analyze_timing_and_build_score(
             tempo_diag["fallback_used"] = True
             tempo_diag["fallback_reason"] = str(exc)
 
-    key_sig, key_est = estimate_key_signature(refined_notes, settings.key_signature)
+    accomp_notes_for_ctx = [*core_res.other_refined_notes, *core_res.bass_refined_notes] or None
+    key_sig, key_est = estimate_key_signature(
+        refined_notes,
+        settings.key_signature,
+        audio_path=processed_wav,
+        accompaniment_notes=accomp_notes_for_ctx,
+    )
 
     norm_mode = normalize_transcription_mode(settings.mode)
     lead_melody_active = is_lead_melody_mode(settings.mode)
@@ -491,14 +622,14 @@ def analyze_timing_and_build_score(
         if piano_vocal_active or core_res.is_vocal_melody_route or (settings.instrument or "").strip().lower() == "vocals":
             app_cfg = get_settings()
             vocal_range = (app_cfg.VOCAL_RANGE_MIN_MIDI, app_cfg.VOCAL_RANGE_MAX_MIDI)
-        accomp_notes_for_bleed = [*core_res.other_refined_notes, *core_res.bass_refined_notes] or None
         melody_result = extract_lead_melody(
             melody_source_notes,
             tempo_bpm=tempo_bpm,
             timing_map=timing_map,
             vocal_range=vocal_range,
             key_signature=key_sig,
-            accompaniment_notes=accomp_notes_for_bleed,
+            accompaniment_notes=accomp_notes_for_ctx,
+            from_monophonic_vocal_tracker=core_res.vocal_from_monophonic_tracker,
         )
         arranged_notes = melody_result.notes or melody_source_notes
         arrangement_detail_value = settings.arrangement_detail
@@ -558,7 +689,11 @@ def analyze_timing_and_build_score(
             "velocity": int(n.velocity),
             "confidence": float(n.confidence) if n.confidence is not None else None,
         }
-        for n in (refined_notes if core_res.is_vocal_melody_route else core_res.raw_notes)
+        for n in (
+            core_res.vocal_refined_notes
+            if (core_res.is_vocal_melody_route and core_res.vocal_refined_notes)
+            else (refined_notes if core_res.is_vocal_melody_route else core_res.raw_notes)
+        )
     ]
 
     exec_res = core_res.exec_res
@@ -597,6 +732,8 @@ def analyze_timing_and_build_score(
         },
         "concert_pitch_hz": settings.concert_pitch_hz,
     }
+    if core_res.vocal_tracking:
+        score_analysis["vocal_tracking"] = core_res.vocal_tracking
     if melody_result is not None:
         score_analysis["melody_extraction"] = melody_result.stats
         score_analysis["melody_uncertain_segments"] = melody_result.uncertain_segments

@@ -145,7 +145,10 @@ PREPROCESSING_PROFILES: dict[str, PreprocessingProfile] = {
 
 
 def get_preprocessing_profile(profile: str = "general") -> PreprocessingProfile:
-    return PREPROCESSING_PROFILES.get((profile or "general").lower(), PREPROCESSING_PROFILES["general"])
+    norm = (profile or "general").strip().lower()
+    if norm == "vocals":
+        norm = "vocal"
+    return PREPROCESSING_PROFILES.get(norm, PREPROCESSING_PROFILES["general"])
 
 
 @dataclass

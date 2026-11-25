@@ -85,10 +85,18 @@ export function TranscriptionConfigPanel({
     min_note_length_ms: 58,
     min_midi_pitch: 21,
     max_midi_pitch: 108,
-    enable_source_separation: activeJob?.settings_json?.enable_source_separation ?? false,
+    enable_source_separation:
+      activeJob?.settings_json?.enable_source_separation ??
+      (["melody", "vocal_melody"].includes(
+        normalizeModeId(initialMode || activeJob?.settings_json?.mode || defaultMode),
+      ) &&
+        (activeJob?.settings_json?.audio_source_type || "auto") !== "solo_piano"),
     audio_source_type: activeJob?.settings_json?.audio_source_type || "auto",
     satb_mode: activeJob?.settings_json?.satb_mode || "auto_satb",
   });
+
+  const normalizedMode = normalizeModeId(settings.mode);
+  const isLeadMelody = normalizedMode === "melody" || normalizedMode === "vocal_melody";
 
   const isScoreImport = Boolean(
     isScoreFile || (!hasMedia && normalizeModeId(settings.mode) === "satb_pdf"),
@@ -124,15 +132,24 @@ export function TranscriptionConfigPanel({
       restoredSourceType !== undefined ||
       restoredSep !== undefined
     ) {
-      setSettings((prev) => ({
-        ...prev,
-        ...(restoredMode ? { mode: normalizeModeId(restoredMode) } : {}),
-        ...(restoredDetail ? { arrangement_detail: restoredDetail } : {}),
-        ...(restoredSmoothing ? { playability_smoothing: restoredSmoothing } : {}),
-        ...(restoredQuant ? { quantization: restoredQuant } : {}),
-        ...(restoredSourceType ? { audio_source_type: restoredSourceType } : {}),
-        ...(restoredSep !== undefined ? { enable_source_separation: restoredSep } : {}),
-      }));
+      setSettings((prev) => {
+        const nextMode = restoredMode ? normalizeModeId(restoredMode) : prev.mode;
+        const nextSource = restoredSourceType || prev.audio_source_type || "auto";
+        const nextIsLead = nextMode === "melody" || nextMode === "vocal_melody";
+        return {
+          ...prev,
+          ...(restoredMode ? { mode: nextMode } : {}),
+          ...(restoredDetail ? { arrangement_detail: restoredDetail } : {}),
+          ...(restoredSmoothing ? { playability_smoothing: restoredSmoothing } : {}),
+          ...(restoredQuant ? { quantization: restoredQuant } : {}),
+          ...(restoredSourceType ? { audio_source_type: restoredSourceType } : {}),
+          ...(restoredSep !== undefined
+            ? { enable_source_separation: restoredSep }
+            : nextIsLead && nextSource !== "solo_piano"
+              ? { enable_source_separation: true }
+              : {}),
+        };
+      });
     }
   }, [
     initialMode,
@@ -189,7 +206,17 @@ export function TranscriptionConfigPanel({
               value={settings.mode}
               onChange={(e) => {
                 setModeManuallySet(true);
-                setSettings({ ...settings, mode: e.target.value });
+                const nextMode = e.target.value;
+                const nextNorm = normalizeModeId(nextMode);
+                const nextIsLead = nextNorm === "melody" || nextNorm === "vocal_melody";
+                setSettings((prev) => ({
+                  ...prev,
+                  mode: nextMode,
+                  ...(nextIsLead && (prev.audio_source_type || "auto") !== "solo_piano"
+                    ? { enable_source_separation: true }
+                    : {}),
+                  ...(nextIsLead && !quantizationManuallySet ? { quantization: "sixteenth" } : {}),
+                }));
               }}
               className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2 pr-6 text-[11px] text-[#F5F3FF]"
             >
@@ -272,12 +299,18 @@ export function TranscriptionConfigPanel({
             <select
               id="audio-source-select"
               value={settings.audio_source_type || "auto"}
-              onChange={(e) =>
-                setSettings({
-                  ...settings,
-                  audio_source_type: e.target.value as TranscriptionSettings["audio_source_type"],
-                })
-              }
+              onChange={(e) => {
+                const nextSource = e.target.value as TranscriptionSettings["audio_source_type"];
+                setSettings((prev) => {
+                  const prevNorm = normalizeModeId(prev.mode);
+                  const inLead = prevNorm === "melody" || prevNorm === "vocal_melody";
+                  return {
+                    ...prev,
+                    audio_source_type: nextSource,
+                    ...(inLead && nextSource !== "solo_piano" ? { enable_source_separation: true } : {}),
+                  };
+                });
+              }}
               className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2 pr-6 text-[11px] text-[#F5F3FF]"
             >
               {AUDIO_SOURCE_TYPES.map((src) => (
@@ -314,6 +347,29 @@ export function TranscriptionConfigPanel({
               Separates vocals, bass, drums, and other instruments before transcription. Recommended for full songs with vocals and accompaniment.
             </p>
           </div>
+        </div>
+      )}
+
+      {!isScoreImport && isLeadMelody && (
+        <div
+          data-testid="lead-melody-vocal-status"
+          className="rounded-lg border border-violet-500/30 bg-violet-500/10 p-2.5 text-xs text-violet-200"
+        >
+          {(settings.audio_source_type || "auto") !== "solo_piano" ? (
+            <>
+              <div className="font-medium text-[#F5F3FF]">Isolating Vocals Stem for Lead Melody</div>
+              <p className="mt-0.5 text-[11px] text-violet-200/80">
+                Uses Demucs vocal isolation (vocals.wav) and monophonic vocal pitch tracking for the main singing line.
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="font-medium text-[#F5F3FF]">Direct Solo / Instrumental Lead Melody</div>
+              <p className="mt-0.5 text-[11px] text-violet-200/80">
+                Respecting explicit Solo Piano / Instrumental source selection without forced vocal separation.
+              </p>
+            </>
+          )}
         </div>
       )}
 
@@ -397,7 +453,7 @@ export function TranscriptionConfigPanel({
                     }
                     onClick={() => {
                       const detail = settings.arrangement_detail || "balanced";
-                      if (playabilityTouched || initialPlayabilitySmoothing !== undefined) {
+                      if (!isLeadMelody && (playabilityTouched || initialPlayabilitySmoothing !== undefined)) {
                         onRegenerateArrangement(
                           detail,
                           settings.quantization,
@@ -438,34 +494,36 @@ export function TranscriptionConfigPanel({
               </p>
             </div>
 
-            <div className="space-y-1.5">
-              <label htmlFor="playability-smoothing-select" className="block text-xs font-medium text-[#A1A1AA]">
-                Playability Smoothing
-              </label>
-              <select
-                id="playability-smoothing-select"
-                value={settings.playability_smoothing || "standard"}
-                onChange={(e) => {
-                  setPlayabilityTouched(true);
-                  setSettings((prev) => ({
-                    ...prev,
-                    playability_smoothing: e.target.value as "original" | "standard" | "simplified",
-                  }));
-                }}
-                className="w-full h-9 rounded-lg border border-stone-300 bg-white px-2.5 text-xs text-stone-900 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20 dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
-              >
-                {PLAYABILITY_SMOOTHING_OPTIONS.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-              <p className="text-[11px] text-[#71717A]">
-                {PLAYABILITY_SMOOTHING_OPTIONS.find(
-                  (o) => o.id === (settings.playability_smoothing || "standard"),
-                )?.description}
-              </p>
-            </div>
+            {!isLeadMelody && (
+              <div className="space-y-1.5">
+                <label htmlFor="playability-smoothing-select" className="block text-xs font-medium text-[#A1A1AA]">
+                  Playability Smoothing
+                </label>
+                <select
+                  id="playability-smoothing-select"
+                  value={settings.playability_smoothing || "standard"}
+                  onChange={(e) => {
+                    setPlayabilityTouched(true);
+                    setSettings((prev) => ({
+                      ...prev,
+                      playability_smoothing: e.target.value as "original" | "standard" | "simplified",
+                    }));
+                  }}
+                  className="w-full h-9 rounded-lg border border-stone-300 bg-white px-2.5 text-xs text-stone-900 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20 dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
+                >
+                  {PLAYABILITY_SMOOTHING_OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-[#71717A]">
+                  {PLAYABILITY_SMOOTHING_OPTIONS.find(
+                    (o) => o.id === (settings.playability_smoothing || "standard"),
+                  )?.description}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Advanced Musical Settings Toggle */}

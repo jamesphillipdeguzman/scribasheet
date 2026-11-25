@@ -585,12 +585,13 @@ def extract_lead_melody(
     vocal_range: tuple[int, int] | None = None,
     key_signature: str | None = None,
     accompaniment_notes: list[DetectedNote] | None = None,
+    from_monophonic_vocal_tracker: bool = False,
 ) -> MelodyExtractionResult:
-    """Extract a single, coherent monophonic melody line from polyphonic notes.
+    """Extract a single, coherent monophonic melody line from polyphonic or vocal-F0 notes.
 
-    Uses dynamic programming over onset clusters to balance melodic contour
-    continuity, sustained prominence, velocity/confidence, and harmonic-overtone
-    rejection without hard low-pitch cutoffs.
+    When ``from_monophonic_vocal_tracker=True`` (e.g., isolated ``vocals.wav`` via pYIN),
+    preserves genuine short 16th-note syllables, grace notes, vibrato smoothing, and rests
+    without running polyphonic clustering or piano minimum-duration/same-pitch pruning.
     """
     valid_notes = [n for n in notes if n.offset_sec > n.onset_sec]
     if not valid_notes:
@@ -604,6 +605,47 @@ def extract_lead_melody(
                 "average_confidence": 0.0,
                 "uncertain_segment_count": 0,
                 "trimmed_overlaps": 0,
+            },
+            uncertain_segments=[],
+        )
+
+    if from_monophonic_vocal_tracker:
+        ordered_vocal = sorted(valid_notes, key=lambda n: (n.onset_sec, n.pitch_midi))
+        filtered_vocal, octave_bleed_rejected = (
+            _reject_octave_and_accompaniment_bleed(ordered_vocal, accompaniment_notes=accompaniment_notes)
+            if len(ordered_vocal) >= 3
+            else (ordered_vocal, 0)
+        )
+        monophonic_notes, trimmed_overlaps = _enforce_monophony(
+            filtered_vocal,
+            min_gap_sec=0.004,
+            min_duration_sec=0.030,
+        )
+        avg_pitch = (
+            sum(n.pitch_midi for n in monophonic_notes) / len(monophonic_notes)
+            if monophonic_notes
+            else 0.0
+        )
+        confs = [n.confidence for n in monophonic_notes if n.confidence is not None]
+        avg_conf = (sum(confs) / len(confs)) if confs else 0.0
+        return MelodyExtractionResult(
+            notes=monophonic_notes,
+            stats={
+                "input_note_count": len(notes),
+                "output_note_count": len(monophonic_notes),
+                "cluster_count": len(monophonic_notes),
+                "anchor_pitch_midi": round(float(median(n.pitch_midi for n in monophonic_notes)), 2) if monophonic_notes else 0.0,
+                "average_pitch_midi": round(avg_pitch, 2),
+                "average_confidence": round(avg_conf, 3),
+                "uncertain_segment_count": 0,
+                "trimmed_overlaps": trimmed_overlaps,
+                "filtered_outlier_count": 0,
+                "intro_transients_suppressed": 0,
+                "octave_bleed_rejected": octave_bleed_rejected,
+                "vibrato_smoothed_count": 0,
+                "same_pitch_merges": 0,
+                "from_monophonic_vocal_tracker": True,
+                "vocal_range": list(vocal_range) if vocal_range is not None else None,
             },
             uncertain_segments=[],
         )

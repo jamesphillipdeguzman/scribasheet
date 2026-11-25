@@ -88,6 +88,7 @@ describe("Piano Playability Smoothing & Default Arrangement Settings", () => {
         workerOnline={true}
         defaultInstrument="piano"
         defaultMode="piano"
+        initialMode="piano"
         initialPlayabilitySmoothing="original"
         onStart={vi.fn()}
         onCancel={vi.fn()}

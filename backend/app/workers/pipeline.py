@@ -6,7 +6,11 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.audio.processor import MediaValidationError, preprocess_to_wav, probe_media
-from app.audio.separator import classify_audio_content, detect_audio_source_route, separate_audio_stems
+from app.audio.separator import (
+    classify_audio_content,
+    detect_audio_source_route,
+    separate_audio_stems,
+)
 from app.core.logging import job_id_ctx
 from app.db.session import SessionLocal
 from app.models import (
@@ -21,9 +25,10 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
-from app.notation.melody import normalize_transcription_mode
+from app.notation.melody import is_lead_melody_mode, normalize_transcription_mode
 from app.schemas.transcription import TranscriptionSettings
 from app.storage.service import storage_service
+from app.transcription.basic_pitch_provider import TranscriptionInferenceError
 from app.transcription.core_pipeline import (
     analyze_timing_and_build_score,
     resolve_preprocessing_profile,
@@ -156,23 +161,34 @@ def run_transcription_pipeline(job_id: str) -> None:
 
             # Stage 3: Optional Source Separation
             norm_mode_pre = normalize_transcription_mode(settings.mode)
-            pre_content_class = classify_audio_content(processed_wav) if settings.enable_source_separation else None
+            req_source_pre = (settings.audio_source_type or "auto").strip().lower()
+            force_vocal_sep = is_lead_melody_mode(settings.mode) and req_source_pre != "solo_piano"
+            pre_content_class = (
+                classify_audio_content(processed_wav)
+                if (settings.enable_source_separation and not force_vocal_sep)
+                else None
+            )
             skip_for_clean_solo = bool(
-                settings.enable_source_separation
-                and (settings.audio_source_type or "auto").strip().lower() == "auto"
+                not force_vocal_sep
+                and settings.enable_source_separation
+                and req_source_pre == "auto"
                 and norm_mode_pre in ("piano", "single_instrument")
                 and pre_content_class is not None
                 and pre_content_class.get("content_type") == "solo_piano"
                 and float(pre_content_class.get("solo_confidence", 0.0)) >= 0.80
             )
-            if settings.enable_source_separation and not skip_for_clean_solo:
+            if force_vocal_sep or (settings.enable_source_separation and not skip_for_clean_solo):
                 _update_job(
                     db,
                     job,
                     status="separating",
                     progress=40,
-                    stage="Separating",
-                    log_line=f"Separating stems with Demucs ({settings.demucs_model}) when available.",
+                    stage="Isolating Vocals Stem for Lead Melody" if force_vocal_sep else "Separating",
+                    log_line=(
+                        f"Isolating vocals stem with Demucs ({settings.demucs_model}) for Lead Melody."
+                        if force_vocal_sep
+                        else f"Separating stems with Demucs ({settings.demucs_model}) when available."
+                    ),
                 )
                 sep_res = separate_audio_stems(
                     local_source_path,
@@ -183,6 +199,12 @@ def run_transcription_pipeline(job_id: str) -> None:
                     overlap=settings.demucs_overlap,
                 )
                 separation_note = sep_res.message
+                if force_vocal_sep and (not sep_res.available or "vocals" not in sep_res.stems):
+                    raise TranscriptionInferenceError(
+                        "VOCAL_STEM_UNAVAILABLE",
+                        sep_res.message
+                        or "Lead Melody requires an isolated vocals stem (vocals.wav), which is unavailable.",
+                    )
                 if sep_res.available and sep_res.stems:
                     # Save generated stems as MediaAssets
                     for stem_name, stem_path in sep_res.stems.items():
