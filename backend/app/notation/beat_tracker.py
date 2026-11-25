@@ -313,11 +313,130 @@ def track_beats_and_downbeats(
     )
 
 
+def _halfbar_metrical_evidence_prefers_4_4(
+    downbeats: list[float],
+    beat_times: list[float],
+    bpm: float,
+    selected_ratio: float,
+    notes: Any,
+) -> tuple[bool, int, dict[str, Any]]:
+    """Evaluate bass/harmonic rhythm and accent alternation to separate 4/4 from genuine 2/4."""
+    note_list = list(notes or [])
+    if len(downbeats) < 4 or not note_list:
+        return False, 0, {"evaluated": False}
+
+    # Build per-half-bar pitch-class vectors, lowest bass pitch, and downbeat attack weight
+    n_hb = len(downbeats) - 1
+    hb_profiles: list[np.ndarray] = []
+    hb_bass_pc: list[int | None] = []
+    db_weights: list[float] = []
+
+    for i in range(n_hb):
+        db_t = downbeats[i]
+        att_w = 0.0
+        for n in note_list:
+            if abs(float(n.onset_sec) - db_t) <= 0.14:
+                vel = max(1.0, float(getattr(n, "velocity", 80)))
+                bass_boost = 1.6 if int(n.pitch_midi) < 55 else 1.0
+                att_w += vel * bass_boost
+        db_weights.append(att_w)
+
+    for i in range(n_hb):
+        start_t = downbeats[i]
+        end_t = downbeats[i + 1]
+        vec = np.zeros(12, dtype=np.float64)
+        low_midi: int | None = None
+        for n in note_list:
+            ov = min(float(n.offset_sec), end_t) - max(float(n.onset_sec), start_t)
+            if ov <= 0.04:
+                continue
+            vel = max(1.0, float(getattr(n, "velocity", 80))) / 127.0
+            bass_mult = 1.4 if int(n.pitch_midi) < 58 else 1.0
+            vec[int(n.pitch_midi) % 12] += ov * vel * bass_mult
+            if low_midi is None or int(n.pitch_midi) < low_midi:
+                low_midi = int(n.pitch_midi)
+        norm = float(np.linalg.norm(vec))
+        if norm > 1e-8:
+            vec = vec / norm
+        hb_profiles.append(vec)
+        hb_bass_pc.append((low_midi % 12) if low_midi is not None else None)
+
+    phase0_changes: list[float] = []
+    phase1_changes: list[float] = []
+    same_bar_sims: list[float] = []
+    across_bar_sims: list[float] = []
+
+    for i in range(1, n_hb):
+        p_prev = hb_profiles[i - 1]
+        p_curr = hb_profiles[i]
+        if float(np.linalg.norm(p_prev)) <= 1e-6 or float(np.linalg.norm(p_curr)) <= 1e-6:
+            continue
+        cos_sim = float(np.dot(p_prev, p_curr))
+        harm_dist = max(0.0, 1.0 - cos_sim)
+        bass_changed = (
+            1.0
+            if (
+                hb_bass_pc[i] is not None
+                and hb_bass_pc[i - 1] is not None
+                and hb_bass_pc[i] != hb_bass_pc[i - 1]
+            )
+            else 0.0
+        )
+        change_score = 0.6 * harm_dist + 0.4 * bass_changed
+        if i % 2 == 0:
+            phase0_changes.append(change_score)
+            across_bar_sims.append(cos_sim)
+        else:
+            phase1_changes.append(change_score)
+            same_bar_sims.append(cos_sim)
+
+    mean_c0 = float(np.mean(phase0_changes)) if phase0_changes else 0.0
+    mean_c1 = float(np.mean(phase1_changes)) if phase1_changes else 0.0
+    mean_w0 = float(np.mean(db_weights[0::2])) if db_weights[0::2] else 0.0
+    mean_w1 = float(np.mean(db_weights[1::2])) if db_weights[1::2] else 0.0
+    norm_w = max(1.0, mean_w0 + mean_w1)
+
+    phase0_strength = mean_c0 + 0.35 * (mean_w0 / norm_w)
+    phase1_strength = mean_c1 + 0.35 * (mean_w1 / norm_w)
+    best_phase = 0 if phase0_strength >= phase1_strength else 1
+
+    # In 4/4 paired from half-bars:
+    # Either chords span ~4 beats (similarity inside best_phase pairs > 0.72), OR one phase
+    # clearly dominates harmonic/bass changes & downbeat accents (>= 1.28x weaker phase).
+    pair_sims = same_bar_sims if best_phase == 0 else across_bar_sims
+    mean_pair_sim = float(np.mean(pair_sims)) if pair_sims else 0.0
+    strong_c = max(mean_c0, mean_c1)
+    weak_c = min(mean_c0, mean_c1)
+    strong_w = mean_w0 if best_phase == 0 else mean_w1
+    weak_w = mean_w1 if best_phase == 0 else mean_w0
+
+    asymmetric_change = strong_c >= max(0.08, weak_c * 1.28)
+    asymmetric_accent = strong_w >= max(1.0, weak_w * 1.25)
+    sustained_4beat_harmony = mean_pair_sim >= 0.72 and weak_c < 0.48
+    half_time_doubled = abs(float(selected_ratio) - 2.0) < 0.25
+
+    prefers_4_4 = bool(
+        (sustained_4beat_harmony or asymmetric_change or asymmetric_accent or half_time_doubled)
+        and (55.0 <= float(bpm) <= 155.0 or half_time_doubled)
+    )
+    return prefers_4_4, best_phase, {
+        "evaluated": True,
+        "mean_change_phase0": round(mean_c0, 3),
+        "mean_change_phase1": round(mean_c1, 3),
+        "mean_weight_phase0": round(mean_w0, 1),
+        "mean_weight_phase1": round(mean_w1, 1),
+        "mean_within_bar_similarity": round(mean_pair_sim, 3),
+        "half_time_doubled": half_time_doubled,
+    }
+
+
 def infer_time_signature_from_beats(
     beat_result: BeatTrackingResult,
     requested_time_signature: str = "auto",
+    *,
+    notes: Any = None,
 ) -> tuple[str, bool, dict[str, Any]]:
-    """Infer musical meter (2/4, 3/4, 4/4, 6/8) from downbeat/beat intervals when 'auto'.
+    """Infer musical meter (2/4, 3/4, 4/4, 6/8) from downbeat/beat intervals and metrical evidence when 'auto'.
 
     Returns (time_signature, was_estimated, diagnostics).
     Preserves explicit user-selected time signatures untouched.
@@ -383,6 +502,40 @@ def infer_time_signature_from_beats(
     best_n, best_count = max(bar_counts.items(), key=lambda kv: (kv[1], kv[0] == 4))
     consistency = best_count / valid_bars
     meter_map = {2: "2/4", 3: "3/4", 4: "4/4", 6: "6/8"}
+
+    # When half-time beat grid was doubled (selected_ratio ~ 2.0) or beat_this emitted
+    # half-bar downbeats (2 beats/bar) on a 4/4 pop/ballad song, check metrical/harmonic evidence.
+    if consistency >= 0.65 and conf >= 0.45 and best_n == 2 and notes is not None:
+        prefers_4_4, downbeat_phase, evidence = _halfbar_metrical_evidence_prefers_4_4(
+            downbeats=downbeats,
+            beat_times=beats,
+            bpm=float(beat_result.selected_bpm),
+            selected_ratio=float(beat_result.selected_ratio),
+            notes=notes,
+        )
+        if prefers_4_4:
+            return "4/4", True, {
+                "requested_time_signature": "auto",
+                "detected_time_signature": "4/4",
+                "confidence": round(conf, 3),
+                "consistency": round(consistency, 3),
+                "beats_per_bar_observed": 4,
+                "raw_beats_per_bar_observed": 2,
+                "downbeat_phase": downbeat_phase,
+                "bar_count": max(1, valid_bars // 2),
+                "metrical_evidence": evidence,
+                "reason": "metrical_accent_and_harmony_4_4",
+            }
+        return "2/4", True, {
+            "requested_time_signature": "auto",
+            "detected_time_signature": "2/4",
+            "confidence": round(conf, 3),
+            "consistency": round(consistency, 3),
+            "beats_per_bar_observed": 2,
+            "bar_count": valid_bars,
+            "metrical_evidence": evidence,
+            "reason": "confirmed_2_4_harmonic_rhythm",
+        }
 
     if consistency >= 0.65 and conf >= 0.45 and best_n in meter_map:
         detected = meter_map[best_n]

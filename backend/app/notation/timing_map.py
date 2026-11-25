@@ -108,6 +108,7 @@ def build_timing_map(
     notes: list[DetectedNote],
     duration_seconds: float,
     time_signature: str = "4/4",
+    meter_diag: dict[str, Any] | None = None,
 ) -> TimingMap:
     """Construct a beat-synchronized TimingMap anchored on detected downbeats and beats."""
     try:
@@ -119,8 +120,38 @@ def build_timing_map(
     sec_per_beat = 60.0 / tempo_bpm
     expected_bar_sec = sec_per_beat * beats_per_measure
 
+    raw_downbeats = sorted(float(d) for d in beat_result.downbeat_times_sec if np.isfinite(d) and d >= 0.0)
+    # When meter resolved to 4/4 (or 4 beats/bar) while beat tracker emitted half-bar
+    # downbeats (~2 beats apart), select the stronger metrical phase so barlines are not split.
+    if beats_per_measure == 4 and len(raw_downbeats) >= 4:
+        db_diffs_beats = np.diff(np.array(raw_downbeats, dtype=np.float64)) / max(0.15, sec_per_beat)
+        med_db_beats = float(np.median(db_diffs_beats)) if len(db_diffs_beats) else 4.0
+        if 1.55 <= med_db_beats <= 2.45:
+            phase = None
+            if meter_diag and "downbeat_phase" in meter_diag:
+                phase = int(meter_diag["downbeat_phase"]) % 2
+            elif notes:
+                # Choose phase (0 vs 1) with stronger bass + velocity downbeat attacks
+                w0 = sum(
+                    max(1.0, float(n.velocity)) * (1.6 if n.pitch_midi < 55 else 1.0)
+                    for idx, db in enumerate(raw_downbeats)
+                    if idx % 2 == 0
+                    for n in notes
+                    if abs(n.onset_sec - db) <= 0.14
+                )
+                w1 = sum(
+                    max(1.0, float(n.velocity)) * (1.6 if n.pitch_midi < 55 else 1.0)
+                    for idx, db in enumerate(raw_downbeats)
+                    if idx % 2 == 1
+                    for n in notes
+                    if abs(n.onset_sec - db) <= 0.14
+                )
+                phase = 0 if w0 >= w1 else 1
+            if phase is not None:
+                raw_downbeats = raw_downbeats[phase::2]
+
     reg_downbeats = _regularize_downbeats(
-        beat_result.downbeat_times_sec,
+        raw_downbeats,
         beat_result.beat_times_sec,
         expected_bar_sec,
         max(duration_seconds, max((n.offset_sec for n in notes), default=1.0)),
@@ -131,8 +162,17 @@ def build_timing_map(
     beat_times: list[float] = []
     beat_qls: list[float] = []
 
-    # Check for genuine pickup notes before first_downbeat_sec
-    pre_notes = [n for n in notes if n.onset_sec < first_db - 0.16]
+    # Check for genuine pickup notes before first_downbeat_sec (ignoring weak noise blips)
+    pre_notes = [
+        n
+        for n in notes
+        if n.onset_sec < first_db - 0.16
+        and not (
+            int(getattr(n, "velocity", 80)) < 42
+            and n.confidence is not None
+            and float(n.confidence) < 0.40
+        )
+    ]
     pickup_ql = 0.0
     if pre_notes:
         earliest_pre = min(n.onset_sec for n in pre_notes)

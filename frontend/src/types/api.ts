@@ -67,6 +67,7 @@ export interface TranscriptionSettings {
   mode: string;
   instrument: string;
   arrangement_detail?: "simple" | "balanced" | "detailed";
+  playability_smoothing?: "original" | "standard" | "simplified";
   tempo_mode: "auto" | "manual";
   manual_tempo_bpm?: number | null;
   time_signature: string;

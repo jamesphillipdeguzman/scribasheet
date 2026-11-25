@@ -79,5 +79,6 @@ class ProjectScoreUpdateRequest(BaseModel):
 
 class ArrangementRegenerateRequest(BaseModel):
     arrangement_detail: Literal["simple", "balanced", "detailed"] = "balanced"
+    playability_smoothing: Literal["original", "standard", "simplified"] | None = None
     quantization: str | None = None
     mode: str | None = None

@@ -6,7 +6,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.audio.processor import MediaValidationError, preprocess_to_wav, probe_media
-from app.audio.separator import detect_audio_source_route, separate_audio_stems
+from app.audio.separator import classify_audio_content, detect_audio_source_route, separate_audio_stems
 from app.core.logging import job_id_ctx
 from app.db.session import SessionLocal
 from app.models import (
@@ -21,6 +21,7 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
+from app.notation.melody import normalize_transcription_mode
 from app.schemas.transcription import TranscriptionSettings
 from app.storage.service import storage_service
 from app.transcription.core_pipeline import (
@@ -154,7 +155,17 @@ def run_transcription_pipeline(job_id: str) -> None:
             separation_note = "Direct transcription (source separation not requested)."
 
             # Stage 3: Optional Source Separation
-            if settings.enable_source_separation:
+            norm_mode_pre = normalize_transcription_mode(settings.mode)
+            pre_content_class = classify_audio_content(processed_wav) if settings.enable_source_separation else None
+            skip_for_clean_solo = bool(
+                settings.enable_source_separation
+                and (settings.audio_source_type or "auto").strip().lower() == "auto"
+                and norm_mode_pre in ("piano", "single_instrument")
+                and pre_content_class is not None
+                and pre_content_class.get("content_type") == "solo_piano"
+                and float(pre_content_class.get("solo_confidence", 0.0)) >= 0.80
+            )
+            if settings.enable_source_separation and not skip_for_clean_solo:
                 _update_job(
                     db,
                     job,
@@ -202,9 +213,14 @@ def run_transcription_pipeline(job_id: str) -> None:
                         stage="Separating",
                         log_line=sep_res.message,
                     )
+            elif skip_for_clean_solo:
+                separation_note = (
+                    f"Clean solo piano detected (confidence={float(pre_content_class.get('solo_confidence', 0.0)):.2f}); "
+                    "skipped unnecessary stem separation to preserve note transients."
+                )
 
             source_route = detect_audio_source_route(
-                local_source_path,
+                processed_wav,
                 sep_res.stems if sep_res and sep_res.available else None,
                 requested_source_type=settings.audio_source_type,
                 mode=settings.mode,

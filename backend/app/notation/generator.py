@@ -73,10 +73,33 @@ def build_score_data(
     grid_ql = grid_map_ql.get(quantization, 0.25)
 
     def _quantize_notes(raw_notes: list[DetectedNote]) -> list[ScoreNote]:
+        if not raw_notes:
+            return []
+        ordered = sorted(raw_notes, key=lambda n: (n.onset_sec, n.pitch_midi))
+
+        # Cluster near-simultaneous chord strikes (<= 35ms) so chord tones snap to a
+        # unified rhythmic onset slot instead of splitting across adjacent grid positions.
+        cluster_anchor_onset: dict[int, float] = {}
+        if quantization != "none":
+            idx = 0
+            while idx < len(ordered):
+                end = idx + 1
+                anchor_t = float(ordered[idx].onset_sec)
+                while end < len(ordered) and float(ordered[end].onset_sec) - anchor_t <= 0.035:
+                    end += 1
+                if end - idx > 1:
+                    # Velocity-weighted mean onset aligns slightly flam'd chord attacks cleanly
+                    weights = [max(1.0, float(ordered[k].velocity)) for k in range(idx, end)]
+                    shared_onset = sum(float(ordered[k].onset_sec) * w for k, w in zip(range(idx, end), weights, strict=True)) / sum(weights)
+                    for k in range(idx, end):
+                        cluster_anchor_onset[k] = shared_onset
+                idx = end
+
         quantized: list[ScoreNote] = []
-        for n in raw_notes:
+        for idx, n in enumerate(ordered):
+            eff_onset_sec = cluster_anchor_onset.get(idx, float(n.onset_sec))
             if timing_map is not None and quantization != "none":
-                raw_onset_ql = max(0.0, timing_map.seconds_to_ql(n.onset_sec))
+                raw_onset_ql = max(0.0, timing_map.seconds_to_ql(eff_onset_sec))
                 raw_offset_ql = max(raw_onset_ql + grid_ql, timing_map.seconds_to_ql(n.offset_sec))
                 q_onset_ql = max(0.0, round(raw_onset_ql / grid_ql) * grid_ql)
                 raw_dur_ql = max(grid_ql, raw_offset_ql - raw_onset_ql)
@@ -84,7 +107,7 @@ def build_score_data(
                 onset = round(q_onset_ql * sec_per_beat, 4)
                 offset = round((q_onset_ql + q_dur_ql) * sec_per_beat, 4)
             else:
-                onset = quantize_seconds(n.onset_sec, effective_bpm, quantization)
+                onset = quantize_seconds(eff_onset_sec, effective_bpm, quantization)
                 offset = quantize_seconds(n.offset_sec, effective_bpm, quantization)
             if offset <= onset:
                 offset = round(onset + min_dur, 4)

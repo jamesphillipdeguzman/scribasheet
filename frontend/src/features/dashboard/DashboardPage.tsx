@@ -48,7 +48,7 @@ export function DashboardPage() {
 
   const [newTitle, setNewTitle] = useState("");
   const [newInstrument, setNewInstrument] = useState("piano");
-  const [newMode, setNewMode] = useState("single_instrument");
+  const [newMode, setNewMode] = useState("piano");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
@@ -129,7 +129,8 @@ export function DashboardPage() {
             </Button>
             <Button
               onClick={() => {
-                setNewMode("single_instrument");
+                setNewInstrument("piano");
+                setNewMode("piano");
                 setShowCreateModal(true);
               }}
               className="w-full sm:w-auto min-h-[44px]"
@@ -387,7 +388,15 @@ export function DashboardPage() {
               <label className="block text-xs font-medium text-[#A1A1AA]">Primary Instrument</label>
               <select
                 value={newInstrument}
-                onChange={(e) => setNewInstrument(e.target.value)}
+                onChange={(e) => {
+                  const inst = e.target.value;
+                  setNewInstrument(inst);
+                  if (inst === "piano" && newMode === "single_instrument") {
+                    setNewMode("piano");
+                  } else if (inst !== "piano" && newMode === "piano") {
+                    setNewMode("single_instrument");
+                  }
+                }}
                 className="w-full h-10 rounded-lg border border-[#27273A] bg-[#09090F] px-3 text-sm text-[#F5F3FF]"
               >
                 {SUPPORTED_INSTRUMENTS.map((inst) => (

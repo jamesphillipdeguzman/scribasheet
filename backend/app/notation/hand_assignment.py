@@ -60,14 +60,14 @@ def _unary_partition_score(
     lh_span = _hand_span(lh)
     rh_span = _hand_span(rh)
 
-    # Ergonomic span playability
+    # Ergonomic span playability: strongly penalize simultaneous spans exceeding an octave (12 st)
     if lh_span > 12:
-        score -= (lh_span - 12) * 4.0
-    elif lh and ((len(lh) >= 3 and lh_span <= 9) or (len(lh) == 2 and lh_span <= 7)):
+        score -= (lh_span - 12) * 5.5
+    elif lh and ((len(lh) >= 3 and lh_span <= 10) or (len(lh) == 2 and lh_span <= 12)):
         score += 1.2
     if rh_span > 12:
-        score -= (rh_span - 12) * 4.0
-    elif rh and ((len(rh) >= 3 and rh_span <= 9) or (len(rh) == 2 and rh_span <= 7)):
+        score -= (rh_span - 12) * 5.5
+    elif rh and ((len(rh) >= 3 and rh_span <= 10) or (len(rh) == 2 and rh_span <= 12)):
         score += 1.2
 
     # Gentle ergonomic register priors (soft enough for sequence continuity to override)

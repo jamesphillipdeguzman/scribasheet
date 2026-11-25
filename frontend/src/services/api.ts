@@ -354,7 +354,12 @@ export const api = {
     }),
   regenerateArrangement: (
     projectId: string,
-    data: { arrangement_detail: "simple" | "balanced" | "detailed"; quantization?: string; mode?: string },
+    data: {
+      arrangement_detail: "simple" | "balanced" | "detailed";
+      playability_smoothing?: "original" | "standard" | "simplified";
+      quantization?: string;
+      mode?: string;
+    },
   ) =>
     request<ProjectScoreResponse>(`/projects/${projectId}/score/regenerate`, {
       method: "POST",

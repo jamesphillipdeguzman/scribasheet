@@ -2,7 +2,12 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, ChevronDown, Clock, Loader2, Play, RotateCcw, Square } from "lucide-react";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { AUDIO_SOURCE_TYPES, SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
+import {
+  AUDIO_SOURCE_TYPES,
+  PLAYABILITY_SMOOTHING_OPTIONS,
+  SUPPORTED_INSTRUMENTS,
+  TRANSCRIPTION_MODES,
+} from "@/lib/utils";
 import type { TranscriptionJob, TranscriptionSettings } from "@/types/api";
 
 interface Props {
@@ -15,6 +20,7 @@ interface Props {
   defaultMode: string;
   initialMode?: string;
   initialArrangementDetail?: "simple" | "balanced" | "detailed";
+  initialPlayabilitySmoothing?: "original" | "standard" | "simplified";
   initialQuantization?: TranscriptionSettings["quantization"];
   onStart: (settings: TranscriptionSettings) => void;
   onCancel: (jobId: string) => void;
@@ -23,6 +29,7 @@ interface Props {
     arrangementDetail: "simple" | "balanced" | "detailed",
     quantization: TranscriptionSettings["quantization"],
     mode?: string,
+    playabilitySmoothing?: "original" | "standard" | "simplified",
   ) => Promise<void> | void;
   isRegeneratingArrangement?: boolean;
   isStarting: boolean;
@@ -45,6 +52,7 @@ export function TranscriptionConfigPanel({
   defaultMode,
   initialMode,
   initialArrangementDetail,
+  initialPlayabilitySmoothing,
   initialQuantization,
   onStart,
   onCancel,
@@ -56,11 +64,15 @@ export function TranscriptionConfigPanel({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [confirmOfflineQueue, setConfirmOfflineQueue] = useState(false);
   const [quantizationManuallySet, setQuantizationManuallySet] = useState(false);
+  const [modeManuallySet, setModeManuallySet] = useState(false);
+  const [playabilityTouched, setPlayabilityTouched] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [settings, setSettings] = useState<TranscriptionSettings>({
     mode: normalizeModeId(initialMode || activeJob?.settings_json?.mode || defaultMode),
     instrument: defaultInstrument || "piano",
     arrangement_detail: initialArrangementDetail || activeJob?.settings_json?.arrangement_detail || "balanced",
+    playability_smoothing:
+      initialPlayabilitySmoothing || activeJob?.settings_json?.playability_smoothing || "standard",
     tempo_mode: "auto",
     manual_tempo_bpm: 120,
     time_signature: "auto",
@@ -92,7 +104,7 @@ export function TranscriptionConfigPanel({
     } else if (!isScoreFile && hasMedia && normalizeModeId(settings.mode) === "satb_pdf") {
       setSettings((prev) => ({
         ...prev,
-        mode: normalizeModeId(defaultMode) === "satb_pdf" ? "single_instrument" : normalizeModeId(defaultMode),
+        mode: normalizeModeId(defaultMode) === "satb_pdf" ? "piano" : normalizeModeId(defaultMode),
       }));
     }
   }, [isScoreFile, hasMedia, defaultMode, settings.mode]);
@@ -100,14 +112,23 @@ export function TranscriptionConfigPanel({
   useEffect(() => {
     const restoredMode = initialMode || activeJob?.settings_json?.mode;
     const restoredDetail = initialArrangementDetail || activeJob?.settings_json?.arrangement_detail;
+    const restoredSmoothing = initialPlayabilitySmoothing || activeJob?.settings_json?.playability_smoothing;
     const restoredQuant = initialQuantization || activeJob?.settings_json?.quantization;
     const restoredSourceType = activeJob?.settings_json?.audio_source_type;
     const restoredSep = activeJob?.settings_json?.enable_source_separation;
-    if (restoredMode || restoredDetail || restoredQuant || restoredSourceType !== undefined || restoredSep !== undefined) {
+    if (
+      restoredMode ||
+      restoredDetail ||
+      restoredSmoothing ||
+      restoredQuant ||
+      restoredSourceType !== undefined ||
+      restoredSep !== undefined
+    ) {
       setSettings((prev) => ({
         ...prev,
         ...(restoredMode ? { mode: normalizeModeId(restoredMode) } : {}),
         ...(restoredDetail ? { arrangement_detail: restoredDetail } : {}),
+        ...(restoredSmoothing ? { playability_smoothing: restoredSmoothing } : {}),
         ...(restoredQuant ? { quantization: restoredQuant } : {}),
         ...(restoredSourceType ? { audio_source_type: restoredSourceType } : {}),
         ...(restoredSep !== undefined ? { enable_source_separation: restoredSep } : {}),
@@ -116,9 +137,11 @@ export function TranscriptionConfigPanel({
   }, [
     initialMode,
     initialArrangementDetail,
+    initialPlayabilitySmoothing,
     initialQuantization,
     activeJob?.settings_json?.mode,
     activeJob?.settings_json?.arrangement_detail,
+    activeJob?.settings_json?.playability_smoothing,
     activeJob?.settings_json?.quantization,
     activeJob?.settings_json?.audio_source_type,
     activeJob?.settings_json?.enable_source_separation,
@@ -164,7 +187,10 @@ export function TranscriptionConfigPanel({
             <select
               id="transcription-mode-select"
               value={settings.mode}
-              onChange={(e) => setSettings({ ...settings, mode: e.target.value })}
+              onChange={(e) => {
+                setModeManuallySet(true);
+                setSettings({ ...settings, mode: e.target.value });
+              }}
               className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2 pr-6 text-[11px] text-[#F5F3FF]"
             >
               {TRANSCRIPTION_MODES.map((m) => (
@@ -185,7 +211,20 @@ export function TranscriptionConfigPanel({
             <select
               id="instrument-select"
               value={settings.instrument}
-              onChange={(e) => setSettings({ ...settings, instrument: e.target.value })}
+              onChange={(e) => {
+                const nextInst = e.target.value;
+                setSettings((prev) => {
+                  let nextMode = prev.mode;
+                  if (!modeManuallySet && !hasScore) {
+                    if (nextInst === "piano" && prev.mode === "single_instrument") {
+                      nextMode = "piano";
+                    } else if (nextInst !== "piano" && prev.mode === "piano") {
+                      nextMode = "single_instrument";
+                    }
+                  }
+                  return { ...prev, instrument: nextInst, mode: nextMode };
+                });
+              }}
               className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2 pr-6 text-[11px] text-[#F5F3FF]"
             >
               {SUPPORTED_INSTRUMENTS.map((inst) => (
@@ -340,56 +379,93 @@ export function TranscriptionConfigPanel({
             </div>
           </div>
 
-          {/* Arrangement Detail */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <label htmlFor="arrangement-detail-select" className="block text-xs font-medium text-[#A1A1AA]">
-                Arrangement Detail
-              </label>
-              {hasScore && onRegenerateArrangement && (
-                <button
-                  type="button"
-                  disabled={isRegeneratingArrangement || modeChangedSinceScore}
-                  title={
-                    modeChangedSinceScore
-                      ? "Transcription mode changed — click Re-Transcribe below to regenerate."
-                      : undefined
-                  }
-                  onClick={() =>
-                    onRegenerateArrangement(
-                      settings.arrangement_detail || "balanced",
-                      settings.quantization,
-                      settings.mode,
-                    )
-                  }
-                  className="text-xs font-medium text-[#A78BFA] hover:underline disabled:opacity-50"
-                >
-                  {isRegeneratingArrangement ? "Updating..." : "Apply Arrangement"}
-                </button>
-              )}
+          {/* Arrangement Detail & Playability Smoothing */}
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="arrangement-detail-select" className="block text-xs font-medium text-[#A1A1AA]">
+                  Arrangement Detail
+                </label>
+                {hasScore && onRegenerateArrangement && (
+                  <button
+                    type="button"
+                    disabled={isRegeneratingArrangement || modeChangedSinceScore}
+                    title={
+                      modeChangedSinceScore
+                        ? "Transcription mode changed — click Re-Transcribe below to regenerate."
+                        : undefined
+                    }
+                    onClick={() => {
+                      const detail = settings.arrangement_detail || "balanced";
+                      if (playabilityTouched || initialPlayabilitySmoothing !== undefined) {
+                        onRegenerateArrangement(
+                          detail,
+                          settings.quantization,
+                          settings.mode,
+                          settings.playability_smoothing || "standard",
+                        );
+                      } else {
+                        onRegenerateArrangement(detail, settings.quantization, settings.mode);
+                      }
+                    }}
+                    className="text-xs font-medium text-[#A78BFA] hover:underline disabled:opacity-50"
+                  >
+                    {isRegeneratingArrangement ? "Updating..." : "Apply Arrangement"}
+                  </button>
+                )}
+              </div>
+              <select
+                id="arrangement-detail-select"
+                value={settings.arrangement_detail || "balanced"}
+                onChange={(e) => {
+                  const nextDetail = e.target.value as "simple" | "balanced" | "detailed";
+                  setSettings((prev) => ({
+                    ...prev,
+                    arrangement_detail: nextDetail,
+                    ...(!quantizationManuallySet
+                      ? { quantization: nextDetail === "simple" ? "eighth" : "sixteenth" }
+                      : {}),
+                  }));
+                }}
+                className="w-full h-9 rounded-lg border border-stone-300 bg-white px-2.5 text-xs text-stone-900 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20 dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
+              >
+                <option value="simple">Simple / Syllabic</option>
+                <option value="balanced">Balanced (Recommended)</option>
+                <option value="detailed">Detailed / Solo</option>
+              </select>
+              <p className="text-[11px] text-[#71717A]">
+                Controls note density, LH/RH complexity, and phrase continuity without changing the original audio.
+              </p>
             </div>
-            <select
-              id="arrangement-detail-select"
-              value={settings.arrangement_detail || "balanced"}
-              onChange={(e) => {
-                const nextDetail = e.target.value as "simple" | "balanced" | "detailed";
-                setSettings((prev) => ({
-                  ...prev,
-                  arrangement_detail: nextDetail,
-                  ...(!quantizationManuallySet
-                    ? { quantization: nextDetail === "simple" ? "eighth" : "sixteenth" }
-                    : {}),
-                }));
-              }}
-              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2.5 text-xs text-[#F5F3FF]"
-            >
-              <option value="simple">Simple / Syllabic</option>
-              <option value="balanced">Balanced (Recommended)</option>
-              <option value="detailed">Detailed / Solo</option>
-            </select>
-            <p className="text-[11px] text-[#71717A]">
-              Controls note density, LH/RH complexity, and phrase continuity without changing the original audio.
-            </p>
+
+            <div className="space-y-1.5">
+              <label htmlFor="playability-smoothing-select" className="block text-xs font-medium text-[#A1A1AA]">
+                Playability Smoothing
+              </label>
+              <select
+                id="playability-smoothing-select"
+                value={settings.playability_smoothing || "standard"}
+                onChange={(e) => {
+                  setPlayabilityTouched(true);
+                  setSettings((prev) => ({
+                    ...prev,
+                    playability_smoothing: e.target.value as "original" | "standard" | "simplified",
+                  }));
+                }}
+                className="w-full h-9 rounded-lg border border-stone-300 bg-white px-2.5 text-xs text-stone-900 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20 dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
+              >
+                {PLAYABILITY_SMOOTHING_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-[#71717A]">
+                {PLAYABILITY_SMOOTHING_OPTIONS.find(
+                  (o) => o.id === (settings.playability_smoothing || "standard"),
+                )?.description}
+              </p>
+            </div>
           </div>
 
           {/* Advanced Musical Settings Toggle */}

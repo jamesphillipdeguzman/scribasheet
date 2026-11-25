@@ -6,7 +6,7 @@ from app.api.deps import get_current_user, get_owned_project
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import Project, ProjectScore, User
-from app.notation.analyzer import select_chord_source_notes
+from app.notation.analyzer import detect_chords, select_chord_source_notes
 from app.notation.arrangement import simplify_arrangement
 from app.notation.generator import (
     apply_scribasheet_musicxml_branding,
@@ -22,11 +22,13 @@ from app.notation.melody import (
     normalize_transcription_mode,
 )
 from app.notation.omr import sanitize_omr_musicxml
+from app.notation.piano_playability import apply_piano_playability, normalize_playability_smoothing
 from app.schemas.score import (
     ArrangementRegenerateRequest,
     ProjectScoreResponse,
     ProjectScoreUpdateRequest,
     ScoreData,
+    ScoreNote,
 )
 from app.storage.service import storage_service
 from app.transcription.base import DetectedNote
@@ -229,6 +231,9 @@ def regenerate_project_arrangement(
     vocal_notes = _hydrate_notes("vocal_detected_notes")
     bass_notes = _hydrate_notes("bass_detected_notes")
     other_notes = _hydrate_notes("other_detected_notes")
+    eff_smoothing = normalize_playability_smoothing(
+        payload.playability_smoothing or str(analysis.get("playability_smoothing") or "standard")
+    )
 
     if lead_melody_active or piano_vocal_active:
         melody_source = vocal_notes if vocal_notes else refined_notes
@@ -260,8 +265,41 @@ def regenerate_project_arrangement(
         arranged_notes = arrangement.notes or refined_notes
         analysis["arrangement_detail"] = arrangement.arrangement_detail
         analysis["arrangement"] = arrangement.stats
+        if "piano" in (project.instrument or "piano").lower():
+            chord_proxies = [
+                ScoreNote(
+                    id=f"rcp_{idx}",
+                    pitch_midi=n.pitch_midi,
+                    onset_sec=max(0.0, n.onset_sec),
+                    offset_sec=max(n.onset_sec + 0.02, n.offset_sec),
+                    velocity=max(1, min(127, n.velocity)),
+                    confidence=n.confidence,
+                )
+                for idx, n in enumerate(arranged_notes)
+            ]
+            prelim_chords = detect_chords(
+                chord_proxies,
+                existing.tempo_bpm,
+                existing.time_signature,
+                key_signature=existing.key_signature,
+            )
+            play_res = apply_piano_playability(
+                arranged_notes,
+                chords=prelim_chords,
+                tempo_bpm=existing.tempo_bpm,
+                time_signature=existing.time_signature,
+                key_signature=existing.key_signature,
+                mode=norm_mode,
+                instrument=project.instrument or "piano",
+                smoothing=eff_smoothing,
+            )
+            if play_res.notes:
+                arranged_notes = play_res.notes
+            analysis["playability"] = play_res.stats
         analysis.pop("melody_extraction", None)
         analysis.pop("melody_uncertain_segments", None)
+
+    analysis["playability_smoothing"] = eff_smoothing
 
     quant = payload.quantization or str(analysis.get("quantization") or "sixteenth")
     if effective_mode:

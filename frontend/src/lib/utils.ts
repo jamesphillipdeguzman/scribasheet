@@ -158,12 +158,30 @@ export const SUPPORTED_INSTRUMENTS = [
 
 export const TRANSCRIPTION_MODES = [
   { id: "single_instrument", label: "Single Instrument", description: "Best accuracy for solo recordings" },
-  { id: "piano", label: "Piano (Grand Staff)", description: "Splits treble & bass staves at middle C" },
+  { id: "piano", label: "Piano (Grand Staff)", description: "Context-aware RH & LH grand staff arrangement" },
   { id: "melody", label: "Lead Melody", description: "Monophonic treble melody with optional chord symbols" },
   { id: "piano_vocal", label: "Piano + Vocal", description: "Upper staff melody + lower staff playable piano accompaniment" },
   { id: "chords", label: "Chords & Harmony", description: "Polyphonic capture with chord detection" },
   { id: "vocal_melody", label: "Vocal Melody", description: "Optimized for singing & monophonic voice" },
   { id: "multi_instrument", label: "Multi-Instrument", description: "Experimental polyphonic mix capture" },
+] as const;
+
+export const PLAYABILITY_SMOOTHING_OPTIONS = [
+  {
+    id: "original",
+    label: "Original Performance",
+    description: "Preserve detected notes and timing with minimal smoothing.",
+  },
+  {
+    id: "standard",
+    label: "Standard (Recommended)",
+    description: "Clean playable RH/LH voicings while keeping musical expression.",
+  },
+  {
+    id: "simplified",
+    label: "Simplified Playable Piano",
+    description: "Cleaner chord voicings, melody focus, and comfortable hand spans for sight-reading.",
+  },
 ] as const;
 
 export const AUDIO_SOURCE_TYPES = [

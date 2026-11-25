@@ -31,9 +31,10 @@ from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit
 import httpx
 
 from app.audio.processor import get_preprocessing_profile, preprocess_to_wav, probe_media
-from app.audio.separator import detect_audio_source_route, separate_audio_stems
+from app.audio.separator import classify_audio_content, detect_audio_source_route, separate_audio_stems
 from app.core.config import get_settings
 from app.notation.analyzer import (
+    detect_chords,
     estimate_key_signature,
     get_instrument_program_and_clef,
     select_chord_source_notes,
@@ -54,7 +55,9 @@ from app.notation.melody import (
     normalize_transcription_mode,
 )
 from app.notation.omr import OMRError, process_satb_musicxml, process_satb_pdf
+from app.notation.piano_playability import apply_piano_playability, normalize_playability_smoothing
 from app.notation.timing_map import build_timing_map
+from app.schemas.score import ScoreNote
 from app.schemas.transcription import TranscriptionSettings
 from app.storage.service import sanitize_filename
 from app.transcription.basic_pitch_provider import (
@@ -484,7 +487,17 @@ class RealTranscriptionHandler:
 
             # 3b. Optional Demucs stem separation (30%)
             sep_res = None
-            if settings.enable_source_separation:
+            norm_mode_pre = normalize_transcription_mode(settings.mode)
+            pre_content_class = classify_audio_content(processed_wav) if settings.enable_source_separation else None
+            skip_for_clean_solo = bool(
+                settings.enable_source_separation
+                and (settings.audio_source_type or "auto").strip().lower() == "auto"
+                and norm_mode_pre in ("piano", "single_instrument")
+                and pre_content_class is not None
+                and pre_content_class.get("content_type") == "solo_piano"
+                and float(pre_content_class.get("solo_confidence", 0.0)) >= 0.80
+            )
+            if settings.enable_source_separation and not skip_for_clean_solo:
                 self._check_cancelled(job_id, cancel_event)
                 report_progress(
                     "separating",
@@ -505,9 +518,15 @@ class RealTranscriptionHandler:
                         sep_res.error_code or "STEM_SEPARATION_FAILED",
                         sep_res.message,
                     )
+            elif skip_for_clean_solo:
+                logger.info(
+                    "Job %s skipped Demucs separation: clean solo piano detected (confidence=%.2f).",
+                    job_id,
+                    float(pre_content_class.get("solo_confidence", 0.0)),
+                )
 
             source_route = detect_audio_source_route(
-                local_source,
+                processed_wav,
                 sep_res.stems if sep_res and sep_res.available else None,
                 requested_source_type=settings.audio_source_type,
                 mode=settings.mode,
@@ -591,12 +610,14 @@ class RealTranscriptionHandler:
                 time_sig, time_est, meter_diag = infer_time_signature_from_beats(
                     beat_res,
                     settings.time_signature,
+                    notes=refined_notes,
                 )
                 timing_map = build_timing_map(
                     beat_result=beat_res,
                     notes=refined_notes,
                     duration_seconds=proc_meta.duration_seconds,
                     time_signature=time_sig,
+                    meter_diag=meter_diag,
                 )
                 tempo_bpm = timing_map.tempo_bpm
                 tempo_est = True
@@ -620,6 +641,8 @@ class RealTranscriptionHandler:
             piano_vocal_active = norm_mode == "piano_vocal"
             melody_source_notes = vocal_refined_notes if vocal_refined_notes else refined_notes
             melody_result = None
+            playability_stats: dict[str, Any] | None = None
+            eff_smoothing = normalize_playability_smoothing(getattr(settings, "playability_smoothing", "standard"))
 
             if lead_melody_active or piano_vocal_active:
                 vocal_range = None
@@ -651,6 +674,38 @@ class RealTranscriptionHandler:
                 arranged_notes = arrangement.notes or refined_notes
                 arrangement_detail_value = arrangement.arrangement_detail
                 arrangement_stats = arrangement.stats
+                if "piano" in (settings.instrument or "").lower() and eff_smoothing != "original":
+                    chord_proxies = [
+                        ScoreNote(
+                            id=f"wcp_{idx}",
+                            pitch_midi=n.pitch_midi,
+                            onset_sec=max(0.0, n.onset_sec),
+                            offset_sec=max(n.onset_sec + 0.02, n.offset_sec),
+                            velocity=max(1, min(127, n.velocity)),
+                            confidence=n.confidence,
+                        )
+                        for idx, n in enumerate(arranged_notes)
+                    ]
+                    prelim_chords = detect_chords(
+                        chord_proxies,
+                        tempo_bpm,
+                        time_sig,
+                        key_signature=key_sig,
+                        timing_map=timing_map,
+                    )
+                    play_res = apply_piano_playability(
+                        arranged_notes,
+                        chords=prelim_chords,
+                        tempo_bpm=tempo_bpm,
+                        time_signature=time_sig,
+                        key_signature=key_sig,
+                        mode=norm_mode,
+                        instrument=settings.instrument,
+                        smoothing=eff_smoothing,
+                    )
+                    if play_res.notes:
+                        arranged_notes = play_res.notes
+                    playability_stats = play_res.stats
 
             raw_detected_snapshot = _serialize_note_list(refined_notes if is_vocal_melody_route else t_out.notes)
 
@@ -673,6 +728,8 @@ class RealTranscriptionHandler:
                 "refiner": refinement_stats,
                 "arrangement_detail": arrangement_detail_value,
                 "arrangement": arrangement_stats,
+                "playability_smoothing": eff_smoothing,
+                "playability": playability_stats,
                 "quantization": settings.quantization,
                 "raw_detected_notes": raw_detected_snapshot,
                 "tempo_diagnostics": tempo_diag,
@@ -682,6 +739,7 @@ class RealTranscriptionHandler:
                 "mode": norm_mode,
                 "audio_source_type": settings.audio_source_type,
                 "source_route": source_route,
+                "source_selection": core_res.source_selection,
                 "enable_source_separation": bool(settings.enable_source_separation),
                 "separation": {
                     "enabled": bool(settings.enable_source_separation),

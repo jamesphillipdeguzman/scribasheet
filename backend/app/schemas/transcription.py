@@ -9,6 +9,7 @@ class TranscriptionSettings(BaseModel):
     mode: str = Field(default="single_instrument")
     instrument: str = Field(default="piano")
     arrangement_detail: Literal["simple", "balanced", "detailed"] = Field(default="balanced")
+    playability_smoothing: Literal["original", "standard", "simplified"] = Field(default="standard")
     tempo_mode: str = Field(default="auto")  # auto | manual
     manual_tempo_bpm: float | None = Field(default=None, ge=30, le=300)
     time_signature: str = Field(default="auto")  # auto | 4/4 | 3/4 | 6/8 | 2/4

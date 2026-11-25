@@ -913,6 +913,10 @@ export function ProjectStudioPage() {
                     (scoreData?.analysis?.arrangement_detail as "simple" | "balanced" | "detailed" | undefined) ||
                     activeJob?.settings_json?.arrangement_detail
                   }
+                  initialPlayabilitySmoothing={
+                    (scoreData?.analysis?.playability_smoothing as "original" | "standard" | "simplified" | undefined) ||
+                    activeJob?.settings_json?.playability_smoothing
+                  }
                   initialQuantization={
                     (scoreData?.analysis?.quantization as TranscriptionSettings["quantization"] | undefined) ||
                     activeJob?.settings_json?.quantization
@@ -966,7 +970,7 @@ export function ProjectStudioPage() {
                       }
                     }
                   }}
-                  onRegenerateArrangement={async (arrangementDetail, quantization, mode) => {
+                  onRegenerateArrangement={async (arrangementDetail, quantization, mode, playabilitySmoothing) => {
                     if (!projectId) return;
                     setIsRegeneratingArrangement(true);
                     try {
@@ -974,6 +978,7 @@ export function ProjectStudioPage() {
                         arrangement_detail: arrangementDetail,
                         quantization,
                         mode,
+                        ...(playabilitySmoothing ? { playability_smoothing: playabilitySmoothing } : {}),
                       });
                       setScoreData(updated.score_json);
                       setMusicxml(updated.musicxml);

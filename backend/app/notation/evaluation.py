@@ -284,3 +284,92 @@ def evaluate_notes_against_reference(
         sample_extra_notes=sample_extra,
         sample_missing_notes=sample_missing,
     )
+
+
+def evaluate_bass_and_playability(
+    ref_notes: list[DetectedNote],
+    gen_notes: list[DetectedNote],
+    *,
+    chords: list[Any] | None = None,
+    ref_chord_symbols: list[str] | None = None,
+    tempo_bpm: float = 120.0,
+    duration_sec: float | None = None,
+    onset_tolerance_sec: float = 0.080,
+) -> dict[str, Any]:
+    """Evaluate bass note fidelity, chord progression accuracy, and piano hand-span playability."""
+    from app.notation.hand_assignment import assign_hands_contextual
+    from app.schemas.score import ScoreNote
+
+    ref_bass = [n for n in ref_notes if n.pitch_midi < 55]
+    gen_bass = [n for n in gen_notes if n.pitch_midi < 55]
+    bass_report = evaluate_notes_against_reference(
+        ref_bass, gen_bass, onset_tolerance_sec=onset_tolerance_sec, align_onset_offset=True
+    ) if ref_bass else None
+
+    score_proxies = [
+        ScoreNote(
+            id=f"ev_{idx}",
+            pitch_midi=n.pitch_midi,
+            onset_sec=max(0.0, n.onset_sec),
+            offset_sec=max(n.onset_sec + 0.02, n.offset_sec),
+            velocity=max(1, min(127, n.velocity)),
+            confidence=n.confidence,
+        )
+        for idx, n in enumerate(sorted(gen_notes, key=lambda x: (x.onset_sec, x.pitch_midi)))
+    ]
+    rh_notes, lh_notes = assign_hands_contextual(score_proxies)
+    rh_ids = {n.id for n in rh_notes}
+    lh_ids = {n.id for n in lh_notes}
+
+    # Measure slice-by-slice RH/LH hand spans
+    slices: list[list[ScoreNote]] = []
+    if score_proxies:
+        slices.append([score_proxies[0]])
+        anchor = score_proxies[0].onset_sec
+        for sp in score_proxies[1:]:
+            if sp.onset_sec - anchor <= 0.035:
+                slices[-1].append(sp)
+            else:
+                slices.append([sp])
+                anchor = sp.onset_sec
+
+    rh_spans: list[int] = []
+    lh_spans: list[int] = []
+    within_12_slices = 0
+    for sl in slices:
+        r_p = [n.pitch_midi for n in sl if n.id in rh_ids]
+        l_p = [n.pitch_midi for n in sl if n.id in lh_ids]
+        r_span = (max(r_p) - min(r_p)) if len(r_p) > 1 else 0
+        l_span = (max(l_p) - min(l_p)) if len(l_p) > 1 else 0
+        if len(r_p) > 1:
+            rh_spans.append(r_span)
+        if len(l_p) > 1:
+            lh_spans.append(l_span)
+        if r_span <= 12 and l_span <= 12:
+            within_12_slices += 1
+
+    chord_syms = [str(getattr(c, "symbol", c)) for c in (chords or [])]
+    chord_accuracy = None
+    if ref_chord_symbols:
+        hits = sum(1 for sym in ref_chord_symbols if sym in chord_syms)
+        chord_accuracy = round(hits / float(len(ref_chord_symbols)), 4)
+
+    eff_dur = duration_sec if duration_sec is not None else max((n.offset_sec for n in gen_notes), default=1.0)
+    measures_est = max(1.0, (eff_dur / (60.0 / max(20.0, tempo_bpm))) / 4.0)
+    chords_per_measure = round(len(chord_syms) / measures_est, 3)
+
+    return {
+        "bass_precision": bass_report.precision if bass_report else None,
+        "bass_recall": bass_report.recall if bass_report else None,
+        "bass_f1": bass_report.f1 if bass_report else None,
+        "max_rh_span_semitones": max(rh_spans) if rh_spans else 0,
+        "max_lh_span_semitones": max(lh_spans) if lh_spans else 0,
+        "mean_rh_span_semitones": round(float(np.mean(rh_spans)), 2) if rh_spans else 0.0,
+        "mean_lh_span_semitones": round(float(np.mean(lh_spans)), 2) if lh_spans else 0.0,
+        "comfortable_span_ratio": round(within_12_slices / max(1, len(slices)), 4),
+        "rh_note_count": len(rh_notes),
+        "lh_note_count": len(lh_notes),
+        "chord_count": len(chord_syms),
+        "chords_per_measure": chords_per_measure,
+        "chord_symbol_recall": chord_accuracy,
+    }

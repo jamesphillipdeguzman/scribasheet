@@ -386,6 +386,198 @@ def _wav_rms(path: Path) -> float:
         return 0.0
 
 
+def mix_wav_stems(
+    stem_paths: list[Path],
+    out_path: Path,
+    target_sr: int = 22050,
+    weights: list[float] | None = None,
+) -> Path | None:
+    """Mix one or more separated WAV stems cleanly to mono WAV without clipping."""
+    valid_entries = [
+        (Path(p), float(weights[idx]) if weights and idx < len(weights) else 1.0)
+        for idx, p in enumerate(stem_paths)
+        if p and Path(p).exists()
+    ]
+    if not valid_entries:
+        return None
+
+    mixed: np.ndarray | None = None
+    src_sr = target_sr
+    for path, weight in valid_entries:
+        data, sr = sf.read(str(path), dtype="float32", always_2d=False)
+        if data.size == 0:
+            continue
+        if data.ndim == 2:
+            data = np.mean(data, axis=1)
+        if sr != src_sr and mixed is not None:
+            old_idx = np.linspace(0.0, 1.0, len(data), endpoint=False)
+            new_len = max(1, int(round(len(data) * (src_sr / float(sr)))))
+            new_idx = np.linspace(0.0, 1.0, new_len, endpoint=False)
+            data = np.interp(new_idx, old_idx, data).astype(np.float32)
+        elif mixed is None:
+            src_sr = int(sr)
+
+        scaled = data.astype(np.float32) * weight
+        if mixed is None:
+            mixed = scaled
+        else:
+            if len(scaled) > len(mixed):
+                mixed = np.pad(mixed, (0, len(scaled) - len(mixed)))
+            elif len(scaled) < len(mixed):
+                scaled = np.pad(scaled, (0, len(mixed) - len(scaled)))
+            mixed = mixed + scaled
+
+    if mixed is None or mixed.size == 0:
+        return None
+
+    if src_sr != target_sr:
+        old_idx = np.linspace(0.0, 1.0, len(mixed), endpoint=False)
+        new_len = max(1, int(round(len(mixed) * (target_sr / float(src_sr)))))
+        new_idx = np.linspace(0.0, 1.0, new_len, endpoint=False)
+        mixed = np.interp(new_idx, old_idx, mixed).astype(np.float32)
+        src_sr = target_sr
+
+    peak = float(np.max(np.abs(mixed)))
+    if peak > 0.891:
+        mixed = mixed * (0.891 / peak)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(out_path), np.clip(mixed, -1.0, 1.0).astype(np.float32), src_sr, subtype="PCM_16")
+    return out_path
+
+
+def classify_audio_content(
+    wav_path: Path | None = None,
+    stems: dict[str, Path] | None = None,
+) -> dict[str, Any]:
+    """Inspect audio waveform and optional Demucs stems to classify instrument texture.
+
+    Returns one of: 'solo_piano', 'piano_with_vocals',
+    'piano_with_bass_or_other', or 'multi_instrument'.
+    """
+    if stems:
+        vocal_rms = _wav_rms(stems["vocals"]) if "vocals" in stems else 0.0
+        drum_rms = _wav_rms(stems["drums"]) if "drums" in stems else 0.0
+        bass_rms = _wav_rms(stems["bass"]) if "bass" in stems else 0.0
+        other_rms = _wav_rms(stems["other"]) if "other" in stems else 0.0
+        piano_rms = _wav_rms(stems["piano"]) if "piano" in stems else 0.0
+        guitar_rms = _wav_rms(stems["guitar"]) if "guitar" in stems else 0.0
+
+        harm_rms = piano_rms + other_rms + guitar_rms
+        total_rms = max(1e-6, vocal_rms + drum_rms + bass_rms + harm_rms)
+        vocal_ratio = vocal_rms / total_rms
+        drum_ratio = drum_rms / total_rms
+        bass_ratio = bass_rms / total_rms
+        piano_ratio = (piano_rms if piano_rms > 0 else other_rms) / total_rms
+
+        if vocal_rms >= 0.008 and vocal_ratio >= 0.16 and drum_rms >= 0.008 and drum_ratio >= 0.12:
+            content_type = "multi_instrument"
+        elif drum_rms >= 0.009 and drum_ratio >= 0.15:
+            content_type = "multi_instrument"
+        elif vocal_rms >= 0.008 and vocal_ratio >= 0.16:
+            content_type = "piano_with_vocals"
+        elif bass_rms >= 0.008 and bass_ratio >= 0.18:
+            content_type = "piano_with_bass_or_other"
+        else:
+            content_type = "solo_piano"
+
+        non_piano_pressure = vocal_ratio + drum_ratio + (0.4 * bass_ratio if content_type != "solo_piano" else 0.0)
+        solo_confidence = round(max(0.0, min(1.0, 1.0 - non_piano_pressure * 1.4)), 3)
+        return {
+            "content_type": content_type,
+            "solo_confidence": solo_confidence,
+            "source": "demucs_stems",
+            "vocal_energy_ratio": round(vocal_ratio, 4),
+            "drum_energy_ratio": round(drum_ratio, 4),
+            "bass_energy_ratio": round(bass_ratio, 4),
+            "piano_energy_ratio": round(piano_ratio, 4),
+        }
+
+    if wav_path is None or not Path(wav_path).exists():
+        return {
+            "content_type": "solo_piano",
+            "solo_confidence": 0.5,
+            "source": "unavailable",
+        }
+
+    try:
+        y, sr = sf.read(str(wav_path), dtype="float32", always_2d=False)
+        if y.ndim == 2:
+            y = np.mean(y, axis=1)
+        if y.size < 2048:
+            return {"content_type": "solo_piano", "solo_confidence": 0.6, "source": "short_audio"}
+        # Analyze up to 35s slice from active section for speed
+        max_len = int(sr * 35)
+        if len(y) > max_len:
+            mid = len(y) // 2
+            y_slice = y[max(0, mid - max_len // 2) : min(len(y), mid + max_len // 2)]
+        else:
+            y_slice = y
+
+        frame_len = 2048
+        hop = 512
+        n_frames = max(1, 1 + (len(y_slice) - frame_len) // hop)
+        if n_frames < 4:
+            return {"content_type": "solo_piano", "solo_confidence": 0.6, "source": "short_frames"}
+
+        win = np.hanning(frame_len).astype(np.float32)
+        frames = np.lib.stride_tricks.sliding_window_view(y_slice, frame_len)[::hop]
+        mag = np.abs(np.fft.rfft(frames * win, axis=1))
+        freqs = np.fft.rfftfreq(frame_len, d=1.0 / sr)
+
+        # High-frequency broadband burst ratio (drums/percussion indicator above 5 kHz)
+        total_spec = np.sum(mag, axis=1) + 1e-8
+        hf_energy = np.sum(mag[:, freqs >= 5000.0], axis=1) / total_spec
+        low_energy = np.sum(mag[:, (freqs >= 35.0) & (freqs <= 160.0)], axis=1) / total_spec
+        mid_energy = np.sum(mag[:, (freqs >= 300.0) & (freqs <= 3200.0)], axis=1) / total_spec
+
+        # Spectral flux across consecutive frames: sharp transient spikes indicate percussion
+        flux = np.sqrt(np.mean(np.square(np.maximum(0.0, np.diff(mag, axis=0))), axis=1))
+        flux_p95 = float(np.percentile(flux, 95))
+        flux_med = float(np.median(flux)) + 1e-8
+        percussive_spike_ratio = flux_p95 / flux_med
+        hf_burst_ratio = float(np.percentile(hf_energy, 90))
+        sub_bass_ratio = float(np.mean(low_energy))
+        spectral_flatness = float(
+            np.mean(np.exp(np.mean(np.log(mag + 1e-7), axis=1)) / (np.mean(mag, axis=1) + 1e-7))
+        )
+
+        # Solo piano tends to have low broadband flatness, low >=5kHz bursts, moderate sub-bass
+        is_percussive = hf_burst_ratio >= 0.14 or (spectral_flatness >= 0.12 and percussive_spike_ratio >= 7.5)
+        has_heavy_bass = sub_bass_ratio >= 0.36
+        vocal_modulation = float(np.std(mid_energy)) >= 0.14 and spectral_flatness >= 0.065
+
+        if is_percussive and (has_heavy_bass or vocal_modulation):
+            content_type = "multi_instrument"
+            solo_conf = 0.25
+        elif vocal_modulation and not is_percussive:
+            content_type = "piano_with_vocals"
+            solo_conf = 0.45
+        elif is_percussive or has_heavy_bass:
+            content_type = "piano_with_bass_or_other"
+            solo_conf = 0.55
+        else:
+            content_type = "solo_piano"
+            solo_conf = round(max(0.72, min(0.96, 1.0 - spectral_flatness * 2.5 - hf_burst_ratio * 1.2)), 3)
+
+        return {
+            "content_type": content_type,
+            "solo_confidence": solo_conf,
+            "source": "waveform_spectrum",
+            "percussive_spike_ratio": round(percussive_spike_ratio, 3),
+            "hf_burst_ratio": round(hf_burst_ratio, 4),
+            "sub_bass_ratio": round(sub_bass_ratio, 4),
+            "spectral_flatness": round(spectral_flatness, 4),
+        }
+    except Exception as exc:
+        logger.debug("Audio content classification fallback (%s)", exc)
+        return {
+            "content_type": "solo_piano",
+            "solo_confidence": 0.5,
+            "source": "fallback",
+        }
+
+
 def detect_audio_source_route(
     wav_path: Path | None = None,
     stems: dict[str, Path] | None = None,
@@ -395,18 +587,23 @@ def detect_audio_source_route(
 ) -> dict[str, Any]:
     """Determine whether audio should route as full_song or solo_piano transparently."""
     req = (requested_source_type or "auto").strip().lower()
+    content_info = classify_audio_content(wav_path, stems)
     if req in ("full_song", "solo_piano"):
         return {
             "requested_source_type": req,
             "resolved_source_type": req,
             "auto_detected": False,
             "reason": "explicit_user_selection",
+            "content_classification": content_info,
         }
 
     if stems and "vocals" in stems:
         vocal_rms = _wav_rms(stems["vocals"])
-        accomp_rms = sum(_wav_rms(stems[k]) for k in ("other", "bass") if k in stems)
+        accomp_rms = sum(_wav_rms(stems[k]) for k in ("other", "bass", "piano") if k in stems)
         ratio = vocal_rms / max(accomp_rms, 1e-6)
+        non_vocal_rms = sum(_wav_rms(stems[k]) for k in ("other", "bass", "piano", "drums") if k in stems)
+        drum_rms = _wav_rms(stems["drums"]) if "drums" in stems else 0.0
+        bass_rms = _wav_rms(stems["bass"]) if "bass" in stems else 0.0
         if vocal_rms >= 0.008 and ratio >= 0.16:
             return {
                 "requested_source_type": "auto",
@@ -415,7 +612,23 @@ def detect_audio_source_route(
                 "vocal_rms": round(vocal_rms, 5),
                 "accompaniment_rms": round(accomp_rms, 5),
                 "vocal_to_accompaniment_ratio": round(ratio, 3),
+                "vocal_energy_ratio": round(vocal_rms / max(vocal_rms + non_vocal_rms, 1e-6), 4),
+                "non_vocal_energy_ratio": round(non_vocal_rms / max(vocal_rms + non_vocal_rms, 1e-6), 4),
                 "reason": "vocal_stem_energy_detected",
+                "content_classification": content_info,
+            }
+        if drum_rms >= 0.009 or bass_rms >= 0.015:
+            return {
+                "requested_source_type": "auto",
+                "resolved_source_type": "full_song",
+                "auto_detected": True,
+                "vocal_rms": round(vocal_rms, 5),
+                "accompaniment_rms": round(accomp_rms, 5),
+                "vocal_to_accompaniment_ratio": round(ratio, 3),
+                "vocal_energy_ratio": round(vocal_rms / max(vocal_rms + non_vocal_rms, 1e-6), 4),
+                "non_vocal_energy_ratio": round(non_vocal_rms / max(vocal_rms + non_vocal_rms, 1e-6), 4),
+                "reason": "multi_instrument_accompaniment_detected",
+                "content_classification": content_info,
             }
         return {
             "requested_source_type": "auto",
@@ -424,7 +637,10 @@ def detect_audio_source_route(
             "vocal_rms": round(vocal_rms, 5),
             "accompaniment_rms": round(accomp_rms, 5),
             "vocal_to_accompaniment_ratio": round(ratio, 3),
+            "vocal_energy_ratio": round(vocal_rms / max(vocal_rms + non_vocal_rms, 1e-6), 4),
+            "non_vocal_energy_ratio": round(non_vocal_rms / max(vocal_rms + non_vocal_rms, 1e-6), 4),
             "reason": "minimal_vocal_stem_energy",
+            "content_classification": content_info,
         }
 
     norm_mode = (mode or "").strip().lower()
@@ -434,10 +650,20 @@ def detect_audio_source_route(
             "resolved_source_type": "full_song",
             "auto_detected": True,
             "reason": f"mode_heuristic:{norm_mode}",
+            "content_classification": content_info,
+        }
+    if content_info.get("content_type") in ("multi_instrument", "piano_with_vocals"):
+        return {
+            "requested_source_type": "auto",
+            "resolved_source_type": "full_song",
+            "auto_detected": True,
+            "reason": f"waveform_heuristic:{content_info.get('content_type')}",
+            "content_classification": content_info,
         }
     return {
         "requested_source_type": "auto",
         "resolved_source_type": "solo_piano",
         "auto_detected": True,
         "reason": f"mode_heuristic:{norm_mode or 'default'}",
+        "content_classification": content_info,
     }
