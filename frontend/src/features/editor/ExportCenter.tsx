@@ -1,13 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, FileAudio, FileMusic, FileText, Loader2, Music, Printer } from "lucide-react";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { useAuth } from "@/features/auth/AuthContext";
 import { printScorePdf } from "@/lib/pdfPrint";
-import { formatLocalDateTime } from "@/lib/utils";
+import { formatLocalDateTime, isVideoMediaAsset, sanitizeDownloadTitle } from "@/lib/utils";
 import { api, ApiError } from "@/services/api";
-import type { ExportRecord } from "@/types/api";
+import type { ExportRecord, MediaAsset } from "@/types/api";
 
 interface ExportCenterProps {
   projectId: string;
@@ -15,6 +15,9 @@ interface ExportCenterProps {
   scoreTitle?: string | null;
   hasScore: boolean;
   isSatbScore?: boolean;
+  uploadedVideoAsset?: MediaAsset | null;
+  extractedAudioAssets?: MediaAsset[];
+  onAudioExtracted?: () => void;
   showChordSymbols?: boolean;
   onToggleChordSymbols?: (value: boolean) => void;
   transcribedBy?: string;
@@ -31,7 +34,9 @@ type ExportFormatId =
   | "soprano_mp3"
   | "alto_mp3"
   | "tenor_mp3"
-  | "bass_mp3";
+  | "bass_mp3"
+  | "extracted_mp3"
+  | "extracted_wav";
 
 const SATB_MP3_FORMATS: Array<{
   id: "soprano_mp3" | "alto_mp3" | "tenor_mp3" | "bass_mp3";
@@ -63,6 +68,9 @@ export function ExportCenter({
   scoreTitle,
   hasScore,
   isSatbScore = false,
+  uploadedVideoAsset = null,
+  extractedAudioAssets = [],
+  onAudioExtracted,
   showChordSymbols,
   onToggleChordSymbols,
   transcribedBy,
@@ -77,6 +85,7 @@ export function ExportCenter({
     user = null;
   }
   const queryClient = useQueryClient();
+  const activeRequestRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [activeFmt, setActiveFmt] = useState<string | null>(null);
   const [localIncludeChords, setLocalIncludeChords] = useState<boolean>(true);
@@ -141,20 +150,36 @@ export function ExportCenter({
 
   const exportMutation = useMutation({
     mutationFn: async (fmt: ExportFormatId) => {
+      if (activeRequestRef.current) return null;
+      activeRequestRef.current = true;
       setError(null);
       setActiveFmt(fmt);
-      const record = await api.createExport(projectId, fmt, buildExportOptions());
-      if (record.download_url) {
-        const satbItem = SATB_MP3_FORMATS.find((s) => s.id === fmt);
-        const downloadName = satbItem
-          ? satbItem.filename
-          : `${projectTitle || "score"}${FORMATS.find((f) => f.id === fmt)?.ext || `.${fmt}`}`;
-        await api.downloadExportBlob(record.download_url, downloadName);
+      try {
+        const record = await api.createExport(projectId, fmt, buildExportOptions());
+        if (record.download_url) {
+          const satbItem = SATB_MP3_FORMATS.find((s) => s.id === fmt);
+          let downloadName: string;
+          if (satbItem) {
+            downloadName = satbItem.filename;
+          } else if (fmt === "extracted_mp3" || fmt === "extracted_wav") {
+            const ext = fmt === "extracted_mp3" ? "mp3" : "wav";
+            downloadName = `${sanitizeDownloadTitle(projectTitle)}.${ext}`;
+          } else {
+            downloadName = `${projectTitle || "score"}${FORMATS.find((f) => f.id === fmt)?.ext || `.${fmt}`}`;
+          }
+          await api.downloadExportBlob(record.download_url, downloadName);
+        }
+        return record;
+      } finally {
+        activeRequestRef.current = false;
       }
-      return record;
     },
-    onSuccess: () => {
+    onSuccess: (_record, fmt) => {
       queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
+      if (fmt === "extracted_mp3" || fmt === "extracted_wav") {
+        queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+        onAudioExtracted?.();
+      }
     },
     onError: (err) => {
       setError(err instanceof ApiError ? err.message : "Export failed.");
@@ -162,12 +187,21 @@ export function ExportCenter({
     onSettled: () => setActiveFmt(null),
   });
 
+  const hasUploadedVideo = Boolean(uploadedVideoAsset && isVideoMediaAsset(uploadedVideoAsset));
+  const titleBase = sanitizeDownloadTitle(projectTitle);
+  const existingExtractedMp3 = extractedAudioAssets.find(
+    (a) => a.mime_type === "audio/mpeg" || a.original_filename.toLowerCase().endsWith(".mp3"),
+  );
+  const existingExtractedWav = extractedAudioAssets.find(
+    (a) => a.mime_type === "audio/wav" || a.original_filename.toLowerCase().endsWith(".wav"),
+  );
+
   const printMutation = useMutation({
     mutationFn: async () => {
       setError(null);
       setActiveFmt("print_pdf");
       const { blob } = await api.generateScorePdfBlob(projectId, buildExportOptions());
-      await printScorePdf(blob, { title: scoreTitle || projectTitle || "ScribaSheet Score" });
+      await printScorePdf(blob);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
@@ -264,21 +298,6 @@ export function ExportCenter({
         {FORMATS.map((f) => {
           const Icon = f.icon;
           const loading = activeFmt === f.id;
-          const printMutation = useMutation({
-            mutationFn: async () => {
-              setError(null);
-              setActiveFmt("print_pdf");
-              const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: includeChords });
-              await printScorePdf(blob);
-            },
-            onSuccess: () => {
-              queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
-            },
-            onError: (err) => {
-              setError(err instanceof Error ? err.message : "Failed to prepare PDF for printing.");
-            },
-            onSettled: () => setActiveFmt(null),
-          });
 
           return (
             <div key={f.id} className="min-w-0 rounded-xl border border-[#27273A] bg-[#09090F] p-4 flex flex-col justify-between space-y-3">
@@ -294,7 +313,7 @@ export function ExportCenter({
                 <Button
                   size="sm"
                   variant="secondary"
-                  disabled={!hasScore || loading || activeFmt === "print_pdf"}
+                  disabled={!hasScore || activeFmt !== null}
                   onClick={() => exportMutation.mutate(f.id)}
                   className="w-full min-h-[44px]"
                 >
@@ -305,7 +324,7 @@ export function ExportCenter({
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={!hasScore || loading || activeFmt === "print_pdf"}
+                    disabled={!hasScore || activeFmt !== null}
                     onClick={() => printMutation.mutate()}
                     className="w-full min-h-[40px]"
                   >
@@ -323,6 +342,66 @@ export function ExportCenter({
         })}
       </div>
 
+      {hasUploadedVideo && (
+        <div data-testid="export-center-extracted-audio" className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-medium uppercase tracking-wider text-[#A1A1AA]">
+              Extracted Video Audio
+            </h3>
+            <span className="text-[11px] text-[#71717A]">
+              Extracted from {uploadedVideoAsset?.original_filename} • Original video preserved
+            </span>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 min-w-0">
+            {(
+              [
+                {
+                  id: "extracted_mp3" as const,
+                  label: `${titleBase}.mp3`,
+                  ext: ".mp3",
+                  desc: "44.1 kHz • 192 kbps MP3 (libmp3lame)",
+                  buttonLabel: existingExtractedMp3 ? "Download MP3" : "Extract & Download MP3",
+                },
+                {
+                  id: "extracted_wav" as const,
+                  label: `${titleBase}.wav`,
+                  ext: ".wav",
+                  desc: "44.1 kHz • 16-bit PCM WAV",
+                  buttonLabel: existingExtractedWav ? "Download WAV" : "Extract & Download WAV",
+                },
+              ] as const
+            ).map((item) => {
+              const loading = activeFmt === item.id;
+              return (
+                <div
+                  key={item.id}
+                  className="min-w-0 rounded-xl border border-[#27273A] bg-[#09090F] p-4 flex flex-col justify-between space-y-3"
+                >
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <FileAudio className="h-5 w-5 text-[#A78BFA]" />
+                      <span className="font-mono text-xs text-[#A1A1AA]">{item.ext}</span>
+                    </div>
+                    <div className="mt-2 font-semibold text-sm truncate">{item.label}</div>
+                    <div className="text-xs text-[#A1A1AA]">{item.desc}</div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={activeFmt !== null}
+                    onClick={() => exportMutation.mutate(item.id)}
+                    className="w-full min-h-[44px]"
+                  >
+                    {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                    {loading ? "Extracting..." : item.buttonLabel}
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {isSatbScore && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
@@ -336,21 +415,6 @@ export function ExportCenter({
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 min-w-0">
             {SATB_MP3_FORMATS.map((s) => {
               const loading = activeFmt === s.id;
-              const printMutation = useMutation({
-                mutationFn: async () => {
-                  setError(null);
-                  setActiveFmt("print_pdf");
-                  const { blob } = await api.generateScorePdfBlob(projectId, { include_chords: includeChords });
-                  await printScorePdf(blob);
-                },
-                onSuccess: () => {
-                  queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
-                },
-                onError: (err) => {
-                  setError(err instanceof Error ? err.message : "Failed to prepare PDF for printing.");
-                },
-                onSettled: () => setActiveFmt(null),
-              });
 
               return (
                 <div
@@ -368,7 +432,7 @@ export function ExportCenter({
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={!hasScore || loading}
+                    disabled={!hasScore || activeFmt !== null}
                     onClick={() => exportMutation.mutate(s.id)}
                     className="w-full"
                   >
@@ -404,8 +468,17 @@ export function ExportCenter({
                     size="sm"
                     variant="ghost"
                     onClick={() => {
-                      const ext = FORMATS.find((f) => f.id === ex.format)?.ext || `.${ex.format}`;
-                      api.downloadExportBlob(ex.download_url!, `${projectTitle || "score"}${ext}`);
+                      const satb = SATB_MP3_FORMATS.find((s) => s.id === ex.format);
+                      let filename: string;
+                      if (satb) {
+                        filename = satb.filename;
+                      } else if (ex.format === "extracted_mp3" || ex.format === "extracted_wav") {
+                        filename = `${titleBase}.${ex.format === "extracted_mp3" ? "mp3" : "wav"}`;
+                      } else {
+                        const ext = FORMATS.find((f) => f.id === ex.format)?.ext || `.${ex.format}`;
+                        filename = `${projectTitle || "score"}${ext}`;
+                      }
+                      void api.downloadExportBlob(ex.download_url!, filename);
                     }}
                   >
                     <Download className="h-3.5 w-3.5" />

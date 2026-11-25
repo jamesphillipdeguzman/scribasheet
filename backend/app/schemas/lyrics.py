@@ -54,6 +54,7 @@ class LyricsUpdateRequest(BaseModel):
 
 
 class LyricsTranscribeRequest(BaseModel):
+    source_asset_id: str | None = None
     enable_source_separation: bool = False
     whisper_model: str | None = None
     language: str | None = None

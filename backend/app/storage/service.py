@@ -10,6 +10,7 @@ from app.core.security import create_signed_download_token
 
 logger = logging.getLogger(__name__)
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_UNSAFE_DOWNLOAD_CHARS_RE = re.compile(r'[<>:"/\\|?*;\x00-\x1f\x7f]+')
 
 
 class StorageError(RuntimeError):
@@ -34,6 +35,15 @@ def sanitize_filename(filename: str) -> str:
     base = os.path.basename(filename or "upload.bin")
     cleaned = SAFE_FILENAME_RE.sub("_", base).strip("._")
     return cleaned[:120] or "upload.bin"
+
+
+def sanitize_download_title(title: str | None, fallback: str = "Extracted Audio") -> str:
+    """Sanitize a human-readable project title for Content-Disposition download filenames."""
+    cleaned = _UNSAFE_DOWNLOAD_CHARS_RE.sub(" ", title or "")
+    while ".." in cleaned:
+        cleaned = cleaned.replace("..", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned[:100].rstrip(" .") or fallback
 
 
 def _validate_storage_key(key: str) -> str:

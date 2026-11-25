@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.common import UTCDatetime
@@ -65,3 +67,27 @@ class ProjectListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class ExtractAudioRequest(BaseModel):
+    formats: list[Literal["mp3", "wav"]] = Field(default_factory=lambda: ["mp3", "wav"], min_length=1, max_length=2)
+    force: bool = False
+
+
+class ExtractedAudioItem(BaseModel):
+    id: str
+    format: Literal["mp3", "wav"]
+    filename: str
+    mime_type: str
+    size_bytes: int
+    duration_seconds: float | None = None
+    sample_rate: int | None = None
+    channels: int | None = None
+    download_url: str
+
+
+class ExtractAudioResponse(BaseModel):
+    source_asset_id: str
+    mp3: ExtractedAudioItem | None = None
+    wav: ExtractedAudioItem | None = None
+    assets: list[MediaAssetResponse] = Field(default_factory=list)

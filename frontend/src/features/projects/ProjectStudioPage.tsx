@@ -43,7 +43,7 @@ import { WaveformPlayer } from "@/features/editor/WaveformPlayer";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { MediaUploader } from "@/features/uploads/MediaUploader";
 import { api, ApiError, WS_BASE_URL, getStoredTokens } from "@/services/api";
-import { isScoreMediaAsset } from "@/lib/utils";
+import { isScoreMediaAsset, isVideoMediaAsset } from "@/lib/utils";
 import type { ScoreData, ScoreNote, TranscriptionJob, TranscriptionSettings } from "@/types/api";
 
 type StudioTab = "notation" | "pianoroll" | "chords" | "lyrics" | "exports";
@@ -128,6 +128,7 @@ export function ProjectStudioPage() {
   activeJobIdRef.current = activeJob?.id ?? null;
   const [runtimeNowMs, setRuntimeNowMs] = useState<number>(() => Date.now());
   const [isStartingJob, setIsStartingJob] = useState(false);
+  const [selectedSourceAssetId, setSelectedSourceAssetId] = useState<string | null>(null);
   const [isRegeneratingArrangement, setIsRegeneratingArrangement] = useState(false);
   const [isPrintingPdf, setIsPrintingPdf] = useState(false);
   const [printError, setPrintError] = useState<string | null>(null);
@@ -635,8 +636,15 @@ export function ProjectStudioPage() {
     clearWorkspaceForNewProcessing();
     setIsStartingJob(true);
     try {
-      const orig = project.media_assets.find((a) => a.asset_type === "original");
-      const job = await api.startTranscription(project.id, orig?.id || null, settings);
+      const sortedOriginals = [...project.media_assets]
+        .filter((a) => a.asset_type === "original")
+        .sort((a, b) => Date.parse(b.created_at || "") - Date.parse(a.created_at || ""));
+      const validSelected =
+        selectedSourceAssetId && project.media_assets.some((a) => a.id === selectedSourceAssetId)
+          ? selectedSourceAssetId
+          : null;
+      const sourceId = validSelected || sortedOriginals[0]?.id || null;
+      const job = await api.startTranscription(project.id, sourceId, settings);
       if (gen !== processingGenerationRef.current) return;
       activeJobIdRef.current = job.id;
       setActiveJob(job);
@@ -689,7 +697,22 @@ export function ProjectStudioPage() {
     );
   }
 
-  const originalAsset = project.media_assets.find((a) => a.asset_type === "original") || null;
+  const originalAssets = [...project.media_assets]
+    .filter((a) => a.asset_type === "original")
+    .sort((a, b) => Date.parse(b.created_at || "") - Date.parse(a.created_at || ""));
+  const originalAsset = originalAssets[0] || null;
+  const extractedAudioAssets = project.media_assets.filter((a) => a.asset_type === "extracted_audio");
+  const uploadedVideoAsset = originalAsset && isVideoMediaAsset(originalAsset) ? originalAsset : null;
+  const effectiveSourceAssetId =
+    selectedSourceAssetId && project.media_assets.some((a) => a.id === selectedSourceAssetId)
+      ? selectedSourceAssetId
+      : originalAsset?.id || null;
+  const waveformMediaAssetId = uploadedVideoAsset
+    ? extractedAudioAssets.find((a) => a.mime_type === "audio/wav")?.id ||
+      extractedAudioAssets[0]?.id ||
+      originalAsset?.id ||
+      null
+    : originalAsset?.id || null;
   const isScoreAsset = isScoreMediaAsset(originalAsset);
   const isScoreProject =
     isScoreAsset ||
@@ -848,15 +871,25 @@ export function ProjectStudioPage() {
                 <h2 className="text-sm font-semibold">1. Media or Score Input</h2>
                 <MediaUploader
                   projectId={project.id}
+                  projectTitle={project.title}
                   existingAssets={project.media_assets}
+                  selectedSourceAssetId={effectiveSourceAssetId}
+                  onSelectSourceAsset={setSelectedSourceAssetId}
+                  onAudioExtracted={() => queryClient.invalidateQueries({ queryKey: ["project", projectId] })}
                   hasScore={Boolean(scoreData)}
                   acceptPdf={project.transcription_mode === "satb_pdf"}
                   isProcessing={
                     isStartingJob ||
                     Boolean(activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status))
                   }
-                  onUploadComplete={() => queryClient.invalidateQueries({ queryKey: ["project", projectId] })}
-                  onMediaRemoved={() => queryClient.invalidateQueries({ queryKey: ["project", projectId] })}
+                  onUploadComplete={(asset) => {
+                    setSelectedSourceAssetId(asset.id);
+                    void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+                  }}
+                  onMediaRemoved={() => {
+                    setSelectedSourceAssetId(null);
+                    void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+                  }}
                 />
               </div>
 
@@ -969,7 +1002,7 @@ export function ProjectStudioPage() {
           <section className={`${sidebarOpen ? "lg:col-span-8 xl:col-span-9" : ""} space-y-4 min-w-0`}>
             {/* Playback Bar */}
             <WaveformPlayer
-              mediaAssetId={isScoreProject ? null : originalAsset?.id || null}
+              mediaAssetId={isScoreProject ? null : waveformMediaAssetId}
               isScoreOnly={isScoreProject}
               notes={scoreData?.notes || []}
               durationSeconds={scoreData?.duration_seconds || project.duration_seconds || 0}
@@ -1256,6 +1289,9 @@ export function ProjectStudioPage() {
                   scoreTitle={scoreData?.title}
                   hasScore={Boolean(scoreData)}
                   isSatbScore={isGenuineSatb}
+                  uploadedVideoAsset={uploadedVideoAsset}
+                  extractedAudioAssets={extractedAudioAssets}
+                  onAudioExtracted={() => queryClient.invalidateQueries({ queryKey: ["project", projectId] })}
                   showChordSymbols={showChordSymbols}
                   onToggleChordSymbols={handleToggleChordSymbols}
                   transcribedBy={transcribedBy}

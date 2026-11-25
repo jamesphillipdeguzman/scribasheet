@@ -186,12 +186,41 @@ export interface ProjectScoreResponse {
 export interface ExportRecord {
   id: string;
   project_id: string;
-  format: "midi" | "musicxml" | "pdf" | "wav" | "soprano_mp3" | "alto_mp3" | "tenor_mp3" | "bass_mp3";
+  format:
+    | "midi"
+    | "musicxml"
+    | "pdf"
+    | "wav"
+    | "soprano_mp3"
+    | "alto_mp3"
+    | "tenor_mp3"
+    | "bass_mp3"
+    | "extracted_mp3"
+    | "extracted_wav";
   status: string;
   error_message: string | null;
   download_url: string | null;
   created_at: string;
   completed_at: string | null;
+}
+
+export interface ExtractedAudioItem {
+  id: string;
+  format: "mp3" | "wav";
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  duration_seconds: number | null;
+  sample_rate: number | null;
+  channels: number | null;
+  download_url: string;
+}
+
+export interface ExtractAudioResponse {
+  source_asset_id: string;
+  mp3: ExtractedAudioItem | null;
+  wav: ExtractedAudioItem | null;
+  assets: MediaAsset[];
 }
 
 export interface LyricWord {

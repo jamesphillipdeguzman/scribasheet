@@ -217,12 +217,20 @@ def start_lyrics_transcription(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    asset = (
-        db.query(MediaAsset)
-        .filter(MediaAsset.project_id == project.id, MediaAsset.asset_type == "original")
-        .order_by(MediaAsset.created_at.desc())
-        .first()
-    )
+    asset = None
+    if payload.source_asset_id:
+        asset = (
+            db.query(MediaAsset)
+            .filter(MediaAsset.id == payload.source_asset_id, MediaAsset.project_id == project.id)
+            .first()
+        )
+    if not asset:
+        asset = (
+            db.query(MediaAsset)
+            .filter(MediaAsset.project_id == project.id, MediaAsset.asset_type == "original")
+            .order_by(MediaAsset.created_at.desc())
+            .first()
+        )
     if not asset:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

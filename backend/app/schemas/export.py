@@ -4,7 +4,9 @@ from app.schemas.common import UTCDatetime
 
 
 class ExportCreateRequest(BaseModel):
-    format: str = Field(pattern="^(midi|musicxml|pdf|wav|soprano_mp3|alto_mp3|tenor_mp3|bass_mp3)$")
+    format: str = Field(
+        pattern="^(midi|musicxml|pdf|wav|soprano_mp3|alto_mp3|tenor_mp3|bass_mp3|extracted_mp3|extracted_wav)$"
+    )
     include_chords: bool = True
     transcribed_by: str | None = None
     include_transcribed_by: bool = True

@@ -6,6 +6,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_owned_project
+from app.audio.extraction_service import ensure_extracted_audio_asset
+from app.audio.processor import is_supported_video_file
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import (
@@ -33,7 +35,7 @@ from app.notation.generator import (
 from app.notation.omr import sanitize_omr_musicxml
 from app.schemas.export import ExportCreateRequest, ExportResponse
 from app.schemas.score import ScoreData
-from app.storage.service import sanitize_filename, storage_service
+from app.storage.service import sanitize_download_title, sanitize_filename, storage_service
 
 router = APIRouter(tags=["Exports"])
 
@@ -46,6 +48,8 @@ EXPORT_MIME_TYPES = {
     "alto_mp3": ("audio/mpeg", "mp3"),
     "tenor_mp3": ("audio/mpeg", "mp3"),
     "bass_mp3": ("audio/mpeg", "mp3"),
+    "extracted_mp3": ("audio/mpeg", "mp3"),
+    "extracted_wav": ("audio/wav", "wav"),
 }
 
 
@@ -195,6 +199,49 @@ def create_export(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if payload.format in ("extracted_mp3", "extracted_wav"):
+        video_asset = (
+            db.query(MediaAsset)
+            .filter(MediaAsset.project_id == project.id, MediaAsset.asset_type == "original")
+            .order_by(MediaAsset.created_at.desc())
+            .first()
+        )
+        if not video_asset or not is_supported_video_file(video_asset.original_filename, video_asset.mime_type):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Audio extraction requires an uploaded video file (MP4, MOV, WEBM, MKV).",
+            )
+        fmt: Literal["mp3", "wav"] = "mp3" if payload.format == "extracted_mp3" else "wav"
+        extracted_asset = ensure_extracted_audio_asset(
+            db,
+            project=project,
+            user=current_user,
+            source_asset=video_asset,
+            fmt=fmt,
+        )
+        export = Export(
+            project_id=project.id,
+            user_id=current_user.id,
+            format=payload.format,
+            status="completed",
+            storage_path=extracted_asset.storage_path,
+            completed_at=datetime.now(UTC),
+        )
+        db.add(export)
+        db.commit()
+        db.refresh(export)
+        settings = get_settings()
+        return ExportResponse(
+            id=export.id,
+            project_id=export.project_id,
+            format=export.format,
+            status=export.status,
+            error_message=export.error_message,
+            download_url=f"{settings.API_V1_PREFIX}/exports/{export.id}/download",
+            created_at=export.created_at,
+            completed_at=export.completed_at,
+        )
+
     score_row = db.query(ProjectScore).filter(ProjectScore.project_id == project.id).first()
     if not score_row:
         raise HTTPException(
@@ -283,6 +330,11 @@ def create_export(
         export.completed_at = datetime.now(UTC)
         db.commit()
         db.refresh(export)
+    except HTTPException:
+        export.status = "failed"
+        export.completed_at = datetime.now(UTC)
+        db.commit()
+        raise
     except Exception as exc:
         export.status = "failed"
         export.error_message = str(exc)
@@ -349,6 +401,9 @@ def download_export(
     if export.format in ("soprano_mp3", "alto_mp3", "tenor_mp3", "bass_mp3"):
         voice_label = export.format.split("_", 1)[0].capitalize()
         download_filename = f"{voice_label}.mp3"
+    elif export.format in ("extracted_mp3", "extracted_wav"):
+        title_base = sanitize_download_title(project.title if project else None)
+        download_filename = f"{title_base}.{ext}"
     else:
         download_filename = f"{base_name}.{ext}"
     try:

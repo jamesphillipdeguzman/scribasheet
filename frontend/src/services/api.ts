@@ -1,5 +1,6 @@
 import type {
   ExportRecord,
+  ExtractAudioResponse,
   LyricsData,
   MediaAsset,
   Project,
@@ -120,7 +121,8 @@ async function request<T>(
   path: string,
   init: RequestInit = {},
   retryAuth = true,
-  retryDelayBaseMs: number = BASE_RETRY_DELAY_MS
+  retryDelayBaseMs: number = BASE_RETRY_DELAY_MS,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS
 ): Promise<T> {
   const { accessToken, refreshToken } = getStoredTokens();
   const headers = new Headers(init.headers);
@@ -137,7 +139,7 @@ async function request<T>(
 
   for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
     try {
-      const result = await fetchWithTimeout(`${API_BASE_URL}${path}`, { ...init, headers });
+      const result = await fetchWithTimeout(`${API_BASE_URL}${path}`, { ...init, headers }, timeoutMs);
       res = result.response;
       lastNetworkError = null;
       if (!TRANSIENT_STATUSES.has(res.status) || attempt === MAX_TRANSIENT_RETRIES) {
@@ -304,6 +306,23 @@ export const api = {
     }),
   getSignedMediaUrl: (uploadId: string) =>
     request<{ url: string; expires_in: number }>(`/uploads/${uploadId}/signed-url`),
+  extractVideoAudio: (
+    projectId: string,
+    assetId: string,
+    formats: Array<"mp3" | "wav"> = ["mp3", "wav"],
+  ) =>
+    request<ExtractAudioResponse>(
+      `/projects/${projectId}/media/${assetId}/extract-audio`,
+      {
+        method: "POST",
+        body: JSON.stringify({ formats }),
+      },
+      true,
+      BASE_RETRY_DELAY_MS,
+      120_000,
+    ),
+  downloadMediaAsset: (assetId: string, filename: string) =>
+    api.downloadExportBlob(`${API_BASE_URL}/uploads/${assetId}/download`, filename),
 
   // Transcription Jobs
   startTranscription: (projectId: string, sourceAssetId: string | null, settings: TranscriptionSettings) =>
@@ -433,24 +452,40 @@ export const api = {
   listExports: (projectId: string) => request<ExportRecord[]>(`/projects/${projectId}/exports`),
   createExport: (
     projectId: string,
-    format: "midi" | "musicxml" | "pdf" | "wav" | "soprano_mp3" | "alto_mp3" | "tenor_mp3" | "bass_mp3",
+    format:
+      | "midi"
+      | "musicxml"
+      | "pdf"
+      | "wav"
+      | "soprano_mp3"
+      | "alto_mp3"
+      | "tenor_mp3"
+      | "bass_mp3"
+      | "extracted_mp3"
+      | "extracted_wav",
     options?: {
       include_chords?: boolean;
       transcribed_by?: string | null;
       include_transcribed_by?: boolean;
     },
   ) =>
-    request<ExportRecord>(`/projects/${projectId}/exports`, {
-      method: "POST",
-      body: JSON.stringify({
-        format,
-        ...(options?.include_chords !== undefined ? { include_chords: options.include_chords } : {}),
-        ...(options?.transcribed_by !== undefined ? { transcribed_by: options.transcribed_by } : {}),
-        ...(options?.include_transcribed_by !== undefined
-          ? { include_transcribed_by: options.include_transcribed_by }
-          : {}),
-      }),
-    }),
+    request<ExportRecord>(
+      `/projects/${projectId}/exports`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          format,
+          ...(options?.include_chords !== undefined ? { include_chords: options.include_chords } : {}),
+          ...(options?.transcribed_by !== undefined ? { transcribed_by: options.transcribed_by } : {}),
+          ...(options?.include_transcribed_by !== undefined
+            ? { include_transcribed_by: options.include_transcribed_by }
+            : {}),
+        }),
+      },
+      true,
+      BASE_RETRY_DELAY_MS,
+      format === "extracted_mp3" || format === "extracted_wav" ? 120_000 : DEFAULT_REQUEST_TIMEOUT_MS,
+    ),
   fetchExportBlob: async (downloadUrl: string): Promise<Blob> => {
     const { accessToken } = getStoredTokens();
     const fullUrl = downloadUrl.startsWith("http")

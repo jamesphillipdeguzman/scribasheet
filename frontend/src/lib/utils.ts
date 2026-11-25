@@ -22,6 +22,36 @@ export function isScoreMediaAsset(
   return /\.(pdf|mxl|musicxml)$/i.test(name);
 }
 
+export function isVideoMediaAsset(
+  asset?: { original_filename?: string | null; mime_type?: string | null } | null,
+): boolean {
+  if (!asset || isScoreMediaAsset(asset)) return false;
+  const name = (asset.original_filename || "").trim().toLowerCase();
+  const mime = (asset.mime_type || "").trim().toLowerCase();
+  if (/^(mic-recording-|tab-audio-)/i.test(name)) return false;
+  if (/\.(mp4|mov|mkv)$/i.test(name)) return true;
+  if (/\.webm$/i.test(name)) {
+    return !mime.startsWith("audio/");
+  }
+  return mime.startsWith("video/");
+}
+
+export function sanitizeDownloadTitle(title?: string | null, fallback = "Extracted Audio"): string {
+  const withoutControls = Array.from(title || "")
+    .map((ch) => {
+      const code = ch.charCodeAt(0);
+      return code < 32 || code === 127 ? " " : ch;
+    })
+    .join("");
+  let cleaned = withoutControls.replace(/[<>:"/\\|?*;]+/g, " ");
+  while (cleaned.includes("..")) {
+    cleaned = cleaned.replace("..", " ");
+  }
+  cleaned = cleaned.replace(/\s+/g, " ").replace(/^[ .]+|[ .]+$/g, "");
+  const truncated = cleaned.slice(0, 100).replace(/[ .]+$/g, "");
+  return truncated || fallback;
+}
+
 export const DEFAULT_APP_TIMEZONE = "Asia/Manila";
 
 export function getAppTimeZone(): string {

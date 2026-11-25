@@ -1,18 +1,24 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import PLAN_LIMITS, get_current_user, get_owned_project, is_user_unlimited
 from app.api.v1.worker import ACTIVE_WORKER_STATUSES
+from app.audio.extraction_service import ensure_extracted_audio_asset
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob, User
 from app.schemas.project import (
+    ExtractAudioRequest,
+    ExtractAudioResponse,
+    ExtractedAudioItem,
+    MediaAssetResponse,
     ProjectCreateRequest,
     ProjectListResponse,
     ProjectResponse,
     ProjectUpdateRequest,
 )
-from app.storage.service import storage_service
+from app.storage.service import sanitize_download_title, storage_service
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 
@@ -187,11 +193,30 @@ def delete_project_media_asset(
     except FileNotFoundError:
         pass
 
+    linked_extracted = (
+        db.query(MediaAsset)
+        .filter(
+            MediaAsset.project_id == project.id,
+            MediaAsset.asset_type == "extracted_audio",
+            MediaAsset.storage_path.contains(f"/extracted/{asset.id}/"),
+        )
+        .all()
+    )
+    linked_ids = [item.id for item in linked_extracted]
+    for item in linked_extracted:
+        try:
+            storage_service.delete(item.storage_path)
+        except FileNotFoundError:
+            pass
+
+    affected_asset_ids = [asset.id, *linked_ids]
     (
         db.query(TranscriptionJob)
-        .filter(TranscriptionJob.source_asset_id == asset.id)
+        .filter(TranscriptionJob.source_asset_id.in_(affected_asset_ids))
         .update({TranscriptionJob.source_asset_id: None}, synchronize_session=False)
     )
+    for item in linked_extracted:
+        db.delete(item)
     db.delete(asset)
     db.flush()
 
@@ -213,6 +238,69 @@ def delete_project_media_asset(
 
     db.commit()
     return None
+
+
+@router.post("/{project_id}/media/{asset_id}/extract-audio", response_model=ExtractAudioResponse)
+def extract_video_audio(
+    asset_id: str,
+    payload: ExtractAudioRequest = Body(default_factory=ExtractAudioRequest),
+    project: Project = Depends(get_owned_project),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Extract downloadable MP3 and/or 16-bit PCM WAV audio from an uploaded video without altering the video."""
+    asset = (
+        db.query(MediaAsset)
+        .filter(MediaAsset.id == asset_id, MediaAsset.project_id == project.id)
+        .first()
+    )
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media asset not found.")
+    if asset.asset_type != "original":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Audio extraction can only be run on an uploaded source video.",
+        )
+
+    settings = get_settings()
+    requested_formats = list(dict.fromkeys(payload.formats))
+    title_base = sanitize_download_title(project.title)
+    extracted_assets: list[MediaAsset] = []
+    mp3_item: ExtractedAudioItem | None = None
+    wav_item: ExtractedAudioItem | None = None
+
+    for fmt in requested_formats:
+        extracted = ensure_extracted_audio_asset(
+            db,
+            project=project,
+            user=current_user,
+            source_asset=asset,
+            fmt=fmt,
+            force=payload.force,
+        )
+        extracted_assets.append(extracted)
+        item = ExtractedAudioItem(
+            id=extracted.id,
+            format=fmt,
+            filename=f"{title_base}.{fmt}",
+            mime_type=extracted.mime_type,
+            size_bytes=extracted.size_bytes,
+            duration_seconds=extracted.duration_seconds,
+            sample_rate=extracted.sample_rate,
+            channels=extracted.channels,
+            download_url=f"{settings.API_V1_PREFIX}/uploads/{extracted.id}/download",
+        )
+        if fmt == "mp3":
+            mp3_item = item
+        else:
+            wav_item = item
+
+    return ExtractAudioResponse(
+        source_asset_id=asset.id,
+        mp3=mp3_item,
+        wav=wav_item,
+        assets=[MediaAssetResponse.model_validate(a) for a in extracted_assets],
+    )
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)

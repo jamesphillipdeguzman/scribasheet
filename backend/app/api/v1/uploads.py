@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -19,7 +19,7 @@ from app.db.session import get_db
 from app.models import MediaAsset, Project, User
 from app.notation.omr import OMRError, validate_pdf_bytes
 from app.schemas.project import MediaAssetResponse
-from app.storage.service import sanitize_filename, storage_service
+from app.storage.service import sanitize_download_title, sanitize_filename, storage_service
 
 router = APIRouter(prefix="/uploads", tags=["Uploads"])
 
@@ -418,6 +418,40 @@ def stream_upload(
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored media file not found.")
     return FileResponse(path=str(local_path), media_type=asset.mime_type, filename=asset.original_filename)
+
+
+@router.get("/{upload_id}/download")
+def download_upload(
+    upload_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Download an authenticated owner's uploaded or extracted media asset."""
+    asset = db.query(MediaAsset).filter(MediaAsset.id == upload_id).first()
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media asset not found.")
+    if asset.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+
+    try:
+        data = storage_service.read_bytes(asset.storage_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored media file not found.")
+
+    if asset.asset_type == "extracted_audio":
+        project = db.query(Project).filter(Project.id == asset.project_id).first()
+        ext = "mp3" if "mpeg" in (asset.mime_type or "").lower() or asset.original_filename.lower().endswith(".mp3") else "wav"
+        download_name = f"{sanitize_download_title(project.title if project else None)}.{ext}"
+    else:
+        suffix = Path(asset.original_filename).suffix
+        stem = Path(asset.original_filename).stem
+        download_name = f"{sanitize_download_title(stem, fallback='media')}{suffix}"
+
+    return Response(
+        content=data,
+        media_type=asset.mime_type,
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+    )
 
 
 @router.get("/{upload_id}/signed-url")
