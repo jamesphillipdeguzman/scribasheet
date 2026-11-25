@@ -251,7 +251,8 @@ export const api = {
     projectId: string,
     file: File,
     onProgress?: (pct: number) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    replaceAssetId?: string | null,
   ): Promise<MediaAsset> => {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -288,6 +289,9 @@ export const api = {
 
       const fd = new FormData();
       fd.append("project_id", projectId);
+      if (replaceAssetId) {
+        fd.append("replace_asset_id", replaceAssetId);
+      }
       fd.append("file", file);
       xhr.send(fd);
     });

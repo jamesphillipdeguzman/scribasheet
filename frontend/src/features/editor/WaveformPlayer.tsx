@@ -35,6 +35,14 @@ interface WaveformPlayerProps {
   onMetronomeSettingsChange?: (next: MetronomeSettings) => void;
   activeBeat?: number | null;
   onActiveBeatChange?: (beat: number | null) => void;
+  trimStartSec?: number | null;
+  trimEndSec?: number | null;
+  onTrimChange?: (startSec: number, endSec: number) => void;
+  onDecodedAudioReady?: (info: {
+    durationSec: number;
+    audioBuffer: AudioBuffer | null;
+    signedUrl: string | null;
+  }) => void;
 }
 
 export function WaveformPlayer({
@@ -58,9 +66,18 @@ export function WaveformPlayer({
   onMetronomeSettingsChange,
   activeBeat: controlledBeat,
   onActiveBeatChange,
+  trimStartSec = null,
+  trimEndSec = null,
+  onTrimChange,
+  onDecodedAudioReady,
 }: WaveformPlayerProps) {
   const waveContainerRef = useRef<HTMLDivElement>(null);
+  const trimOverlayRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
+  const draggingHandleRef = useRef<"start" | "end" | null>(null);
+  const onDecodedAudioReadyRef = useRef(onDecodedAudioReady);
+  onDecodedAudioReadyRef.current = onDecodedAudioReady;
+  const [wsDurationSec, setWsDurationSec] = useState<number>(0);
 
   const [sourceMode, setSourceMode] = useState<"midi" | "original">(
     !isScoreOnly && mediaAssetId ? "original" : "midi",
@@ -90,6 +107,8 @@ export function WaveformPlayer({
     if (isScoreOnly || !mediaAssetId) {
       if (isScoreOnly) setSourceMode("midi");
       setSignedAudioUrl(null);
+      setWsDurationSec(0);
+      onDecodedAudioReadyRef.current?.({ durationSec: 0, audioBuffer: null, signedUrl: null });
       if (wsRef.current) {
         if (wsRef.current.isPlaying()) wsRef.current.pause();
         wsRef.current.destroy();
@@ -108,9 +127,17 @@ export function WaveformPlayer({
           ? res.url
           : `${API_BASE_URL.replace(/\/api\/v1$/, "")}${res.url}`;
         setSignedAudioUrl(full);
+        onDecodedAudioReadyRef.current?.({
+          durationSec: durationSeconds,
+          audioBuffer: null,
+          signedUrl: full,
+        });
       })
       .catch(() => {
-        if (!cancelled) setSignedAudioUrl(null);
+        if (!cancelled) {
+          setSignedAudioUrl(null);
+          onDecodedAudioReadyRef.current?.({ durationSec: 0, audioBuffer: null, signedUrl: null });
+        }
       });
     return () => {
       cancelled = true;
@@ -128,6 +155,19 @@ export function WaveformPlayer({
       barWidth: 2,
       barGap: 1,
       url: signedAudioUrl,
+    });
+    ws.on("ready", (dur) => {
+      const resolvedDur = Number.isFinite(dur) && dur > 0 ? dur : ws.getDuration?.() || durationSeconds;
+      if (resolvedDur > 0) setWsDurationSec(resolvedDur);
+      const decoded =
+        typeof (ws as unknown as { getDecodedData?: () => AudioBuffer | null }).getDecodedData === "function"
+          ? (ws as unknown as { getDecodedData: () => AudioBuffer | null }).getDecodedData()
+          : null;
+      onDecodedAudioReadyRef.current?.({
+        durationSec: resolvedDur,
+        audioBuffer: decoded,
+        signedUrl: signedAudioUrl,
+      });
     });
     ws.on("timeupdate", (t) => onPlayheadChange(t));
     ws.on("finish", () => {
@@ -371,6 +411,67 @@ export function WaveformPlayer({
     }
   }, [externalStopSignal]);
 
+  const trimTotalDuration = wsDurationSec > 0 ? wsDurationSec : durationSeconds;
+  const showTrimOverlay = Boolean(
+    !isScoreOnly &&
+      signedAudioUrl &&
+      onTrimChange &&
+      trimStartSec != null &&
+      trimEndSec != null &&
+      trimTotalDuration > 0,
+  );
+  const clampedTrimStart = showTrimOverlay
+    ? Math.max(0, Math.min(trimTotalDuration - 0.2, trimStartSec ?? 0))
+    : 0;
+  const clampedTrimEnd = showTrimOverlay
+    ? Math.min(trimTotalDuration, Math.max(clampedTrimStart + 0.2, trimEndSec ?? trimTotalDuration))
+    : trimTotalDuration;
+  const startPct = trimTotalDuration > 0 ? (clampedTrimStart / trimTotalDuration) * 100 : 0;
+  const endPct = trimTotalDuration > 0 ? (clampedTrimEnd / trimTotalDuration) * 100 : 100;
+
+  const updateHandleFromClientX = (handle: "start" | "end", clientX: number) => {
+    if (!trimOverlayRef.current || !onTrimChange || trimTotalDuration <= 0) return;
+    const rect = trimOverlayRef.current.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return;
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const sec = Math.round(ratio * trimTotalDuration * 100) / 100;
+    if (handle === "start") {
+      onTrimChange(Math.min(sec, Math.max(0, clampedTrimEnd - 0.2)), clampedTrimEnd);
+    } else {
+      onTrimChange(clampedTrimStart, Math.max(sec, Math.min(trimTotalDuration, clampedTrimStart + 0.2)));
+    }
+  };
+
+  useEffect(() => {
+    const onMove = (ev: PointerEvent) => {
+      if (!draggingHandleRef.current) return;
+      updateHandleFromClientX(draggingHandleRef.current, ev.clientX);
+    };
+    const onUp = () => {
+      draggingHandleRef.current = null;
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  });
+
+  const nudgeHandle = (handle: "start" | "end", delta: number) => {
+    if (!onTrimChange || trimTotalDuration <= 0) return;
+    if (handle === "start") {
+      const next = Math.max(0, Math.min(clampedTrimEnd - 0.2, Math.round((clampedTrimStart + delta) * 100) / 100));
+      onTrimChange(next, clampedTrimEnd);
+    } else {
+      const next = Math.min(
+        trimTotalDuration,
+        Math.max(clampedTrimStart + 0.2, Math.round((clampedTrimEnd + delta) * 100) / 100),
+      );
+      onTrimChange(clampedTrimStart, next);
+    }
+  };
+
   return (
     <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-3 sm:p-4 space-y-3 w-full min-w-0 overflow-visible">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -478,7 +579,91 @@ export function WaveformPlayer({
       </div>
 
       {signedAudioUrl ? (
-        <div ref={waveContainerRef} className="w-full min-w-0 overflow-hidden rounded-lg bg-[#09090F] p-2 border border-[#27273A]" />
+        <div
+          ref={trimOverlayRef}
+          data-testid="waveform-trim-container"
+          className="relative w-full min-w-0 overflow-hidden rounded-lg bg-[#09090F] p-2 border border-[#27273A]"
+        >
+          <div ref={waveContainerRef} className="w-full min-w-0" />
+          {showTrimOverlay && (
+            <>
+              <div
+                data-testid="trim-dim-left"
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 left-0 bg-black/55"
+                style={{ width: `${startPct}%` }}
+              />
+              <div
+                data-testid="trim-dim-right"
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 right-0 bg-black/55"
+                style={{ width: `${Math.max(0, 100 - endPct)}%` }}
+              />
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 border-x-2 border-violet-400/90"
+                style={{
+                  left: `${startPct}%`,
+                  width: `${Math.max(0, endPct - startPct)}%`,
+                }}
+              />
+              <div
+                role="slider"
+                tabIndex={0}
+                aria-label="Trim start handle"
+                aria-valuemin={0}
+                aria-valuemax={Math.round(clampedTrimEnd * 10) / 10}
+                aria-valuenow={Math.round(clampedTrimStart * 10) / 10}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  draggingHandleRef.current = "start";
+                  e.currentTarget.setPointerCapture?.(e.pointerId);
+                }}
+                onKeyDown={(e) => {
+                  const step = e.shiftKey ? 1.0 : 0.1;
+                  if (e.key === "ArrowLeft") {
+                    e.preventDefault();
+                    nudgeHandle("start", -step);
+                  } else if (e.key === "ArrowRight") {
+                    e.preventDefault();
+                    nudgeHandle("start", step);
+                  }
+                }}
+                className="absolute inset-y-0 -translate-x-1/2 w-3 cursor-ew-resize flex items-center justify-center focus:outline-none"
+                style={{ left: `${startPct}%` }}
+              >
+                <span className="h-8 w-1.5 rounded-full bg-violet-400 shadow ring-1 ring-white/70" />
+              </div>
+              <div
+                role="slider"
+                tabIndex={0}
+                aria-label="Trim end handle"
+                aria-valuemin={Math.round(clampedTrimStart * 10) / 10}
+                aria-valuemax={Math.round(trimTotalDuration * 10) / 10}
+                aria-valuenow={Math.round(clampedTrimEnd * 10) / 10}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  draggingHandleRef.current = "end";
+                  e.currentTarget.setPointerCapture?.(e.pointerId);
+                }}
+                onKeyDown={(e) => {
+                  const step = e.shiftKey ? 1.0 : 0.1;
+                  if (e.key === "ArrowLeft") {
+                    e.preventDefault();
+                    nudgeHandle("end", -step);
+                  } else if (e.key === "ArrowRight") {
+                    e.preventDefault();
+                    nudgeHandle("end", step);
+                  }
+                }}
+                className="absolute inset-y-0 -translate-x-1/2 w-3 cursor-ew-resize flex items-center justify-center focus:outline-none"
+                style={{ left: `${endPct}%` }}
+              >
+                <span className="h-8 w-1.5 rounded-full bg-violet-400 shadow ring-1 ring-white/70" />
+              </div>
+            </>
+          )}
+        </div>
       ) : (
         <div className="rounded-lg bg-[#09090F] p-3 text-xs text-[#71717A] border border-[#27273A]">
           Waveform preview appears after uploading an audio or video recording.

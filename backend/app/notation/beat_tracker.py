@@ -331,7 +331,7 @@ def _halfbar_metrical_evidence_prefers_4_4(
     hb_bass_pc: list[int | None] = []
     db_weights: list[float] = []
 
-    for i in range(n_hb):
+    for i in range(len(downbeats)):
         db_t = downbeats[i]
         att_w = 0.0
         for n in note_list:

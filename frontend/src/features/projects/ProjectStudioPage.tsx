@@ -39,12 +39,13 @@ import {
 } from "@/features/editor/metronome";
 import { SATBMixerPanel } from "@/features/editor/SATBMixerPanel";
 import { SheetMusicViewer } from "@/features/editor/SheetMusicViewer";
+import { AudioTrimPanel } from "@/features/editor/AudioTrimPanel";
 import { WaveformPlayer } from "@/features/editor/WaveformPlayer";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { MediaUploader } from "@/features/uploads/MediaUploader";
 import { api, ApiError, WS_BASE_URL, getStoredTokens } from "@/services/api";
 import { isScoreMediaAsset, isVideoMediaAsset } from "@/lib/utils";
-import type { ScoreData, ScoreNote, TranscriptionJob, TranscriptionSettings } from "@/types/api";
+import type { Project, ScoreData, ScoreNote, TranscriptionJob, TranscriptionSettings } from "@/types/api";
 
 type StudioTab = "notation" | "pianoroll" | "chords" | "lyrics" | "exports";
 
@@ -129,6 +130,12 @@ export function ProjectStudioPage() {
   const [runtimeNowMs, setRuntimeNowMs] = useState<number>(() => Date.now());
   const [isStartingJob, setIsStartingJob] = useState(false);
   const [selectedSourceAssetId, setSelectedSourceAssetId] = useState<string | null>(null);
+  const [trimStartSec, setTrimStartSec] = useState<number>(0);
+  const [trimEndSec, setTrimEndSec] = useState<number>(0);
+  const [waveformDurationSec, setWaveformDurationSec] = useState<number>(0);
+  const [waveformSignedUrl, setWaveformSignedUrl] = useState<string | null>(null);
+  const [waveformDecodedBuffer, setWaveformDecodedBuffer] = useState<AudioBuffer | null>(null);
+  const lastTrimAssetIdRef = useRef<string | null>(null);
   const [isRegeneratingArrangement, setIsRegeneratingArrangement] = useState(false);
   const [isPrintingPdf, setIsPrintingPdf] = useState(false);
   const [printError, setPrintError] = useState<string | null>(null);
@@ -368,12 +375,12 @@ export function ProjectStudioPage() {
           setActiveJob((prev) =>
             prev && prev.id === trackedJobId
               ? {
-                  ...prev,
-                  status: msg.status,
-                  progress: msg.progress,
-                  current_stage: msg.current_stage,
-                  error_message: msg.error_message,
-                }
+                ...prev,
+                status: msg.status,
+                progress: msg.progress,
+                current_stage: msg.current_stage,
+                error_message: msg.error_message,
+              }
               : prev
           );
           if (msg.status === "completed") {
@@ -465,9 +472,9 @@ export function ProjectStudioPage() {
 
   const isGenuineSatb = Boolean(
     scoreData &&
-      (project?.transcription_mode === "satb_pdf" ||
-        scoreData.analysis?.mode === "satb_pdf" ||
-        Boolean(scoreData.analysis?.satb)),
+    (project?.transcription_mode === "satb_pdf" ||
+      scoreData.analysis?.mode === "satb_pdf" ||
+      Boolean(scoreData.analysis?.satb)),
   );
   const canShowMixer = Boolean(scoreData && (isGenuineSatb || scoreData.tracks.length > 1));
   const mixerOpen = showPartMixerOverride ?? isGenuineSatb;
@@ -660,6 +667,63 @@ export function ProjectStudioPage() {
     }
   };
 
+  const projectMediaAssets = project?.media_assets || [];
+  const sortedProjectOriginals = [...projectMediaAssets]
+    .filter((a) => a.asset_type === "original")
+    .sort((a, b) => Date.parse(b.created_at || "") - Date.parse(a.created_at || ""));
+  const topOriginalAsset = sortedProjectOriginals[0] || null;
+  const extractedProjectAudioAssets = projectMediaAssets.filter((a) => a.asset_type === "extracted_audio");
+  const topUploadedVideoAsset =
+    topOriginalAsset && isVideoMediaAsset(topOriginalAsset) ? topOriginalAsset : null;
+  const effectiveSourceAssetId =
+    selectedSourceAssetId && projectMediaAssets.some((a) => a.id === selectedSourceAssetId)
+      ? selectedSourceAssetId
+      : topOriginalAsset?.id || null;
+  const selectedAssetObj = effectiveSourceAssetId
+    ? projectMediaAssets.find((a) => a.id === effectiveSourceAssetId) || null
+    : null;
+  const activeAudioAsset = (() => {
+    if (selectedAssetObj && !isScoreMediaAsset(selectedAssetObj) && !isVideoMediaAsset(selectedAssetObj)) {
+      return selectedAssetObj;
+    }
+    if (topUploadedVideoAsset) {
+      return (
+        extractedProjectAudioAssets.find((a) => a.mime_type === "audio/wav") ||
+        extractedProjectAudioAssets[0] ||
+        null
+      );
+    }
+    return topOriginalAsset && !isScoreMediaAsset(topOriginalAsset) && !isVideoMediaAsset(topOriginalAsset)
+      ? topOriginalAsset
+      : null;
+  })();
+  const waveformMediaAssetId = activeAudioAsset?.id || (topUploadedVideoAsset ? topOriginalAsset?.id || null : null);
+  const trimTotalDuration =
+    waveformDurationSec > 0
+      ? waveformDurationSec
+      : activeAudioAsset?.duration_seconds || project?.duration_seconds || 0;
+
+  useEffect(() => {
+    if (lastTrimAssetIdRef.current !== waveformMediaAssetId) {
+      lastTrimAssetIdRef.current = waveformMediaAssetId;
+      const resetDur = activeAudioAsset?.duration_seconds || project?.duration_seconds || 0;
+      setTrimStartSec(0);
+      setTrimEndSec(resetDur);
+      setWaveformDurationSec(resetDur);
+      setWaveformDecodedBuffer(null);
+      return;
+    }
+    if (trimEndSec === 0 && trimTotalDuration > 0) {
+      setTrimEndSec(trimTotalDuration);
+    }
+  }, [
+    waveformMediaAssetId,
+    activeAudioAsset?.duration_seconds,
+    project?.duration_seconds,
+    trimEndSec,
+    trimTotalDuration,
+  ]);
+
   if (projectLoading) {
     return (
       <AppShell>
@@ -697,22 +761,9 @@ export function ProjectStudioPage() {
     );
   }
 
-  const originalAssets = [...project.media_assets]
-    .filter((a) => a.asset_type === "original")
-    .sort((a, b) => Date.parse(b.created_at || "") - Date.parse(a.created_at || ""));
-  const originalAsset = originalAssets[0] || null;
-  const extractedAudioAssets = project.media_assets.filter((a) => a.asset_type === "extracted_audio");
-  const uploadedVideoAsset = originalAsset && isVideoMediaAsset(originalAsset) ? originalAsset : null;
-  const effectiveSourceAssetId =
-    selectedSourceAssetId && project.media_assets.some((a) => a.id === selectedSourceAssetId)
-      ? selectedSourceAssetId
-      : originalAsset?.id || null;
-  const waveformMediaAssetId = uploadedVideoAsset
-    ? extractedAudioAssets.find((a) => a.mime_type === "audio/wav")?.id ||
-      extractedAudioAssets[0]?.id ||
-      originalAsset?.id ||
-      null
-    : originalAsset?.id || null;
+  const originalAsset = topOriginalAsset;
+  const extractedAudioAssets = extractedProjectAudioAssets;
+  const uploadedVideoAsset = topUploadedVideoAsset;
   const isScoreAsset = isScoreMediaAsset(originalAsset);
   const isScoreProject =
     isScoreAsset ||
@@ -1010,7 +1061,7 @@ export function ProjectStudioPage() {
               mediaAssetId={isScoreProject ? null : waveformMediaAssetId}
               isScoreOnly={isScoreProject}
               notes={scoreData?.notes || []}
-              durationSeconds={scoreData?.duration_seconds || project.duration_seconds || 0}
+              durationSeconds={scoreData?.duration_seconds || activeAudioAsset?.duration_seconds || project.duration_seconds || 0}
               tempoBpm={scoreData?.tempo_bpm || 120}
               playheadSec={playheadSec}
               onPlayheadChange={setPlayheadSec}
@@ -1027,7 +1078,68 @@ export function ProjectStudioPage() {
               onMetronomeSettingsChange={handleMetronomeSettingsChange}
               activeBeat={activeMetronomeBeat}
               onActiveBeatChange={setActiveMetronomeBeat}
+              trimStartSec={!isScoreProject && activeAudioAsset ? trimStartSec : null}
+              trimEndSec={!isScoreProject && activeAudioAsset ? trimEndSec : null}
+              onTrimChange={(nextStart, nextEnd) => {
+                setTrimStartSec(nextStart);
+                setTrimEndSec(nextEnd);
+              }}
+              onDecodedAudioReady={({ durationSec, audioBuffer, signedUrl }) => {
+                setWaveformSignedUrl(signedUrl);
+                setWaveformDecodedBuffer(audioBuffer);
+                if (durationSec > 0) {
+                  setWaveformDurationSec(durationSec);
+                  setTrimEndSec((prevEnd) => (prevEnd <= 0 || prevEnd > durationSec + 0.05 ? durationSec : prevEnd));
+                }
+              }}
             />
+
+            {!isScoreProject && activeAudioAsset && (
+              <AudioTrimPanel
+                projectId={project.id}
+                projectTitle={project.title}
+                mediaAsset={activeAudioAsset}
+                signedAudioUrl={waveformSignedUrl}
+                decodedAudioBuffer={waveformDecodedBuffer}
+                durationSec={trimTotalDuration}
+                playheadSec={playheadSec}
+                trimStartSec={trimStartSec}
+                trimEndSec={trimEndSec}
+                isProcessing={isJobRunning || isStartingJob}
+                onTrimChange={(nextStart, nextEnd) => {
+                  setTrimStartSec(nextStart);
+                  setTrimEndSec(nextEnd);
+                }}
+                onSeek={(sec) => setSeekRequest({ sec, autoplay: false, nonce: Date.now() })}
+                onTrimApplied={(newAsset, replacedAssetId) => {
+                  setStopPlaySignal((n) => n + 1);
+                  setPlayheadSec(0);
+                  setSeekRequest(null);
+                  setSelectedSourceAssetId(newAsset.id);
+                  const nextDur = newAsset.duration_seconds || 0;
+                  setTrimStartSec(0);
+                  setTrimEndSec(nextDur);
+                  setWaveformDurationSec(nextDur);
+                  setWaveformDecodedBuffer(null);
+                  lastTrimAssetIdRef.current = newAsset.id;
+                  queryClient.setQueryData<Project | undefined>(["project", projectId], (prev) => {
+                    if (!prev) return prev;
+                    const replaced = prev.media_assets.find((m) => m.id === replacedAssetId);
+                    const shouldDropOld =
+                      replaced && replaced.asset_type === "original" && !isVideoMediaAsset(replaced);
+                    const filtered = shouldDropOld
+                      ? prev.media_assets.filter((m) => m.id !== replacedAssetId)
+                      : prev.media_assets;
+                    return {
+                      ...prev,
+                      duration_seconds: newAsset.duration_seconds ?? prev.duration_seconds,
+                      media_assets: [newAsset, ...filtered.filter((m) => m.id !== newAsset.id)],
+                    };
+                  });
+                  void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+                }}
+              />
+            )}
 
             {/* Workspace Tabs */}
             <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-3 sm:p-4 space-y-4 min-w-0">
@@ -1048,11 +1160,10 @@ export function ProjectStudioPage() {
                         role="tab"
                         aria-selected={active}
                         onClick={() => setActiveTab(t.id)}
-                        className={`inline-flex shrink-0 min-h-[40px] items-center gap-2 rounded-lg px-3 py-1.5 text-xs transition-colors ${
-                          active
-                            ? "bg-violet-600 text-white font-semibold shadow-sm dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:font-medium"
-                            : "text-stone-700 hover:text-stone-950 hover:bg-stone-200/60 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-[#181825]"
-                        }`}
+                        className={`inline-flex shrink-0 min-h-[40px] items-center gap-2 rounded-lg px-3 py-1.5 text-xs transition-colors ${active
+                          ? "bg-violet-600 text-white font-semibold shadow-sm dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:font-medium"
+                          : "text-stone-700 hover:text-stone-950 hover:bg-stone-200/60 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-[#181825]"
+                          }`}
                       >
                         <Icon className="h-3.5 w-3.5" />
                         {t.label}

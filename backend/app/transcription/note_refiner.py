@@ -116,7 +116,7 @@ def _has_upper_triad_context(
     fundamental: DetectedNote,
     all_notes: list[DetectedNote],
 ) -> bool:
-    """Protect fifth/twelfth notes that are part of an upper chord voicing or strong lead melody."""
+    """Protect fifth/twelfth notes that are part of an upper chord voicing or lead melody."""
     # Check if candidate has simultaneous harmony notes forming a triad/chord above fundamental
     slice_notes = [
         n
@@ -126,14 +126,10 @@ def _has_upper_triad_context(
     if not slice_notes:
         return False
     highest_pitch = max(n.pitch_midi for n in slice_notes)
-    if candidate.pitch_midi == highest_pitch and candidate.velocity >= 72:
+    if candidate.pitch_midi == highest_pitch and candidate.velocity >= 65:
         return True
     for other in slice_notes:
         if other is candidate or other is fundamental:
-            continue
-        # Ignore octave harmonics of the same fundamental so +12 and +19 ghosts don't protect each other
-        fund_diff = other.pitch_midi - fundamental.pitch_midi
-        if fund_diff in (12, 24) and other.velocity <= fundamental.velocity - 12:
             continue
         if other.pitch_midi > fundamental.pitch_midi:
             step = abs(other.pitch_midi - candidate.pitch_midi) % 12

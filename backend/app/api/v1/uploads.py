@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import PLAN_LIMITS, get_current_user, is_user_unlimited
+from app.api.v1.worker import ACTIVE_WORKER_STATUSES
 from app.audio.processor import (
     MediaValidationError,
     probe_media,
@@ -16,7 +17,7 @@ from app.audio.processor import (
 from app.core.config import get_settings
 from app.core.security import verify_signed_download_token
 from app.db.session import get_db
-from app.models import MediaAsset, Project, User
+from app.models import MediaAsset, Project, TranscriptionJob, User
 from app.notation.omr import OMRError, validate_pdf_bytes
 from app.schemas.project import MediaAssetResponse
 from app.storage.service import sanitize_download_title, sanitize_filename, storage_service
@@ -43,7 +44,7 @@ class ConfirmUploadRequest(BaseModel):
     size_bytes: int
 
 
-def _enforce_storage_quota(db: Session, user: User, incoming_bytes: int) -> None:
+def _enforce_storage_quota(db: Session, user: User, incoming_bytes: int, *, credit_bytes: int = 0) -> None:
     if is_user_unlimited(user):
         return
     limits = PLAN_LIMITS.get(user.plan_tier, PLAN_LIMITS["free"])
@@ -56,11 +57,24 @@ def _enforce_storage_quota(db: Session, user: User, incoming_bytes: int) -> None
         .scalar()
         or 0
     )
-    if int(used_bytes) + int(incoming_bytes) > limit_bytes:
+    projected_bytes = max(0, int(used_bytes) - max(0, int(credit_bytes))) + int(incoming_bytes)
+    if projected_bytes > limit_bytes:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Storage quota reached ({limits['storage_mb']} MB) for your {user.plan_tier} plan.",
         )
+
+
+def _is_video_asset(asset: MediaAsset) -> bool:
+    name = (asset.original_filename or "").strip().lower()
+    mime = (asset.mime_type or "").strip().lower()
+    if name.startswith(("mic-recording-", "tab-audio-")):
+        return False
+    if name.endswith((".mp4", ".mov", ".mkv")):
+        return True
+    if name.endswith(".webm"):
+        return not mime.startswith("audio/")
+    return mime.startswith("video/")
 
 
 @router.post("/presign")
@@ -183,6 +197,7 @@ def confirm_presigned_upload(
 async def upload_media(
     project_id: str = Form(...),
     file: UploadFile = File(...),
+    replace_asset_id: str | None = Form(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -192,6 +207,37 @@ async def upload_media(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
     if project.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this project.")
+
+    replace_target: MediaAsset | None = None
+    will_delete_replaced = False
+    if replace_asset_id:
+        active_job = (
+            db.query(TranscriptionJob.id)
+            .filter(
+                TranscriptionJob.project_id == project.id,
+                TranscriptionJob.status.in_(("queued", *ACTIVE_WORKER_STATUSES)),
+            )
+            .first()
+        )
+        if active_job:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot replace audio while a transcription job is queued or actively processing.",
+            )
+        replace_target = (
+            db.query(MediaAsset)
+            .filter(
+                MediaAsset.id == replace_asset_id,
+                MediaAsset.project_id == project.id,
+                MediaAsset.user_id == current_user.id,
+            )
+            .first()
+        )
+        if replace_target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media asset to replace was not found.")
+        will_delete_replaced = bool(
+            replace_target.asset_type == "original" and not _is_video_asset(replace_target)
+        )
 
     safe_name = sanitize_filename(file.filename or "recording.wav")
     lower_name = safe_name.lower()
@@ -232,8 +278,9 @@ async def upload_media(
             tmp_path.unlink(missing_ok=True)
             raise
 
+    credit_bytes = int(replace_target.size_bytes) if (will_delete_replaced and replace_target) else 0
     try:
-        _enforce_storage_quota(db, current_user, total_bytes)
+        _enforce_storage_quota(db, current_user, total_bytes, credit_bytes=credit_bytes)
         if is_pdf:
             validate_pdf_bytes(tmp_path.read_bytes())
             duration_sec = None
@@ -290,6 +337,23 @@ async def upload_media(
     db.add(asset)
     db.commit()
     db.refresh(asset)
+
+    # Remove replaced non-video original ONLY after new trimmed asset is committed safely
+    if will_delete_replaced and replace_target is not None:
+        old_path = replace_target.storage_path
+        (
+            db.query(TranscriptionJob)
+            .filter(TranscriptionJob.source_asset_id == replace_target.id)
+            .update({TranscriptionJob.source_asset_id: None}, synchronize_session=False)
+        )
+        db.delete(replace_target)
+        db.commit()
+        if old_path and old_path != storage_key:
+            try:
+                storage_service.delete(old_path)
+            except Exception:
+                pass
+
     return asset
 
 
