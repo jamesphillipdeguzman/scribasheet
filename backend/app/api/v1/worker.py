@@ -97,6 +97,8 @@ class WorkerClaimRequest(BaseModel):
 
 class WorkerHeartbeatRequest(BaseModel):
     worker_id: str = Field(min_length=1, max_length=128)
+    status: str | None = Field(default=None, max_length=32)
+    active_job_id: str | None = Field(default=None, max_length=64)
 
 
 class WorkerProgressRequest(BaseModel):
@@ -177,20 +179,30 @@ def get_worker_availability(db: Session) -> dict[str, Any]:
     settings = get_settings()
     now = _utcnow()
     threshold = max(10, int(settings.WORKER_ONLINE_THRESHOLD_SECONDS))
+    busy_threshold = max(threshold, int(settings.WORKER_BUSY_STALE_THRESHOLD_SECONDS))
     nodes = db.query(WorkerNode).order_by(WorkerNode.last_seen_at.desc()).all()
 
-    online_nodes: list[WorkerNode] = []
+    reachable: list[tuple[WorkerNode, str, float]] = []
     latest_node: WorkerNode | None = nodes[0] if nodes else None
     latest_age: float | None = None
     for n in nodes:
         seen = _ensure_utc(n.last_seen_at)
-        age = max(0.0, (now - seen).total_seconds()) if seen else float(threshold + 1)
+        age = max(0.0, (now - seen).total_seconds()) if seen else float(busy_threshold + 1)
         if latest_age is None:
             latest_age = age
-        if n.status == "online" and age <= threshold:
-            online_nodes.append(n)
+        is_busy = n.status == "busy" or bool(n.active_job_id)
+        eff_threshold = busy_threshold if is_busy else threshold
+        if n.status in ("online", "busy") and age <= eff_threshold:
+            node_state = "stale" if (is_busy and age > threshold) else ("busy" if is_busy else "online")
+            reachable.append((n, node_state, age))
 
-    worker_online = len(online_nodes) > 0
+    state_priority = {"busy": 0, "online": 1, "stale": 2}
+    best = min(reachable, key=lambda item: (state_priority.get(item[1], 3), item[2])) if reachable else None
+    worker_online = best is not None
+    selected_node = best[0] if best is not None else latest_node
+    selected_state = best[1] if best is not None else "offline"
+    selected_age = best[2] if best is not None else latest_age
+
     active_job_count = (
         db.query(TranscriptionJob)
         .filter(
@@ -207,12 +219,14 @@ def get_worker_availability(db: Session) -> dict[str, Any]:
     )
     return {
         "worker_online": worker_online,
-        "status": "online" if worker_online else "offline",
-        "last_seen_seconds": round(latest_age, 1) if latest_age is not None else None,
-        "worker_id": online_nodes[0].worker_id if online_nodes else (latest_node.worker_id if latest_node else None),
+        "status": selected_state,
+        "last_seen_seconds": round(selected_age, 1) if selected_age is not None else None,
+        "worker_id": selected_node.worker_id if selected_node else None,
+        "active_job_id": selected_node.active_job_id if (best is not None and selected_node) else None,
         "active_job_count": active_job_count,
         "queue_depth": queue_depth,
         "freshness_threshold_seconds": threshold,
+        "busy_stale_threshold_seconds": busy_threshold,
     }
 
 
@@ -349,7 +363,7 @@ def claim_next_job(
         db.commit()
         return {"job": None}
 
-    _record_worker_activity(db, worker_id=payload.worker_id, status_val="online", active_job_id=claimed_job_id)
+    _record_worker_activity(db, worker_id=payload.worker_id, status_val="busy", active_job_id=claimed_job_id)
     job = db.query(TranscriptionJob).filter(TranscriptionJob.id == claimed_job_id).first()
     project = db.query(Project).filter(Project.id == job.project_id).first()
     if project:
@@ -428,7 +442,8 @@ def heartbeat_job(
     settings = get_settings()
     job.last_heartbeat_at = now
     job.lease_expires_at = now + timedelta(seconds=settings.WORKER_LEASE_SECONDS)
-    _record_worker_activity(db, worker_id=payload.worker_id, status_val="online", active_job_id=job.id)
+    hb_status = payload.status if payload.status in ("online", "busy") else "busy"
+    _record_worker_activity(db, worker_id=payload.worker_id, status_val=hb_status, active_job_id=job.id)
     db.commit()
     return {
         "job_id": job.id,
@@ -459,7 +474,7 @@ def report_job_progress(
     if payload.log_line:
         ts = now.strftime("%H:%M:%S")
         job.logs_text = f"{job.logs_text}[{ts}] {payload.log_line}\n"
-    _record_worker_activity(db, worker_id=payload.worker_id, status_val="online", active_job_id=job.id)
+    _record_worker_activity(db, worker_id=payload.worker_id, status_val="busy", active_job_id=job.id)
     db.commit()
 
     job_ws_manager.publish_from_thread(

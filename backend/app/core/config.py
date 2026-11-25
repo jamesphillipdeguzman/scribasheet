@@ -56,8 +56,9 @@ class Settings(BaseSettings):
     JOB_EXECUTION_MODE: Literal["local", "celery", "remote_worker"] = "local"
     WORKER_API_TOKEN: str = ""
     WORKER_LEASE_SECONDS: int = 120
-    WORKER_HEARTBEAT_INTERVAL_SECONDS: int = 20
+    WORKER_HEARTBEAT_INTERVAL_SECONDS: int = 10
     WORKER_ONLINE_THRESHOLD_SECONDS: int = 45
+    WORKER_BUSY_STALE_THRESHOLD_SECONDS: int = 90
     MAX_JOB_ATTEMPTS: int = 3
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"

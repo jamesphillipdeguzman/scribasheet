@@ -159,13 +159,11 @@ export function WaveformPlayer({
     ws.on("ready", (dur) => {
       const resolvedDur = Number.isFinite(dur) && dur > 0 ? dur : ws.getDuration?.() || durationSeconds;
       if (resolvedDur > 0) setWsDurationSec(resolvedDur);
-      const decoded =
-        typeof (ws as unknown as { getDecodedData?: () => AudioBuffer | null }).getDecodedData === "function"
-          ? (ws as unknown as { getDecodedData: () => AudioBuffer | null }).getDecodedData()
-          : null;
+      // Do not forward WaveSurfer's preview getDecodedData() (default 8000 Hz) to AudioTrimPanel;
+      // trimming decodes full-resolution audio directly via decodeAudioBufferFromUrl().
       onDecodedAudioReadyRef.current?.({
         durationSec: resolvedDur,
-        audioBuffer: decoded,
+        audioBuffer: null,
         signedUrl: signedAudioUrl,
       });
     });

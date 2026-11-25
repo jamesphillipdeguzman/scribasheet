@@ -60,6 +60,152 @@ export class ApiError extends Error {
   }
 }
 
+export function isAuthError(err: unknown): boolean {
+  if (err instanceof ApiError) {
+    return err.status === 401 || err.status === 403;
+  }
+  if (typeof err === "object" && err !== null && "status" in err) {
+    const statusVal = (err as { status?: unknown }).status;
+    return statusVal === 401 || statusVal === 403;
+  }
+  return false;
+}
+
+const SESSION_EXPIRED_MSG = "Your session has expired. Please sign in again.";
+const sessionExpiredListeners = new Set<(message: string) => void>();
+let inFlightRefresh: Promise<string | null> | null = null;
+
+export function onAuthSessionExpired(listener: (message: string) => void): () => void {
+  sessionExpiredListeners.add(listener);
+  return () => {
+    sessionExpiredListeners.delete(listener);
+  };
+}
+
+export function resetAuthRefreshStateForTests(): void {
+  inFlightRefresh = null;
+  sessionExpiredListeners.clear();
+}
+
+function emitSessionExpired(message: string): void {
+  for (const listener of Array.from(sessionExpiredListeners)) {
+    listener(message);
+  }
+}
+
+function isJwtExpiringSoon(token: string | null, skewSec = 45): boolean {
+  if (!token) return false;
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+  try {
+    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), "=");
+    const payload = JSON.parse(atob(padded)) as { exp?: unknown };
+    if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) {
+      return false;
+    }
+    return payload.exp <= Math.floor(Date.now() / 1000) + skewSec;
+  } catch {
+    return false;
+  }
+}
+
+function isAuthPublicPath(path: string): boolean {
+  const clean = path.split("?")[0];
+  return (
+    clean === "/auth/login" ||
+    clean === "/auth/register" ||
+    clean === "/auth/refresh" ||
+    clean === "/auth/forgot-password" ||
+    clean === "/auth/reset-password"
+  );
+}
+
+export async function refreshAccessToken(failedAccessToken?: string | null): Promise<string | null> {
+  const { accessToken: currentAccess } = getStoredTokens();
+  if (
+    currentAccess &&
+    failedAccessToken &&
+    currentAccess !== failedAccessToken &&
+    !isJwtExpiringSoon(currentAccess, 10)
+  ) {
+    return currentAccess;
+  }
+
+  if (inFlightRefresh) {
+    return inFlightRefresh;
+  }
+
+  inFlightRefresh = (async (): Promise<string | null> => {
+    const { refreshToken } = getStoredTokens();
+    if (!refreshToken) {
+      clearStoredTokens();
+      emitSessionExpired(SESSION_EXPIRED_MSG);
+      return null;
+    }
+
+    let refRes: Response | null = null;
+    for (let attempt = 0; attempt <= 1; attempt++) {
+      try {
+        const result = await fetchWithTimeout(`${API_BASE_URL}/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+        refRes = result.response;
+        if (!TRANSIENT_STATUSES.has(refRes.status) || attempt === 1) {
+          break;
+        }
+      } catch {
+        if (attempt === 1) {
+          throw new ApiError(
+            503,
+            "Unable to refresh session due to a temporary connection issue. Retrying shortly.",
+            true,
+          );
+        }
+      }
+      await sleep(BASE_RETRY_DELAY_MS);
+    }
+
+    if (!refRes) {
+      throw new ApiError(
+        503,
+        "Unable to refresh session due to a temporary connection issue. Retrying shortly.",
+        true,
+      );
+    }
+
+    if (refRes.ok) {
+      const tokens: TokenResponse = await refRes.json();
+      setStoredTokens(tokens.access_token, tokens.refresh_token);
+      return tokens.access_token;
+    }
+
+    if (refRes.status === 401 || refRes.status === 403) {
+      clearStoredTokens();
+      emitSessionExpired(SESSION_EXPIRED_MSG);
+      return null;
+    }
+
+    if (TRANSIENT_STATUSES.has(refRes.status)) {
+      throw new ApiError(
+        503,
+        "Unable to refresh session due to a temporary connection issue. Retrying shortly.",
+        true,
+      );
+    }
+
+    clearStoredTokens();
+    emitSessionExpired(SESSION_EXPIRED_MSG);
+    return null;
+  })().finally(() => {
+    inFlightRefresh = null;
+  });
+
+  return inFlightRefresh;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -124,10 +270,23 @@ async function request<T>(
   retryDelayBaseMs: number = BASE_RETRY_DELAY_MS,
   timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS
 ): Promise<T> {
-  const { accessToken, refreshToken } = getStoredTokens();
+  const publicAuthRoute = isAuthPublicPath(path);
+  let { accessToken } = getStoredTokens();
+  const { refreshToken } = getStoredTokens();
+  if (retryAuth && !publicAuthRoute && accessToken && refreshToken && isJwtExpiringSoon(accessToken)) {
+    const refreshed = await refreshAccessToken(accessToken);
+    if (refreshed) {
+      accessToken = refreshed;
+    } else {
+      accessToken = getStoredTokens().accessToken;
+    }
+  }
+
+  const latestTokens = getStoredTokens();
+  const usedAccessToken = accessToken || latestTokens.accessToken;
   const headers = new Headers(init.headers);
-  if (accessToken && !headers.has("Authorization")) {
-    headers.set("Authorization", `Bearer ${accessToken}`);
+  if (usedAccessToken && (!headers.has("Authorization") || !retryAuth)) {
+    headers.set("Authorization", `Bearer ${usedAccessToken}`);
   }
   if (!(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -182,18 +341,14 @@ async function request<T>(
     );
   }
 
-  if (res.status === 401 && retryAuth && refreshToken) {
-    const { response: refRes } = await fetchWithTimeout(`${API_BASE_URL}/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    });
-    if (refRes.ok) {
-      const tokens: TokenResponse = await refRes.json();
-      setStoredTokens(tokens.access_token, tokens.refresh_token);
-      return request<T>(path, init, false, retryDelayBaseMs);
+  if (res.status === 401 && retryAuth && !publicAuthRoute) {
+    const refreshed = await refreshAccessToken(usedAccessToken);
+    if (refreshed) {
+      const retryHeaders = new Headers(init.headers);
+      retryHeaders.delete("Authorization");
+      return request<T>(path, { ...init, headers: retryHeaders }, false, retryDelayBaseMs, timeoutMs);
     }
-    clearStoredTokens();
+    throw new ApiError(401, SESSION_EXPIRED_MSG);
   }
 
   if (!res.ok) {

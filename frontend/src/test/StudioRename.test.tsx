@@ -74,6 +74,16 @@ describe("Studio Header inline project renaming", () => {
     expect(input.value).toBe(baseProject.title);
     expect(input.selectionStart).toBe(0);
     expect(input.selectionEnd).toBe(baseProject.title.length);
+    expect(input.className).toContain("bg-white");
+    expect(input.className).toContain("text-stone-900");
+    expect(input.className).toContain("border-violet-500");
+    expect(input.className).toContain("ring-violet-500/20");
+    expect(input.className).toContain("placeholder:text-stone-400");
+    expect(input.className).toContain("dark:bg-slate-900");
+    expect(input.className).toContain("dark:text-white");
+    expect(input.className).toContain("dark:border-violet-400");
+    expect(input.className).toContain("dark:ring-violet-400/25");
+    expect(input.className).not.toContain("bg-[#181824]");
 
     // Change value and press Enter followed by Blur -> only 1 API call
     fireEvent.change(input, { target: { value: "  Christmas Medley - O Come All Ye Faithful  " } });

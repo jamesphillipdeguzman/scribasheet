@@ -102,7 +102,9 @@ export function AudioTrimPanel({
     if (!resolvedUrl) {
       throw new Error("Audio stream URL is not available yet. Please wait a moment and try again.");
     }
-    const decoded = await decodeAudioBufferFromUrl(resolvedUrl);
+    const decoded = await decodeAudioBufferFromUrl(resolvedUrl, {
+      preferredSampleRate: mediaAsset.sample_rate,
+    });
     bufferCacheRef.current = { assetId: mediaAsset.id, buffer: decoded };
     return decoded;
   };

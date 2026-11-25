@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Cpu, Loader2 } from "lucide-react";
 import { useWorkerConnection } from "@/features/worker/useWorkerConnection";
-import { api, ApiError } from "@/services/api";
+import { api, ApiError, isAuthError } from "@/services/api";
 import { cn } from "@/lib/utils";
 import type { WorkerStatus } from "@/types/api";
 
@@ -17,7 +17,10 @@ function isValidWorkerStatus(data: unknown): data is WorkerStatus {
   const candidate = data as Partial<WorkerStatus>;
   return (
     typeof candidate.worker_online === "boolean" &&
-    (candidate.status === "online" || candidate.status === "offline") &&
+    (candidate.status === "online" ||
+      candidate.status === "busy" ||
+      candidate.status === "stale" ||
+      candidate.status === "offline") &&
     typeof candidate.queue_depth === "number"
   );
 }
@@ -46,9 +49,10 @@ export function WorkerStatusBadge({ className }: { className?: string }) {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["worker-status"],
     queryFn: () => api.getWorkerStatus(),
-    refetchInterval: isConnecting ? 1500 : 12000,
+    refetchInterval: (query) =>
+      isAuthError(query.state.error) ? false : isConnecting ? 1500 : 12000,
     refetchOnWindowFocus: false,
-    retry: 1,
+    retry: (failureCount, err) => !isAuthError(err) && failureCount < 1,
     staleTime: 0,
   });
 
@@ -89,13 +93,27 @@ export function WorkerStatusBadge({ className }: { className?: string }) {
 
   const online = data.worker_online;
   const connecting = !online && isConnecting;
+  const isBusy = online && data.status === "busy";
+  const isStale = online && data.status === "stale";
+  const dataStatus = connecting
+    ? "connecting"
+    : !online
+      ? "offline"
+      : isStale
+        ? "stale"
+        : isBusy
+          ? "busy"
+          : "online";
+
   return (
     <span
-      data-status={online ? "online" : connecting ? "connecting" : "offline"}
+      data-status={dataStatus}
       className={cn(
         "inline-flex max-w-full items-center gap-1.5 whitespace-nowrap shrink-0 rounded-full border px-3 py-1 text-xs",
-        online
-          ? "bg-emerald-50 text-emerald-800 border-emerald-300 font-semibold dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/35 dark:font-medium"
+        online && !isStale
+          ? isBusy
+            ? "bg-indigo-50 text-indigo-800 border-indigo-300 font-semibold dark:bg-indigo-500/15 dark:text-indigo-200 dark:border-indigo-500/35 dark:font-medium"
+            : "bg-emerald-50 text-emerald-800 border-emerald-300 font-semibold dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/35 dark:font-medium"
           : connecting
             ? "bg-violet-50 text-violet-900 border-violet-300 font-semibold dark:bg-violet-500/15 dark:text-violet-200 dark:border-violet-500/35 dark:font-medium"
             : "bg-amber-50 text-amber-800 border-amber-300 font-semibold dark:bg-amber-500/10 dark:text-amber-200 dark:border-amber-500/30 dark:font-medium",
@@ -109,18 +127,26 @@ export function WorkerStatusBadge({ className }: { className?: string }) {
         <span
           className={cn(
             "h-2 w-2 shrink-0 rounded-full",
-            online ? "bg-emerald-600 dark:bg-emerald-400" : "bg-amber-600 dark:bg-amber-400"
+            online && !isStale
+              ? isBusy
+                ? "bg-indigo-600 dark:bg-indigo-400 animate-pulse"
+                : "bg-emerald-600 dark:bg-emerald-400"
+              : "bg-amber-600 dark:bg-amber-400"
           )}
         />
       )}
       <span>
-        {online
-          ? "Desktop Worker Online"
-          : connecting
-            ? "Connecting Desktop Worker..."
-            : "Desktop Worker Offline"}
+        {connecting
+          ? "Connecting Desktop Worker..."
+          : !online
+            ? "Desktop Worker Offline"
+            : isStale
+              ? "Desktop Worker Stale"
+              : isBusy
+                ? "Desktop Worker Busy"
+                : "Desktop Worker Online"}
       </span>
-      {!online && !connecting && data.last_seen_seconds !== null && (
+      {(!online || isStale) && !connecting && data.last_seen_seconds !== null && (
         <span className="text-[11px] opacity-80">({formatLastSeen(data.last_seen_seconds)})</span>
       )}
       {data.queue_depth > 0 && (

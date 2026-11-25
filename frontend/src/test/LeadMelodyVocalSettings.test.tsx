@@ -40,6 +40,20 @@ describe("Lead Melody Vocal Isolation & Settings UI", () => {
 
     const statusNotice = screen.getByTestId("lead-melody-vocal-status");
     expect(statusNotice.textContent).toContain("Isolating Vocals Stem for Lead Melody");
+    expect(statusNotice.className).toContain("bg-violet-50");
+    expect(statusNotice.className).toContain("border-violet-300");
+    expect(statusNotice.className).toContain("dark:bg-violet-500/10");
+    expect(statusNotice.className).toContain("dark:border-violet-500/30");
+
+    const headingEl = screen.getByText("Isolating Vocals Stem for Lead Melody");
+    expect(headingEl.className).toContain("text-violet-950");
+    expect(headingEl.className).toContain("dark:text-violet-200");
+
+    const subtitleEl = screen.getByText(
+      /Uses Demucs vocal isolation \(vocals\.wav\) and monophonic vocal pitch tracking/i,
+    );
+    expect(subtitleEl.className).toContain("text-violet-900");
+    expect(subtitleEl.className).toContain("dark:text-violet-200/90");
 
     fireEvent.click(screen.getByRole("button", { name: /start ai transcription/i }));
     expect(onStart).toHaveBeenCalledWith(

@@ -319,13 +319,170 @@ export function sliceAudioBuffer(buffer: AudioBuffer, startSec: number, endSec: 
   };
 }
 
+export interface WavHeaderInfo {
+  audioFormat: number;
+  numChannels: number;
+  sampleRate: number;
+  byteRate: number;
+  blockAlign: number;
+  bitsPerSample: number;
+  dataOffset: number;
+  dataSize: number;
+}
+
+export interface DecodeAudioOptions {
+  signal?: AbortSignal;
+  preferredSampleRate?: number | null;
+}
+
+/**
+ * Parse RIFF/WAVE fmt and data chunk headers safely.
+ */
+export function parseWavHeader(arrayBuffer: ArrayBuffer): WavHeaderInfo | null {
+  if (!arrayBuffer || arrayBuffer.byteLength < 44) return null;
+  const view = new DataView(arrayBuffer);
+  const readFourCC = (offset: number) =>
+    String.fromCharCode(
+      view.getUint8(offset),
+      view.getUint8(offset + 1),
+      view.getUint8(offset + 2),
+      view.getUint8(offset + 3),
+    );
+  if (readFourCC(0) !== "RIFF" || readFourCC(8) !== "WAVE") return null;
+
+  let pos = 12;
+  let audioFormat = 0;
+  let numChannels = 0;
+  let sampleRate = 0;
+  let byteRate = 0;
+  let blockAlign = 0;
+  let bitsPerSample = 0;
+  let hasFmt = false;
+  let dataOffset = -1;
+  let dataSize = 0;
+
+  while (pos + 8 <= arrayBuffer.byteLength) {
+    const chunkId = readFourCC(pos);
+    const chunkSize = view.getUint32(pos + 4, true);
+    const payloadOffset = pos + 8;
+    if (payloadOffset + chunkSize > arrayBuffer.byteLength && chunkId !== "data") {
+      break;
+    }
+
+    if (chunkId === "fmt " && chunkSize >= 16 && payloadOffset + 16 <= arrayBuffer.byteLength) {
+      audioFormat = view.getUint16(payloadOffset, true);
+      numChannels = view.getUint16(payloadOffset + 2, true);
+      sampleRate = view.getUint32(payloadOffset + 4, true);
+      byteRate = view.getUint32(payloadOffset + 8, true);
+      blockAlign = view.getUint16(payloadOffset + 12, true);
+      bitsPerSample = view.getUint16(payloadOffset + 14, true);
+      hasFmt = true;
+    } else if (chunkId === "data") {
+      dataOffset = payloadOffset;
+      dataSize = Math.min(chunkSize, Math.max(0, arrayBuffer.byteLength - payloadOffset));
+      break;
+    }
+
+    // RIFF chunks are word-aligned (padded to even byte boundary)
+    pos = payloadOffset + chunkSize + (chunkSize % 2);
+  }
+
+  if (!hasFmt || dataOffset < 0 || numChannels <= 0 || sampleRate <= 0 || blockAlign <= 0 || bitsPerSample <= 0) {
+    return null;
+  }
+
+  return {
+    audioFormat,
+    numChannels,
+    sampleRate,
+    byteRate,
+    blockAlign,
+    bitsPerSample,
+    dataOffset,
+    dataSize,
+  };
+}
+
+/**
+ * Decode uncompressed RIFF/WAVE (PCM 8/16/24/32-bit or IEEE float32) directly in JS
+ * so browser AudioContext output resampling never alters the WAV's native sample rate.
+ */
+export function tryDecodePcmWavArrayBuffer(arrayBuffer: ArrayBuffer): AudioBuffer | null {
+  const hdr = parseWavHeader(arrayBuffer);
+  if (!hdr) return null;
+
+  const isPcm = hdr.audioFormat === 1 && [8, 16, 24, 32].includes(hdr.bitsPerSample);
+  const isFloat32 = hdr.audioFormat === 3 && hdr.bitsPerSample === 32;
+  if (!isPcm && !isFloat32) return null;
+
+  const bytesPerSample = hdr.bitsPerSample / 8;
+  if (hdr.blockAlign < hdr.numChannels * bytesPerSample) return null;
+
+  const frameCount = Math.floor(hdr.dataSize / hdr.blockAlign);
+  if (frameCount <= 0) return null;
+
+  const view = new DataView(arrayBuffer);
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < hdr.numChannels; ch++) {
+    channels.push(new Float32Array(frameCount));
+  }
+
+  for (let i = 0; i < frameCount; i++) {
+    const frameOffset = hdr.dataOffset + i * hdr.blockAlign;
+    for (let ch = 0; ch < hdr.numChannels; ch++) {
+      const sampleOffset = frameOffset + ch * bytesPerSample;
+      let val = 0;
+      if (isFloat32) {
+        val = view.getFloat32(sampleOffset, true);
+      } else if (hdr.bitsPerSample === 8) {
+        val = (view.getUint8(sampleOffset) - 128) / 128;
+      } else if (hdr.bitsPerSample === 16) {
+        val = view.getInt16(sampleOffset, true) / 32768;
+      } else if (hdr.bitsPerSample === 24) {
+        const b0 = view.getUint8(sampleOffset);
+        const b1 = view.getUint8(sampleOffset + 1);
+        const b2 = view.getInt8(sampleOffset + 2);
+        const raw = (b2 << 16) | (b1 << 8) | b0;
+        val = raw / 8388608;
+      } else if (hdr.bitsPerSample === 32) {
+        val = view.getInt32(sampleOffset, true) / 2147483648;
+      }
+      channels[ch][i] = Number.isFinite(val) ? Math.max(-1, Math.min(1, val)) : 0;
+    }
+  }
+
+  return {
+    sampleRate: hdr.sampleRate,
+    length: frameCount,
+    duration: frameCount / hdr.sampleRate,
+    numberOfChannels: hdr.numChannels,
+    getChannelData: (ch: number) => {
+      if (ch < 0 || ch >= channels.length) {
+        throw new RangeError(`Channel index ${ch} out of range`);
+      }
+      return channels[ch];
+    },
+    copyFromChannel: (dest: Float32Array, ch: number, startInChannel = 0) => {
+      const src = channels[ch];
+      if (!src) throw new RangeError(`Channel index ${ch} out of range`);
+      dest.set(src.subarray(startInChannel, startInChannel + dest.length));
+    },
+    copyToChannel: (src: Float32Array, ch: number, startInChannel = 0) => {
+      const dst = channels[ch];
+      if (!dst) throw new RangeError(`Channel index ${ch} out of range`);
+      dst.set(src.subarray(0, Math.max(0, dst.length - startInChannel)), startInChannel);
+    },
+  } as unknown as AudioBuffer;
+}
+
 /**
  * Encode Float32 PCM channel arrays to a standard 16-bit signed integer RIFF/WAVE Blob
  * preserving original sampleRate and channelCount.
  */
 export function encodePcm16Wav(channels: Float32Array[], sampleRate: number): Blob {
   const numChannels = channels.length;
-  if (numChannels <= 0 || sampleRate <= 0) {
+  const sr = Math.round(sampleRate);
+  if (numChannels <= 0 || !Number.isFinite(sr) || sr <= 0) {
     throw new Error("Cannot encode WAV: missing audio channels or invalid sample rate.");
   }
   const frameCount = channels[0].length;
@@ -335,7 +492,7 @@ export function encodePcm16Wav(channels: Float32Array[], sampleRate: number): Bl
 
   const bytesPerSample = 2;
   const blockAlign = numChannels * bytesPerSample;
-  const byteRate = sampleRate * blockAlign;
+  const byteRate = sr * blockAlign;
   const dataSize = frameCount * blockAlign;
   const buffer = new ArrayBuffer(44 + dataSize);
   const view = new DataView(buffer);
@@ -353,7 +510,7 @@ export function encodePcm16Wav(channels: Float32Array[], sampleRate: number): Bl
   view.setUint32(16, 16, true); // PCM chunk size
   view.setUint16(20, 1, true); // PCM format = 1
   view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
+  view.setUint32(24, sr, true);
   view.setUint32(28, byteRate, true);
   view.setUint16(32, blockAlign, true);
   view.setUint16(34, 16, true); // 16-bit
@@ -373,7 +530,19 @@ export function encodePcm16Wav(channels: Float32Array[], sampleRate: number): Bl
   return new Blob([buffer], { type: "audio/wav" });
 }
 
-export async function decodeAudioBufferFromUrl(url: string, signal?: AbortSignal): Promise<AudioBuffer> {
+export async function decodeAudioBufferFromUrl(
+  url: string,
+  optionsOrSignal?: AbortSignal | DecodeAudioOptions,
+): Promise<AudioBuffer> {
+  const signal =
+    optionsOrSignal && "aborted" in optionsOrSignal
+      ? optionsOrSignal
+      : optionsOrSignal?.signal;
+  const preferredSampleRate =
+    optionsOrSignal && !("aborted" in optionsOrSignal)
+      ? optionsOrSignal.preferredSampleRate
+      : undefined;
+
   const res = await fetch(url, { signal });
   if (!res.ok) {
     throw new Error(`Failed to fetch audio for trimming (HTTP ${res.status}).`);
@@ -383,6 +552,12 @@ export async function decodeAudioBufferFromUrl(url: string, signal?: AbortSignal
     throw new Error("Audio file is empty or unreadable.");
   }
 
+  // Directly decode uncompressed WAV to preserve exact source sample rate without OS/WebAudio resampling.
+  const directWav = tryDecodePcmWavArrayBuffer(arrayBuffer);
+  if (directWav) {
+    return directWav;
+  }
+
   const AudioCtx =
     window.AudioContext ||
     (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -390,7 +565,25 @@ export async function decodeAudioBufferFromUrl(url: string, signal?: AbortSignal
     throw new Error("Web Audio API is not supported in this browser.");
   }
 
-  const ctx = new AudioCtx();
+  const validPrefSr =
+    typeof preferredSampleRate === "number" &&
+    Number.isFinite(preferredSampleRate) &&
+    preferredSampleRate >= 8000 &&
+    preferredSampleRate <= 192000
+      ? Math.round(preferredSampleRate)
+      : null;
+
+  let ctx: AudioContext;
+  if (validPrefSr !== null) {
+    try {
+      ctx = new AudioCtx({ sampleRate: validPrefSr });
+    } catch {
+      ctx = new AudioCtx();
+    }
+  } else {
+    ctx = new AudioCtx();
+  }
+
   try {
     return await ctx.decodeAudioData(arrayBuffer.slice(0));
   } catch (err) {

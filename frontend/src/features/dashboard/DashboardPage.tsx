@@ -276,7 +276,7 @@ export function DashboardPage() {
                           value={renameValue}
                           onChange={(e) => setRenameValue(e.target.value)}
                           autoFocus
-                          className="flex-1 min-w-0 h-9 rounded border border-[#A78BFA] bg-[#09090F] px-2 text-sm text-[#F5F3FF]"
+                          className="flex-1 min-w-0 h-9 rounded px-2 text-sm bg-white text-stone-900 border border-violet-500 ring-2 ring-violet-500/20 placeholder:text-stone-400 focus:outline-none dark:bg-slate-900 dark:text-white dark:border-violet-400 dark:ring-violet-400/25"
                         />
                         <Button type="submit" size="sm">Save</Button>
                       </form>

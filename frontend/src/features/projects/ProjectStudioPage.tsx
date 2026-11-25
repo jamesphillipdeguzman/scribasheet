@@ -43,7 +43,7 @@ import { AudioTrimPanel } from "@/features/editor/AudioTrimPanel";
 import { WaveformPlayer } from "@/features/editor/WaveformPlayer";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { MediaUploader } from "@/features/uploads/MediaUploader";
-import { api, ApiError, WS_BASE_URL, getStoredTokens } from "@/services/api";
+import { api, ApiError, WS_BASE_URL, getStoredTokens, isAuthError } from "@/services/api";
 import { isScoreMediaAsset, isVideoMediaAsset } from "@/lib/utils";
 import type { Project, ScoreData, ScoreNote, TranscriptionJob, TranscriptionSettings } from "@/types/api";
 
@@ -122,9 +122,15 @@ export function ProjectStudioPage() {
 
   // Job tracking
   const [activeJob, setActiveJob] = useState<TranscriptionJob | null>(null);
+  const [jobsLoaded, setJobsLoaded] = useState(false);
+  const [pollAuthError, setPollAuthError] = useState<string | null>(null);
+  const [pollResumeNonce, setPollResumeNonce] = useState(0);
   const activeJobIdRef = useRef<string | null>(null);
   const processingGenerationRef = useRef<number>(0);
   const scoreLoadTokenRef = useRef<number>(0);
+  const initialScoreAttemptedForRef = useRef<string | null>(null);
+  const isJobRunningRef = useRef<boolean>(false);
+  const projectStatusRef = useRef<string | undefined>(undefined);
   const isRetryingRef = useRef<boolean>(false);
   activeJobIdRef.current = activeJob?.id ?? null;
   const [runtimeNowMs, setRuntimeNowMs] = useState<number>(() => Date.now());
@@ -247,17 +253,21 @@ export function ProjectStudioPage() {
     queryKey: ["project", projectId],
     queryFn: () => api.getProject(projectId),
     enabled: Boolean(projectId),
+    retry: (failureCount, err) => !isAuthError(err) && failureCount < 1,
   });
   projectTitleRef.current = project?.title;
+  projectStatusRef.current = project?.status;
 
   const { data: workerStatus } = useQuery({
     queryKey: ["worker-status"],
     queryFn: () => api.getWorkerStatus(),
-    refetchInterval: 12000,
+    refetchInterval: (query) => (isAuthError(query.state.error) ? false : 12000),
+    retry: (failureCount, err) => !isAuthError(err) && failureCount < 1,
     staleTime: 0,
   });
 
   const clearWorkspaceForNewProcessing = useCallback(() => {
+    setPollAuthError(null);
     // 1. Stop active audio/MIDI playback & reset playhead immediately
     midiSynth.stop();
     if (metronomeEngine.getMode() !== "standalone") {
@@ -318,11 +328,25 @@ export function ProjectStudioPage() {
       if (token !== scoreLoadTokenRef.current) return;
       setScoreData(null);
       setMusicxml(null);
-      if (err instanceof ApiError) {
-        if (err.status === 404) {
-          setScoreLoadState("missing_score");
+      const errStatus =
+        err instanceof ApiError
+          ? err.status
+          : typeof err === "object" &&
+              err !== null &&
+              "status" in err &&
+              typeof (err as { status?: unknown }).status === "number"
+            ? (err as { status: number }).status
+            : null;
+      if (errStatus === 404) {
+        if (isJobRunningRef.current || projectStatusRef.current === "processing") {
+          setScoreLoadState("idle");
+          setScoreLoadError(null);
           return;
         }
+        setScoreLoadState("missing_score");
+        return;
+      }
+      if (err instanceof ApiError) {
         if (err.status === 401 || err.status === 403) {
           setScoreLoadState("unauthorized");
           setScoreLoadError(err.message);
@@ -338,19 +362,27 @@ export function ProjectStudioPage() {
   }, [projectId]);
 
   useEffect(() => {
-    loadScore();
-  }, [loadScore]);
-
-  useEffect(() => {
     if (!projectId) return;
+    setJobsLoaded(false);
+    initialScoreAttemptedForRef.current = null;
     const gen = processingGenerationRef.current;
-    api.listTranscriptions(projectId).then((jobs) => {
-      if (gen !== processingGenerationRef.current) return;
-      if (jobs.length > 0 && !activeJobIdRef.current) {
-        activeJobIdRef.current = jobs[0].id;
-        setActiveJob(jobs[0]);
-      }
-    });
+    api
+      .listTranscriptions(projectId)
+      .then((jobs) => {
+        if (gen !== processingGenerationRef.current) return;
+        if (jobs.length > 0 && !activeJobIdRef.current) {
+          activeJobIdRef.current = jobs[0].id;
+          setActiveJob(jobs[0]);
+        }
+      })
+      .catch(() => {
+        // Initial job list failure is non-fatal; user can still start a job
+      })
+      .finally(() => {
+        if (gen === processingGenerationRef.current) {
+          setJobsLoaded(true);
+        }
+      });
   }, [projectId]);
 
   // WebSocket + polling for active job
@@ -384,6 +416,8 @@ export function ProjectStudioPage() {
               : prev
           );
           if (msg.status === "completed") {
+            isJobRunningRef.current = false;
+            projectStatusRef.current = "ready";
             queryClient.invalidateQueries({ queryKey: ["project", projectId] });
             void loadScore(trackedJobId);
           } else if (msg.status === "failed" || msg.status === "cancelled") {
@@ -411,8 +445,11 @@ export function ProjectStudioPage() {
       try {
         const latest = await api.getJob(trackedJobId);
         if (isStaleTracker() || latest.id !== trackedJobId) return;
+        setPollAuthError(null);
         setActiveJob(latest);
         if (latest.status === "completed") {
+          isJobRunningRef.current = false;
+          projectStatusRef.current = "ready";
           clearInterval(pollInterval);
           queryClient.invalidateQueries({ queryKey: ["project", projectId] });
           void loadScore(trackedJobId);
@@ -424,8 +461,17 @@ export function ProjectStudioPage() {
           setScoreLoadState("error");
           setScoreLoadError(latest.error_message || "Score processing failed.");
         }
-      } catch {
-        // ignore transient poll errors
+      } catch (err) {
+        if (isAuthError(err)) {
+          clearInterval(pollInterval);
+          if (ws) ws.close();
+          setPollAuthError(
+            err instanceof ApiError && err.message
+              ? err.message
+              : "Your session has expired. Please sign in again to resume monitoring your transcription.",
+          );
+        }
+        // ignore transient non-auth poll errors and continue polling
       }
     }, pollMs);
 
@@ -433,11 +479,24 @@ export function ProjectStudioPage() {
       clearInterval(pollInterval);
       if (ws) ws.close();
     };
-  }, [activeJob?.id, activeJob?.status, workerStatus?.worker_online, projectId, queryClient, loadScore]);
+  }, [activeJob?.id, activeJob?.status, workerStatus?.worker_online, projectId, queryClient, loadScore, pollResumeNonce]);
 
   const isJobRunning = Boolean(
     activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status),
   );
+  isJobRunningRef.current = isJobRunning || isStartingJob;
+
+  useEffect(() => {
+    if (!projectId || !project || !jobsLoaded) return;
+    if (initialScoreAttemptedForRef.current === projectId) return;
+    initialScoreAttemptedForRef.current = projectId;
+    if (project.status === "processing" || isJobRunning || isStartingJob) {
+      setScoreLoadState("idle");
+      setScoreLoadError(null);
+      return;
+    }
+    void loadScore();
+  }, [projectId, project, jobsLoaded, isJobRunning, isStartingJob, loadScore]);
 
   useEffect(() => {
     if (!isJobRunning) return;
@@ -861,7 +920,7 @@ export function ProjectStudioPage() {
                   onBlur={() => {
                     void commitTitleRename();
                   }}
-                  className="min-w-0 w-full sm:w-auto sm:min-w-[220px] max-w-full bg-[#181824] border border-indigo-500/60 rounded-md px-2 py-0.5 text-sm sm:text-base font-semibold text-[#F5F3FF] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  className="min-w-0 w-full sm:w-auto sm:min-w-[220px] max-w-full rounded-md px-2 py-0.5 text-sm sm:text-base font-semibold bg-white text-stone-900 border border-violet-500 ring-2 ring-violet-500/20 placeholder:text-stone-400 focus:outline-none dark:bg-slate-900 dark:text-white dark:border-violet-400 dark:ring-violet-400/25"
                 />
               ) : (
                 <div className="flex items-center gap-1.5 min-w-0 max-w-full">
@@ -1215,6 +1274,36 @@ export function ProjectStudioPage() {
                     if (updatedXml !== null) setMusicxml(updatedXml);
                   }}
                 />
+              )}
+
+              {pollAuthError && (
+                <div
+                  data-testid="auth-session-expired-banner"
+                  role="alert"
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-900 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200"
+                >
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="font-semibold">{pollAuthError}</div>
+                    <p className="text-[11px] opacity-90">
+                      Your active transcription job remains queued/processing in the background; authentication expired before status polling could continue.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => {
+                        setPollAuthError(null);
+                        setPollResumeNonce((n) => n + 1);
+                      }}
+                    >
+                      Retry Monitoring
+                    </Button>
+                    <Link to="/login">
+                      <Button size="sm">Sign In Again</Button>
+                    </Link>
+                  </div>
+                </div>
               )}
 
               {activeTab === "notation" &&

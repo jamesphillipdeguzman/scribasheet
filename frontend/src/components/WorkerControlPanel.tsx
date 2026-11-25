@@ -8,7 +8,7 @@ import {
   resetWorkerConnectionState,
   useWorkerConnection,
 } from "@/features/worker/useWorkerConnection";
-import { api } from "@/services/api";
+import { api, isAuthError } from "@/services/api";
 import {
   clearControllerToken,
   ControllerError,
@@ -36,12 +36,13 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
   const hasToken = Boolean(getControllerToken());
   const conn = useWorkerConnection();
 
-  const { data: railwayStatus } = useQuery({
+  const { data: railwayStatus, error: railwayError } = useQuery({
     queryKey: ["worker-status"],
     queryFn: () => api.getWorkerStatus(),
-    refetchInterval: conn.isConnecting ? 1500 : 12000,
+    refetchInterval: (query) =>
+      isAuthError(query.state.error) ? false : conn.isConnecting ? 1500 : 12000,
     refetchOnWindowFocus: false,
-    retry: 1,
+    retry: (failureCount, err) => !isAuthError(err) && failureCount < 1,
   });
 
   const {
@@ -128,27 +129,41 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
             <Cpu className="h-4 w-4 text-[#A78BFA]" />
             <h2 className="text-sm font-semibold text-[#F5F3FF]">Worker Control</h2>
           </div>
-          {railwayStatus && (
-            <span className="text-xs text-[#A1A1AA]">
-              Railway Heartbeat:{" "}
-              <span
-                className={
-                  railwayStatus.worker_online
-                    ? "text-emerald-700 font-semibold dark:text-emerald-400"
-                    : conn.isConnecting
-                      ? "text-violet-700 font-semibold dark:text-violet-300"
-                      : "text-amber-700 font-semibold dark:text-amber-300"
-                }
-              >
-                {railwayStatus.worker_online
-                  ? "Online"
-                  : conn.isConnecting
-                    ? "Connecting..."
-                    : "Offline"}
-              </span>
-              {railwayStatus.active_job_count > 0 && ` • ${railwayStatus.active_job_count} active`}
-              {railwayStatus.queue_depth > 0 && ` • ${railwayStatus.queue_depth} queued`}
+          {isAuthError(railwayError) ? (
+            <span className="text-xs font-medium text-red-700 dark:text-red-300">
+              Railway Heartbeat: Auth required
             </span>
+          ) : (
+            railwayStatus && (
+              <span className="text-xs text-[#A1A1AA]">
+                Railway Heartbeat:{" "}
+                <span
+                  className={
+                    railwayStatus.worker_online
+                      ? railwayStatus.status === "stale"
+                        ? "text-amber-700 font-semibold dark:text-amber-300"
+                        : railwayStatus.status === "busy"
+                          ? "text-indigo-700 font-semibold dark:text-indigo-300"
+                          : "text-emerald-700 font-semibold dark:text-emerald-400"
+                      : conn.isConnecting
+                        ? "text-violet-700 font-semibold dark:text-violet-300"
+                        : "text-amber-700 font-semibold dark:text-amber-300"
+                  }
+                >
+                  {railwayStatus.worker_online
+                    ? railwayStatus.status === "busy"
+                      ? "Busy"
+                      : railwayStatus.status === "stale"
+                        ? "Stale"
+                        : "Online"
+                    : conn.isConnecting
+                      ? "Connecting..."
+                      : "Offline"}
+                </span>
+                {railwayStatus.active_job_count > 0 && ` • ${railwayStatus.active_job_count} active`}
+                {railwayStatus.queue_depth > 0 && ` • ${railwayStatus.queue_depth} queued`}
+              </span>
+            )
           )}
         </div>
 

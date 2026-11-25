@@ -118,12 +118,14 @@ export interface TranscriptionJob {
 
 export interface WorkerStatus {
   worker_online: boolean;
-  status: "online" | "offline";
+  status: "online" | "busy" | "stale" | "offline";
   last_seen_seconds: number | null;
   worker_id: string | null;
+  active_job_id?: string | null;
   active_job_count: number;
   queue_depth: number;
   freshness_threshold_seconds: number;
+  busy_stale_threshold_seconds?: number;
 }
 
 export interface ScoreNote {

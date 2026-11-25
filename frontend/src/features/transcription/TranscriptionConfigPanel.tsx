@@ -353,19 +353,23 @@ export function TranscriptionConfigPanel({
       {!isScoreImport && isLeadMelody && (
         <div
           data-testid="lead-melody-vocal-status"
-          className="rounded-lg border border-violet-500/30 bg-violet-500/10 p-2.5 text-xs text-violet-200"
+          className="rounded-lg border border-violet-300 bg-violet-50 p-2.5 text-xs text-violet-900 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-200"
         >
           {(settings.audio_source_type || "auto") !== "solo_piano" ? (
             <>
-              <div className="font-medium text-[#F5F3FF]">Isolating Vocals Stem for Lead Melody</div>
-              <p className="mt-0.5 text-[11px] text-violet-200/80">
+              <div className="font-semibold text-violet-950 dark:text-violet-200">
+                Isolating Vocals Stem for Lead Melody
+              </div>
+              <p className="mt-0.5 text-[11px] font-medium text-violet-900 dark:text-violet-200/90">
                 Uses Demucs vocal isolation (vocals.wav) and monophonic vocal pitch tracking for the main singing line.
               </p>
             </>
           ) : (
             <>
-              <div className="font-medium text-[#F5F3FF]">Direct Solo / Instrumental Lead Melody</div>
-              <p className="mt-0.5 text-[11px] text-violet-200/80">
+              <div className="font-semibold text-violet-950 dark:text-violet-200">
+                Direct Solo / Instrumental Lead Melody
+              </div>
+              <p className="mt-0.5 text-[11px] font-medium text-violet-900 dark:text-violet-200/90">
                 Respecting explicit Solo Piano / Instrumental source selection without forced vocal separation.
               </p>
             </>

@@ -950,7 +950,7 @@ class RemoteWorkerAgent:
         worker_token: str,
         worker_id: str | None = None,
         poll_interval_sec: float = 4.0,
-        heartbeat_interval_sec: float = 20.0,
+        heartbeat_interval_sec: float = 10.0,
         handler: JobHandler | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
@@ -958,10 +958,18 @@ class RemoteWorkerAgent:
         self.worker_token = worker_token
         self.worker_id = worker_id or f"win-{socket.gethostname()}"
         self.poll_interval_sec = max(0.2, poll_interval_sec)
-        self.heartbeat_interval_sec = max(0.2, heartbeat_interval_sec)
+        self.heartbeat_interval_sec = max(0.05, heartbeat_interval_sec)
         self._stop_event = threading.Event()
+        self._heartbeat_wake = threading.Event()
+        self._state_lock = threading.Lock()
+        self._worker_status: str = "online"
+        self._active_job_id: str | None = None
+        self._active_lease_lost: threading.Event | None = None
         self._active_cancel_event: threading.Event | None = None
+        self._heartbeat_thread: threading.Thread | None = None
+        self._in_run_forever: bool = False
         self._client = http_client or httpx.Client(timeout=60.0)
+        self._hb_client = http_client or httpx.Client(timeout=10.0)
         self._owns_client = http_client is None
         if handler is not None:
             self.handler = handler
@@ -998,12 +1006,14 @@ class RemoteWorkerAgent:
         retry_statuses: tuple[int, ...] = (429, 502, 503, 504),
         initial_backoff_sec: float = 1.0,
         job_id: str | None = None,
+        client: httpx.Client | None = None,
     ) -> httpx.Response:
-        """POST with bounded retry (max 3 retries, 1s/2s/4s exponential backoff) for transient Railway/network errors."""
+        """POST with bounded retry (1s/2s/4s exponential backoff) for transient Railway/network errors."""
+        http_cli = client or self._client
         total_attempts = max(1, max_attempts)
         for attempt in range(1, total_attempts + 1):
             try:
-                resp = self._client.post(url, json=json_payload, headers=self._headers())
+                resp = http_cli.post(url, json=json_payload, headers=self._headers())
                 if resp.status_code in retry_statuses:
                     if attempt < total_attempts:
                         wait_sec = initial_backoff_sec * (2 ** (attempt - 1))
@@ -1054,23 +1064,64 @@ class RemoteWorkerAgent:
 
     def request_stop(self) -> None:
         self._stop_event.set()
-        if self._active_cancel_event is not None:
-            self._active_cancel_event.set()
+        self._heartbeat_wake.set()
+        with self._state_lock:
+            cancel_ev = self._active_cancel_event
+        if cancel_ev is not None:
+            cancel_ev.set()
 
-    def _heartbeat_loop(
-        self,
-        job_id: str,
-        job_done: threading.Event,
-        lease_lost: threading.Event,
-        cancel_event: threading.Event,
-    ) -> None:
-        hb_url = self._url(f"/worker/jobs/{job_id}/heartbeat")
-        while not job_done.wait(self.heartbeat_interval_sec) and not self._stop_event.is_set():
+    def _ensure_heartbeat_thread_started(self) -> bool:
+        with self._state_lock:
+            if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+                return False
+            self._heartbeat_wake.clear()
+            hb_thread = threading.Thread(
+                target=self._background_heartbeat_loop,
+                name="scriba-worker-heartbeat",
+                daemon=True,
+            )
+            self._heartbeat_thread = hb_thread
+            hb_thread.start()
+            return True
+
+    def _stop_heartbeat_thread(self, timeout: float = 3.0) -> None:
+        with self._state_lock:
+            hb_thread = self._heartbeat_thread
+        if hb_thread is None:
+            return
+        self._heartbeat_wake.set()
+        if hb_thread.is_alive() and hb_thread is not threading.current_thread():
+            hb_thread.join(timeout=timeout)
+        with self._state_lock:
+            if self._heartbeat_thread is hb_thread and not hb_thread.is_alive():
+                self._heartbeat_thread = None
+
+    def _background_heartbeat_loop(self) -> None:
+        while not self._stop_event.is_set():
+            if self._heartbeat_wake.wait(self.heartbeat_interval_sec):
+                self._heartbeat_wake.clear()
+            if self._stop_event.is_set():
+                return
+            with self._state_lock:
+                job_id = self._active_job_id
+                status_val = self._worker_status
+                lease_lost = self._active_lease_lost
+                cancel_event = self._active_cancel_event
+            if not job_id or (lease_lost is not None and lease_lost.is_set()):
+                continue
+            hb_url = self._url(f"/worker/jobs/{job_id}/heartbeat")
             try:
                 resp = self._post_with_retry(
                     hb_url,
-                    json_payload={"worker_id": self.worker_id},
+                    json_payload={
+                        "worker_id": self.worker_id,
+                        "status": status_val,
+                        "active_job_id": job_id,
+                    },
+                    max_attempts=2,
+                    initial_backoff_sec=0.5,
                     job_id=job_id,
+                    client=self._hb_client,
                 )
                 if resp.status_code in (403, 409):
                     logger.warning(
@@ -1079,15 +1130,18 @@ class RemoteWorkerAgent:
                         self.worker_id,
                         resp.status_code,
                     )
-                    lease_lost.set()
-                    cancel_event.set()
-                    return
+                    if lease_lost is not None:
+                        lease_lost.set()
+                    if cancel_event is not None:
+                        cancel_event.set()
+                    continue
                 resp.raise_for_status()
                 data = resp.json()
                 logger.info(
-                    "Heartbeat renewed for job %s (worker_id=%s, lease_expires=%s)",
+                    "Heartbeat renewed for job %s (worker_id=%s, status=%s, lease_expires=%s)",
                     job_id,
                     self.worker_id,
+                    status_val,
                     data.get("lease_expires_at"),
                 )
             except WorkerInterruptedError:
@@ -1132,19 +1186,16 @@ class RemoteWorkerAgent:
             job.get("lease_expires_at"),
         )
 
-        job_done = threading.Event()
         lease_lost = threading.Event()
         cancel_event = threading.Event()
         if self._stop_event.is_set():
             cancel_event.set()
-        self._active_cancel_event = cancel_event
-
-        hb_thread = threading.Thread(
-            target=self._heartbeat_loop,
-            args=(job_id, job_done, lease_lost, cancel_event),
-            daemon=True,
-        )
-        hb_thread.start()
+        with self._state_lock:
+            self._worker_status = "busy"
+            self._active_job_id = job_id
+            self._active_lease_lost = lease_lost
+            self._active_cancel_event = cancel_event
+        started_local_hb = self._ensure_heartbeat_thread_started()
 
         def report_progress(status_str: str, progress: int, stage: str, log_line: str | None = None) -> None:
             if self._stop_event.is_set():
@@ -1247,9 +1298,13 @@ class RemoteWorkerAgent:
                 except Exception as fail_exc:
                     logger.error("Failed to report failure for job %s: %s", job_id, type(fail_exc).__name__)
         finally:
-            job_done.set()
-            self._active_cancel_event = None
-            hb_thread.join(timeout=2.0)
+            with self._state_lock:
+                self._worker_status = "online"
+                self._active_job_id = None
+                self._active_lease_lost = None
+                self._active_cancel_event = None
+            if started_local_hb and not self._in_run_forever:
+                self._stop_heartbeat_thread(timeout=2.0)
 
         return True
 
@@ -1257,6 +1312,8 @@ class RemoteWorkerAgent:
         backoff = self.poll_interval_sec
         had_connection_error = False
         handler_name = type(self.handler).__name__
+        self._in_run_forever = True
+        self._ensure_heartbeat_thread_started()
         logger.info(
             "Starting ScribaSheet local worker agent (worker_id=%s, api=%s, handler=%s, poll=%.1fs, heartbeat=%.1fs)",
             self.worker_id,
@@ -1295,6 +1352,13 @@ class RemoteWorkerAgent:
                     logger.exception("Unexpected worker loop error: %s", exc)
                     self._stop_event.wait(wait_sec)
         finally:
+            with self._state_lock:
+                self._worker_status = "offline"
+                self._active_job_id = None
+                self._active_lease_lost = None
+                self._active_cancel_event = None
+            self._stop_heartbeat_thread(timeout=3.0)
+            self._in_run_forever = False
             try:
                 self._client.post(
                     self._url("/worker/offline"),
@@ -1305,6 +1369,7 @@ class RemoteWorkerAgent:
             except Exception:
                 pass
             if self._owns_client:
+                self._hb_client.close()
                 self._client.close()
             logger.info("Worker agent stopped cleanly (worker_id=%s).", self.worker_id)
 
@@ -1328,7 +1393,7 @@ def main() -> int:
             worker_token=token,
             worker_id=os.environ.get("WORKER_ID"),
             poll_interval_sec=float(os.environ.get("WORKER_POLL_INTERVAL_SEC", "4.0")),
-            heartbeat_interval_sec=float(os.environ.get("WORKER_HEARTBEAT_INTERVAL_SEC", "20.0")),
+            heartbeat_interval_sec=float(os.environ.get("WORKER_HEARTBEAT_INTERVAL_SEC", "10.0")),
         )
 
         def _handle_signal(signum, frame):
