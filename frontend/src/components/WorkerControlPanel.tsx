@@ -1,6 +1,19 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Check, Copy, Cpu, KeyRound, Play, RotateCw, Smartphone, Square, Terminal } from "lucide-react";
+import {
+  AlertCircle,
+  Check,
+  Copy,
+  Cpu,
+  KeyRound,
+  Play,
+  RefreshCw,
+  RotateCw,
+  ShieldAlert,
+  Smartphone,
+  Square,
+  Terminal,
+} from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 import {
@@ -12,8 +25,10 @@ import { api, isAuthError } from "@/services/api";
 import {
   clearControllerToken,
   ControllerError,
+  detectBrowserFamily,
   getControllerToken,
   isMobileDevice,
+  PNA_BLOCKED_MESSAGE,
   setControllerToken,
   workerController,
 } from "@/services/workerController";
@@ -74,6 +89,8 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
     controllerError.status === 401;
 
   const notConnected = !mobile && controllerErrorFlag && !needsPairing;
+  const controllerErrCode = controllerError instanceof ControllerError ? controllerError.code : undefined;
+  const browserFamily = detectBrowserFamily();
 
   const handlePair = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -182,16 +199,90 @@ export function WorkerControlPanel({ currentJobLabel }: WorkerControlPanelProps)
             </p>
           </div>
         ) : notConnected ? (
-          <div className="rounded-lg border border-[#27273A] bg-[#09090F] p-3 space-y-2 text-xs">
-            <div className="font-medium text-amber-800 dark:text-amber-200">Local Controller Not Connected</div>
-            <p className="text-[#A1A1AA]">
-              Start or install the lightweight Windows controller on <code className="text-[#F5F3FF]">127.0.0.1:47832</code> to control your local worker from this browser:
-            </p>
-            <div className="flex items-center gap-2 rounded bg-[#181825] px-2.5 py-1.5 font-mono text-[11px] text-[#E4E4E7] overflow-x-auto">
-              <Terminal className="h-3.5 w-3.5 shrink-0 text-[#A78BFA]" />
-              <span>powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_worker_controller.ps1</span>
+          controllerErrCode === "pna_blocked" ? (
+            <div
+              data-testid="local-controller-blocked-notice"
+              className="rounded-lg border border-amber-500/40 bg-amber-950/20 p-3 space-y-2.5 text-xs"
+            >
+              <div className="flex items-center gap-1.5 font-medium text-amber-800 dark:text-amber-200">
+                <ShieldAlert className="h-4 w-4 shrink-0 text-amber-400" />
+                <span>Local Controller Blocked by Browser Permission</span>
+              </div>
+              <p className="text-[#E4E4E7]">{PNA_BLOCKED_MESSAGE}</p>
+              <div className="rounded border border-[#27273A] bg-[#09090F] p-2.5 space-y-1 text-[11px] text-[#A1A1AA]">
+                {browserFamily === "brave" ? (
+                  <>
+                    <div className="font-medium text-[#F5F3FF]">How to allow in Brave:</div>
+                    <p>
+                      Click the Brave Shields / Lock icon beside the address bar, open <strong className="text-[#F5F3FF]">Site settings</strong>, and set <strong className="text-[#F5F3FF]">Local network access</strong> (or Private network access) to <strong className="text-[#F5F3FF]">Allow</strong>.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="font-medium text-[#F5F3FF]">How to allow in Chrome / Edge:</div>
+                    <p>
+                      Click the Tune / Lock icon beside the address bar → <strong className="text-[#F5F3FF]">Site settings</strong> → set <strong className="text-[#F5F3FF]">Local network access</strong> (or Private network / Insecure content) to <strong className="text-[#F5F3FF]">Allow</strong>.
+                    </p>
+                  </>
+                )}
+                {browserFamily !== "brave" && (
+                  <p className="text-[10px] text-[#71717A]">
+                    Using Brave? Also check Brave Shields / Site settings → Local network access → Allow.
+                  </p>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => void refetchController()}
+                >
+                  <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+                  Retry Connection
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => window.location.reload()}
+                >
+                  Reload Page
+                </Button>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="rounded-lg border border-[#27273A] bg-[#09090F] p-3 space-y-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <div className="font-medium text-amber-800 dark:text-amber-200">Local Controller Not Connected</div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-[11px]"
+                  onClick={() => void refetchController()}
+                >
+                  <RefreshCw className="h-3 w-3 mr-1" />
+                  Retry Connection
+                </Button>
+              </div>
+              <p className="text-[#A1A1AA]">
+                Start or install the lightweight Windows controller on <code className="text-[#F5F3FF]">127.0.0.1:47832</code> to control your local worker from this browser:
+              </p>
+              <div className="flex items-center gap-2 rounded bg-[#181825] px-2.5 py-1.5 font-mono text-[11px] text-[#E4E4E7] overflow-x-auto">
+                <Terminal className="h-3.5 w-3.5 shrink-0 text-[#A78BFA]" />
+                <span>powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_worker_controller.ps1</span>
+              </div>
+              {controllerErrCode === "unreachable_remote_https" && (
+                <p
+                  data-testid="local-network-access-hint"
+                  className="text-[11px] text-[#A1A1AA] border-t border-[#27273A] pt-2"
+                >
+                  If your local controller is already running on <code className="text-[#F5F3FF]">127.0.0.1:47832</code>, check the lock or tune icon beside the URL bar and allow <strong className="text-[#F5F3FF]">Local network access</strong> for this site.
+                </p>
+              )}
+            </div>
+          )
         ) : needsPairing ? (
           <form onSubmit={handlePair} className="rounded-lg border border-[#27273A] bg-[#09090F] p-3 space-y-3 text-xs">
             <div className="flex items-center gap-1.5 font-medium text-[#F5F3FF]">

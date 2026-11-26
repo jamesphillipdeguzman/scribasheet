@@ -309,3 +309,91 @@ def test_controller_refuses_pid_reuse_and_reports_permission_errors(tmp_path, mo
     ok2, msg2 = mgr._terminate_external_pid(88888)
     assert ok2 is False
     assert "Permission denied" in msg2
+
+
+def test_controller_cors_pna_headers_across_endpoints_and_errors(tmp_path):
+    token = "test-pna-token"
+    mgr = WorkerProcessManager(
+        repo_root=tmp_path,
+        lock_name=f"Local\\ScribaSheetPna_{uuid.uuid4().hex}",
+        log_file=tmp_path / "worker.log",
+    )
+    server = create_controller_server(
+        host="127.0.0.1",
+        port=0,
+        manager=mgr,
+        pairing_token=token,
+    )
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{port}"
+    allowed_origins = [
+        "https://scribasheet.vercel.app",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+    ]
+    try:
+        for origin in allowed_origins:
+            # Preflight across /health, /status, /worker/start, and /start alias
+            for path, req_method in [
+                ("/health", "GET"),
+                ("/status", "GET"),
+                ("/worker/start", "POST"),
+                ("/start", "POST"),
+            ]:
+                r_opt = httpx.options(
+                    f"{base_url}{path}",
+                    headers={
+                        "Origin": origin,
+                        "Access-Control-Request-Method": req_method,
+                        "Access-Control-Request-Headers": "Content-Type, X-Controller-Token, X-Requested-With",
+                        "Access-Control-Request-Private-Network": "true",
+                    },
+                )
+                assert r_opt.status_code == 204
+                assert r_opt.headers.get("Access-Control-Allow-Origin") == origin
+                assert r_opt.headers.get("Access-Control-Allow-Private-Network") == "true"
+                assert "X-Controller-Token" in r_opt.headers.get("Access-Control-Allow-Headers", "")
+                vary = r_opt.headers.get("Vary", "")
+                assert "Origin" in vary
+                assert "Access-Control-Request-Private-Network" in vary
+
+            # Actual GET /health includes CORS + PNA headers and query normalization
+            r_health = httpx.get(f"{base_url}/health?t=1", headers={"Origin": origin})
+            assert r_health.status_code == 200
+            assert r_health.headers.get("Access-Control-Allow-Origin") == origin
+            assert r_health.headers.get("Access-Control-Allow-Private-Network") == "true"
+            assert "Origin" in r_health.headers.get("Vary", "")
+
+            # Error responses (401 on /status, 404 on unknown) still return validated CORS + PNA headers
+            r_401 = httpx.get(f"{base_url}/status", headers={"Origin": origin})
+            assert r_401.status_code == 401
+            assert r_401.headers.get("Access-Control-Allow-Origin") == origin
+            assert r_401.headers.get("Access-Control-Allow-Private-Network") == "true"
+
+            r_404 = httpx.get(f"{base_url}/does-not-exist", headers={"Origin": origin})
+            assert r_404.status_code == 404
+            assert r_404.headers.get("Access-Control-Allow-Origin") == origin
+            assert r_404.headers.get("Access-Control-Allow-Private-Network") == "true"
+
+        # Disallowed origin must be rejected and never receive ACAO / PNA allow headers or wildcard *
+        r_bad_opt = httpx.options(
+            f"{base_url}/health",
+            headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Private-Network": "true",
+            },
+        )
+        assert r_bad_opt.status_code == 403
+        assert "Access-Control-Allow-Origin" not in r_bad_opt.headers
+        assert "Access-Control-Allow-Private-Network" not in r_bad_opt.headers
+
+        r_bad_get = httpx.get(f"{base_url}/health", headers={"Origin": "https://evil.example"})
+        assert r_bad_get.status_code == 403
+        assert "Access-Control-Allow-Origin" not in r_bad_get.headers
+        assert "Access-Control-Allow-Private-Network" not in r_bad_get.headers
+    finally:
+        server.shutdown()
+        server.server_close()

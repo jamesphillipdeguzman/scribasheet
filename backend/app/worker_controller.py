@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.worker_lock import WorkerSingleInstanceLock
 
@@ -44,9 +45,17 @@ DEFAULT_ALLOWED_ORIGINS = {
     "http://127.0.0.1:5173",
     "http://localhost:4173",
     "http://127.0.0.1:4173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
     "https://scribasheet.vercel.app",
 }
 VERCEL_PREVIEW_ORIGIN_RE = re.compile(r"^https://scribasheet(-[a-z0-9-]+)?\.vercel\.app$")
+ALLOWED_METHODS = "GET, POST, OPTIONS"
+ALLOWED_HEADERS = "Content-Type, X-Controller-Token, X-Requested-With"
+VARY_HEADER = (
+    "Origin, Access-Control-Request-Method, "
+    "Access-Control-Request-Headers, Access-Control-Request-Private-Network"
+)
 SECRET_REDACT_RE = re.compile(r"(WORKER_API_TOKEN|Bearer\s+[A-Za-z0-9._-]+|X-Controller-Token:\s*\S+)", re.IGNORECASE)
 
 
@@ -507,6 +516,19 @@ def create_controller_server(
         def log_message(self, format: str, *args: Any) -> None:
             logger.info("Controller HTTP: " + format, *args)
 
+        def _normalized_path(self) -> str:
+            return urlsplit(self.path).path.rstrip("/") or "/"
+
+        def _send_cors_headers(self, origin: str | None, *, is_preflight: bool = False) -> None:
+            self.send_header("Vary", VARY_HEADER)
+            if origin and is_origin_allowed(origin, extra_origins):
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Access-Control-Allow-Private-Network", "true")
+            if is_preflight:
+                self.send_header("Access-Control-Allow-Methods", ALLOWED_METHODS)
+                self.send_header("Access-Control-Allow-Headers", ALLOWED_HEADERS)
+                self.send_header("Access-Control-Max-Age", "600")
+
         def _send_json(self, code: int, payload: dict[str, Any], origin: str | None) -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(code)
@@ -514,9 +536,7 @@ def create_controller_server(
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Vary", "Origin")
-            if origin and is_origin_allowed(origin, extra_origins):
-                self.send_header("Access-Control-Allow-Origin", origin)
+            self._send_cors_headers(origin, is_preflight=False)
             self.end_headers()
             self.wfile.write(body)
 
@@ -553,14 +573,10 @@ def create_controller_server(
                 self._send_json(403, {"detail": "Origin not allowed."}, origin)
                 return
             self.send_response(204)
-            self.send_header("Vary", "Origin")
-            if origin:
-                self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Controller-Token, X-Requested-With")
-            if self.headers.get("Access-Control-Request-Private-Network") == "true":
-                self.send_header("Access-Control-Allow-Private-Network", "true")
-            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self._send_cors_headers(origin, is_preflight=True)
             self.end_headers()
 
         def do_GET(self) -> None:
@@ -569,21 +585,26 @@ def create_controller_server(
                 self._send_json(403, {"detail": "Origin not allowed."}, origin)
                 return
 
-            if self.path == "/health":
-                self._send_json(
-                    200,
-                    {"controller_online": True, "requires_pairing": True, "host": host},
-                    origin,
-                )
-                return
-
-            if self.path == "/status":
-                if not self._require_auth(origin, require_csrf=False):
+            path = self._normalized_path()
+            try:
+                if path == "/health":
+                    self._send_json(
+                        200,
+                        {"controller_online": True, "requires_pairing": True, "host": host},
+                        origin,
+                    )
                     return
-                self._send_json(200, mgr.get_status(), origin)
-                return
 
-            self._send_json(404, {"detail": "Not found."}, origin)
+                if path == "/status":
+                    if not self._require_auth(origin, require_csrf=False):
+                        return
+                    self._send_json(200, mgr.get_status(), origin)
+                    return
+
+                self._send_json(404, {"detail": "Not found."}, origin)
+            except Exception:
+                logger.exception("Unhandled error handling GET %s", path)
+                self._send_json(500, {"detail": "Internal controller error."}, origin)
 
         def do_POST(self) -> None:
             ok, origin = self._validate_origin_if_present()
@@ -594,22 +615,27 @@ def create_controller_server(
             if not self._require_auth(origin, require_csrf=True):
                 return
 
-            if self.path == "/worker/start":
-                started, message, status_data = mgr.start()
-                self._send_json(200 if started else 409, {"ok": started, "message": message, **status_data}, origin)
-                return
+            path = self._normalized_path()
+            try:
+                if path in ("/worker/start", "/start"):
+                    started, message, status_data = mgr.start()
+                    self._send_json(200 if started else 409, {"ok": started, "message": message, **status_data}, origin)
+                    return
 
-            if self.path == "/worker/stop":
-                stopped, message, status_data = mgr.stop()
-                self._send_json(200 if stopped else 409, {"ok": stopped, "message": message, **status_data}, origin)
-                return
+                if path in ("/worker/stop", "/stop"):
+                    stopped, message, status_data = mgr.stop()
+                    self._send_json(200 if stopped else 409, {"ok": stopped, "message": message, **status_data}, origin)
+                    return
 
-            if self.path == "/worker/restart":
-                restarted, message, status_data = mgr.restart()
-                self._send_json(200 if restarted else 409, {"ok": restarted, "message": message, **status_data}, origin)
-                return
+                if path in ("/worker/restart", "/restart"):
+                    restarted, message, status_data = mgr.restart()
+                    self._send_json(200 if restarted else 409, {"ok": restarted, "message": message, **status_data}, origin)
+                    return
 
-            self._send_json(404, {"detail": "Not found."}, origin)
+                self._send_json(404, {"detail": "Not found."}, origin)
+            except Exception:
+                logger.exception("Unhandled error handling POST %s", path)
+                self._send_json(500, {"detail": "Internal controller error."}, origin)
 
     server = ThreadingHTTPServer((host, port), ControllerHandler)
     server.daemon_threads = True
