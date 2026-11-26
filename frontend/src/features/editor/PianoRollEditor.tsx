@@ -34,6 +34,8 @@ import {
 } from "@/features/editor/midiRecordingUtils";
 import { type MidiConnectionStatus, useWebMidi } from "@/features/editor/useWebMidi";
 import {
+  createLiveMidiPitchStore,
+  type LiveMidiPitchStore,
   type PlaybackActivePitch,
   VirtualPianoKeyboard,
 } from "@/features/editor/VirtualPianoKeyboard";
@@ -190,7 +192,11 @@ export function PianoRollEditor({
     );
     return pianoTrack ? pianoTrack.index : 0;
   });
-  const [activeMidiPitches, setActiveMidiPitches] = useState<Set<number>>(() => new Set());
+  const liveMidiStoreRef = useRef<LiveMidiPitchStore | null>(null);
+  if (!liveMidiStoreRef.current) {
+    liveMidiStoreRef.current = createLiveMidiPitchStore();
+  }
+  const liveMidiStore = liveMidiStoreRef.current;
   const [recordPhase, setRecordPhase] = useState<RecordPhase>("idle");
   const [recordStatusNote, setRecordStatusNote] = useState<string | null>(null);
   const [recordElapsedSec, setRecordElapsedSec] = useState(0);
@@ -275,6 +281,29 @@ export function PianoRollEditor({
   const totalWidth = Math.max(640, Math.ceil(totalDur * pxPerSec));
   const totalHeight = (MAX_PITCH - MIN_PITCH + 1) * ROW_H;
   const gridStepSec = getGridStepSec(tempoBpm, snapMode);
+
+  const subdivisionGridLines = useMemo(() => {
+    const stepSec = 60 / Math.max(20, tempoBpm) / 4;
+    const count = Math.ceil(totalDur / stepSec);
+    return Array.from({ length: count }).map((_, sIdx) => {
+      const x = sIdx * stepSec * pxPerSec;
+      const isBar = sIdx % 16 === 0;
+      const isBeat = sIdx % 4 === 0;
+      return (
+        <div
+          key={sIdx}
+          style={{ left: x }}
+          className={`absolute top-0 bottom-0 pointer-events-none ${
+            isBar
+              ? "w-[1.5px] bg-[rgba(15,23,42,0.28)] dark:bg-[#2E2E45]"
+              : isBeat
+                ? "w-px bg-[rgba(15,23,42,0.14)] dark:bg-[#181825]"
+                : "w-px bg-[rgba(15,23,42,0.06)] dark:bg-[#181825]/40"
+          }`}
+        />
+      );
+    });
+  }, [totalDur, tempoBpm, pxPerSec]);
 
   const snap = (sec: number) => quantizeSeconds(sec, gridStepSec);
 
@@ -413,15 +442,11 @@ export function PianoRollEditor({
 
   const handlePitchNoteOn = useCallback(
     (pitchMidi: number, velocity = 90) => {
-      setActiveMidiPitches((prev) => {
-        const next = new Set(prev);
-        next.add(pitchMidi);
-        return next;
-      });
-
       if (monitorRef.current) {
         midiSynth.startSustainedNote(pitchMidi, velocity, 0.7);
       }
+
+      liveMidiStore.noteOn(pitchMidi);
 
       if (inputModeRef.current === "record") {
         if (recordPhaseRef.current === "recording") {
@@ -449,38 +474,52 @@ export function PianoRollEditor({
         }
       }
     },
-    [onChangeNotes],
+    [liveMidiStore, onChangeNotes],
   );
 
-  const handlePitchNoteOff = useCallback((pitchMidi: number) => {
-    setActiveMidiPitches((prev) => {
-      if (!prev.has(pitchMidi)) return prev;
-      const next = new Set(prev);
-      next.delete(pitchMidi);
-      return next;
-    });
+  const handlePitchNoteOff = useCallback(
+    (pitchMidi: number) => {
+      midiSynth.stopSustainedNote(pitchMidi);
+      liveMidiStore.noteOff(pitchMidi);
 
-    midiSynth.stopSustainedNote(pitchMidi);
-
-    if (inputModeRef.current === "record" && recordPhaseRef.current === "recording") {
-      const active = openRecordedNotesRef.current.get(pitchMidi);
-      if (active) {
-        openRecordedNotesRef.current.delete(pitchMidi);
-        const elapsed = Math.max(0, (performance.now() - recordAnchorPerfMsRef.current) / 1000);
-        const offsetSec = Math.max(active.onsetSec + 0.06, recordStartSongSecRef.current + elapsed);
-        finishedRecordedNotesRef.current.push({
-          pitchMidi,
-          velocity: active.velocity,
-          onsetSec: active.onsetSec,
-          offsetSec,
-        });
+      if (inputModeRef.current === "record" && recordPhaseRef.current === "recording") {
+        const active = openRecordedNotesRef.current.get(pitchMidi);
+        if (active) {
+          openRecordedNotesRef.current.delete(pitchMidi);
+          const elapsed = Math.max(0, (performance.now() - recordAnchorPerfMsRef.current) / 1000);
+          const offsetSec = Math.max(active.onsetSec + 0.06, recordStartSongSecRef.current + elapsed);
+          finishedRecordedNotesRef.current.push({
+            pitchMidi,
+            velocity: active.velocity,
+            onsetSec: active.onsetSec,
+            offsetSec,
+          });
+        }
       }
+    },
+    [liveMidiStore],
+  );
+
+  const handleControlChange = useCallback((controller: number, value: number) => {
+    if (controller === 64 && monitorRef.current) {
+      midiSynth.setSustainPedal?.(value >= 64);
     }
   }, []);
+
+  const handleMidiDisconnect = useCallback(() => {
+    if (typeof midiSynth.stopAllMonitorNotes === "function") {
+      midiSynth.stopAllMonitorNotes();
+    } else {
+      midiSynth.stopAllSustainedNotes?.();
+    }
+    liveMidiStore.clear();
+  }, [liveMidiStore]);
 
   const webMidi = useWebMidi({
     onNoteOn: handlePitchNoteOn,
     onNoteOff: handlePitchNoteOff,
+    onControlChange: handleControlChange,
+    onDisconnect: handleMidiDisconnect,
   });
 
   const handleMouseMove = (e: React.MouseEvent) => {
@@ -813,25 +852,7 @@ export function PianoRollEditor({
           })}
 
           {/* Measure, Beat & 1/16 Subdivision Vertical Lines */}
-          {Array.from({ length: Math.ceil(totalDur / ((60 / Math.max(20, tempoBpm)) / 4)) }).map((_, sIdx) => {
-            const stepSec = 60 / Math.max(20, tempoBpm) / 4;
-            const x = sIdx * stepSec * pxPerSec;
-            const isBar = sIdx % 16 === 0;
-            const isBeat = sIdx % 4 === 0;
-            return (
-              <div
-                key={sIdx}
-                style={{ left: x }}
-                className={`absolute top-0 bottom-0 pointer-events-none ${
-                  isBar
-                    ? "w-[1.5px] bg-[rgba(15,23,42,0.28)] dark:bg-[#2E2E45]"
-                    : isBeat
-                      ? "w-px bg-[rgba(15,23,42,0.14)] dark:bg-[#181825]"
-                      : "w-px bg-[rgba(15,23,42,0.06)] dark:bg-[#181825]/40"
-                }`}
-              />
-            );
-          })}
+          {subdivisionGridLines}
 
           {/* Note Blocks */}
           {notes.map((n) => {
@@ -923,7 +944,7 @@ export function PianoRollEditor({
           timeSignature={timeSignature}
           playheadSec={playheadSec}
           isPlaying={isPlaying}
-          activeMidiPitches={activeMidiPitches}
+          activeMidiPitchesStore={liveMidiStore}
           minPitch={21}
           maxPitch={108}
           keyboardBodyRef={keyboardBodyRef}
@@ -969,7 +990,20 @@ export function PianoRollEditor({
             <Button
               size="sm"
               variant={webMidi.status === "connected" ? "secondary" : "outline"}
-              onClick={webMidi.status === "connected" ? webMidi.disconnect : webMidi.connect}
+              onClick={() => {
+                if (webMidi.status === "connected") {
+                  if (typeof midiSynth.stopAllMonitorNotes === "function") {
+                    midiSynth.stopAllMonitorNotes();
+                  } else {
+                    midiSynth.stopAllSustainedNotes?.();
+                  }
+                  liveMidiStore.clear();
+                  webMidi.disconnect();
+                } else {
+                  void midiSynth.prepareLiveMidi?.();
+                  void webMidi.connect();
+                }
+              }}
             >
               <Cable className="h-3.5 w-3.5" />
               {webMidi.status === "connected" ? "Disconnect MIDI" : "Connect MIDI Device"}
@@ -1036,7 +1070,19 @@ export function PianoRollEditor({
 
             <button
               type="button"
-              onClick={() => setMonitorEnabled((v) => !v)}
+              onClick={() => {
+                setMonitorEnabled((prev) => {
+                  const next = !prev;
+                  if (next) {
+                    void midiSynth.prepareLiveMidi?.();
+                  } else if (typeof midiSynth.stopAllMonitorNotes === "function") {
+                    midiSynth.stopAllMonitorNotes();
+                  } else {
+                    midiSynth.stopAllSustainedNotes?.();
+                  }
+                  return next;
+                });
+              }}
               aria-pressed={monitorEnabled}
               title="Toggle local MIDI audio monitoring"
               className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors ${
@@ -1149,7 +1195,7 @@ export function PianoRollEditor({
           minPitch={21}
           maxPitch={108}
           activePlaybackNotes={activePlaybackNotes}
-          activeMidiPitches={activeMidiPitches}
+          activeMidiPitchesStore={liveMidiStore}
           rePitchArmed={rePitchArmed}
           isFocusMode={isFocusMode}
           keyboardBodyRef={keyboardBodyRef}

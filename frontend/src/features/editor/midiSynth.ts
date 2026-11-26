@@ -64,6 +64,7 @@ export class MidiSynthesizer {
   private dryGain: GainNode | null = null;
   private wetGain: GainNode | null = null;
   private masterGainBus: GainNode | null = null;
+  private liveGain: GainNode | null = null;
   private compressor: DynamicsCompressorNode | null = null;
   private convolver: ConvolverNode | null = null;
   private pianoSampler: SplendidGrandPiano | null = null;
@@ -76,6 +77,11 @@ export class MidiSynthesizer {
   >();
   private activeOscs: Set<{ stop: () => void }> = new Set();
   private sustainedVoices: Map<number, { release: () => void }> = new Map();
+  private wakeScheduledForCtx = new WeakSet<AudioContext>();
+  private sustainPedalDown = false;
+  private pedalDeferredNotes = new Set<number>();
+  private lastLiveScheduleMs: number | null = null;
+  private lastAudioContextLatencyHint: string | null = null;
   private rafId: number | null = null;
   private isPlaying = false;
   private startPerfMs = 0;
@@ -158,6 +164,44 @@ export class MidiSynthesizer {
   private getOutputNode(ctx: AudioContext): AudioNode {
     this.setupOutputBus(ctx);
     return this.dryGain || ctx.destination;
+  }
+
+  private getLiveOutputNode(ctx: AudioContext): AudioNode {
+    if (!this.liveGain) {
+      const gain = ctx.createGain();
+      gain.gain.value = 1.0;
+      gain.connect(ctx.destination);
+      this.liveGain = gain;
+    }
+    return this.liveGain;
+  }
+
+  private createInteractiveAudioContext(AudioCtx: typeof AudioContext): AudioContext {
+    try {
+      const ctx = new AudioCtx({ latencyHint: "interactive" });
+      this.lastAudioContextLatencyHint = "interactive";
+      return ctx;
+    } catch {
+      this.lastAudioContextLatencyHint = "default";
+      return new AudioCtx();
+    }
+  }
+
+  private wakeAudioHardware(ctx: AudioContext) {
+    if (this.wakeScheduledForCtx.has(ctx)) return;
+    this.wakeScheduledForCtx.add(ctx);
+    if (typeof ctx.createBuffer !== "function" || typeof ctx.createBufferSource !== "function") {
+      return;
+    }
+    try {
+      const buf = ctx.createBuffer(1, 1, ctx.sampleRate || 48000);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(this.getLiveOutputNode(ctx));
+      src.start(ctx.currentTime);
+    } catch {
+      // Ignore silent wake errors in restricted or mocked environments
+    }
   }
 
   private connectWithReverb(ctx: AudioContext, node: AudioNode) {
@@ -297,7 +341,7 @@ export class MidiSynthesizer {
   private ensureContext(): AudioContext {
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      this.ctx = new AudioCtx();
+      this.ctx = this.createInteractiveAudioContext(AudioCtx);
     }
     if (this.ctx.state === "suspended") {
       void this.ctx.resume().catch(() => {});
@@ -315,9 +359,33 @@ export class MidiSynthesizer {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return;
       if (!this.ctx) {
-        this.ctx = new AudioCtx();
+        this.ctx = this.createInteractiveAudioContext(AudioCtx);
       }
       this.attachGestureResumeListeners();
+      this.attachVisibilityListener();
+      this.setupOutputBus(this.ctx);
+      this.getLiveOutputNode(this.ctx);
+      this.ensureSampler(this.ctx, 0);
+    } catch {
+      // Ignore in restricted environments
+    }
+  }
+
+  public async prepareLiveMidi(): Promise<void> {
+    if (typeof window === "undefined") return;
+    try {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      if (!this.ctx) {
+        this.ctx = this.createInteractiveAudioContext(AudioCtx);
+      }
+      this.attachGestureResumeListeners();
+      this.attachVisibilityListener();
+      if (this.ctx.state === "suspended") {
+        await this.ctx.resume().catch(() => {});
+      }
+      this.getLiveOutputNode(this.ctx);
+      this.wakeAudioHardware(this.ctx);
       this.setupOutputBus(this.ctx);
       this.ensureSampler(this.ctx, 0);
     } catch {
@@ -486,15 +554,32 @@ export class MidiSynthesizer {
     osc1.onended = () => this.activeOscs.delete(handle);
   }
 
+  private releaseSustainedVoiceImmediate(pitchMidi: number) {
+    this.pedalDeferredNotes.delete(pitchMidi);
+    const voice = this.sustainedVoices.get(pitchMidi);
+    if (voice) {
+      this.sustainedVoices.delete(pitchMidi);
+      voice.release();
+    }
+  }
+
   public startSustainedNote(pitchMidi: number, velocity = 85, volume = 0.7, program = 0) {
+    const scheduleStartMs = typeof performance !== "undefined" ? performance.now() : 0;
     // Stop any previous voice on the same pitch cleanly to avoid stuck notes
-    this.stopSustainedNote(pitchMidi);
+    this.releaseSustainedVoiceImmediate(pitchMidi);
     const ctx = this.ensureContext();
     this.ensureSampler(ctx, program);
     const clampedVel = Math.max(1, Math.min(127, Math.round(velocity * Math.max(0.1, Math.min(1.4, volume)))));
 
     if (program === 0 && this.pianoSampler && this.pianoLoaded) {
-      const stopSampler = this.pianoSampler.start({ note: pitchMidi, velocity: clampedVel });
+      const stopSampler = this.pianoSampler.start({
+        note: pitchMidi,
+        velocity: clampedVel,
+        time: ctx.currentTime,
+      });
+      if (typeof performance !== "undefined") {
+        this.lastLiveScheduleMs = Math.max(0, performance.now() - scheduleStartMs);
+      }
       const handle = { stop: () => { try { stopSampler(); } catch { /* ignore */ } } };
       this.activeOscs.add(handle);
       this.sustainedVoices.set(pitchMidi, {
@@ -509,6 +594,7 @@ export class MidiSynthesizer {
     const startAt = ctx.currentTime;
     const freq = midiToFreq(pitchMidi);
     const env = computePianoEnvelopeParams(pitchMidi, 2.0, velocity, volume);
+    const liveAttackSec = 0.004;
 
     const osc1 = ctx.createOscillator();
     const osc2 = ctx.createOscillator();
@@ -536,7 +622,7 @@ export class MidiSynthesizer {
     );
 
     masterGain.gain.setValueAtTime(0.0001, startAt);
-    masterGain.gain.linearRampToValueAtTime(env.peakGain, startAt + env.attackSec);
+    masterGain.gain.linearRampToValueAtTime(env.peakGain, startAt + liveAttackSec);
     masterGain.gain.exponentialRampToValueAtTime(env.sustainGain, startAt + 0.35);
 
     osc1.connect(filter);
@@ -545,11 +631,16 @@ export class MidiSynthesizer {
     osc3.connect(harm3Gain);
     harm3Gain.connect(filter);
     filter.connect(masterGain);
-    this.connectWithReverb(ctx, masterGain);
+    // Live monitor oscillators route straight to ctx.destination, bypassing compressor lookahead & convolver
+    masterGain.connect(this.getLiveOutputNode(ctx));
 
     osc1.start(startAt);
     osc2.start(startAt);
     osc3.start(startAt);
+
+    if (typeof performance !== "undefined") {
+      this.lastLiveScheduleMs = Math.max(0, performance.now() - scheduleStartMs);
+    }
 
     let released = false;
     const stopAll = () => {
@@ -585,19 +676,49 @@ export class MidiSynthesizer {
     });
   }
 
-  public stopSustainedNote(pitchMidi: number) {
-    const voice = this.sustainedVoices.get(pitchMidi);
-    if (voice) {
-      this.sustainedVoices.delete(pitchMidi);
-      voice.release();
+  public setSustainPedal(down: boolean) {
+    this.sustainPedalDown = down;
+    if (!down && this.pedalDeferredNotes.size > 0) {
+      const toRelease = Array.from(this.pedalDeferredNotes);
+      this.pedalDeferredNotes.clear();
+      for (const pitch of toRelease) {
+        this.releaseSustainedVoiceImmediate(pitch);
+      }
     }
   }
 
+  public stopSustainedNote(pitchMidi: number) {
+    if (this.sustainPedalDown && this.sustainedVoices.has(pitchMidi)) {
+      this.pedalDeferredNotes.add(pitchMidi);
+      return;
+    }
+    this.releaseSustainedVoiceImmediate(pitchMidi);
+  }
+
   public stopAllSustainedNotes() {
+    this.sustainPedalDown = false;
+    this.pedalDeferredNotes.clear();
     for (const [pitch, voice] of this.sustainedVoices.entries()) {
       this.sustainedVoices.delete(pitch);
       voice.release();
     }
+  }
+
+  public stopAllMonitorNotes() {
+    this.stopAllSustainedNotes();
+  }
+
+  public getLiveLatencyDiagnostics() {
+    const extCtx = this.ctx as (AudioContext & { baseLatency?: number; outputLatency?: number }) | null;
+    return {
+      contextState: this.ctx?.state ?? "uninitialized",
+      sampleRate: this.ctx?.sampleRate ?? null,
+      baseLatencySec: extCtx?.baseLatency ?? null,
+      outputLatencySec: extCtx?.outputLatency ?? null,
+      latencyHint: this.lastAudioContextLatencyHint,
+      pianoLoaded: this.pianoLoaded,
+      lastLiveScheduleMs: this.lastLiveScheduleMs,
+    };
   }
 
   public playMetronomeClick(accent = false, volume = 0.7) {
@@ -784,7 +905,7 @@ export class MidiSynthesizer {
     this.stop();
     this.stopAllSustainedNotes();
     this.detachVisibilityListener();
-    for (const node of [this.dryGain, this.wetGain, this.convolver, this.masterGainBus, this.compressor]) {
+    for (const node of [this.dryGain, this.wetGain, this.convolver, this.masterGainBus, this.liveGain, this.compressor]) {
       try {
         node?.disconnect();
       } catch {
@@ -795,6 +916,7 @@ export class MidiSynthesizer {
     this.wetGain = null;
     this.convolver = null;
     this.masterGainBus = null;
+    this.liveGain = null;
     this.compressor = null;
   }
 }

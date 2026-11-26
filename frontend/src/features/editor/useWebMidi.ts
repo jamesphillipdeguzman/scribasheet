@@ -23,7 +23,10 @@ export interface WebMidiInputPort {
   name?: string | null;
   manufacturer?: string | null;
   state?: "connected" | "disconnected";
+  connection?: "open" | "closed" | "pending";
   onmidimessage: ((event: WebMidiMessageEvent) => void) | null;
+  open?: () => Promise<WebMidiInputPort | void> | void;
+  close?: () => Promise<WebMidiInputPort | void> | void;
 }
 
 export interface WebMidiAccess {
@@ -34,9 +37,16 @@ export interface WebMidiAccess {
 export interface UseWebMidiOptions {
   onNoteOn?: (pitchMidi: number, velocity: number, timeStampMs?: number) => void;
   onNoteOff?: (pitchMidi: number, timeStampMs?: number) => void;
+  onControlChange?: (controller: number, value: number, timeStampMs?: number) => void;
+  onDisconnect?: () => void;
 }
 
-export function useWebMidi({ onNoteOn, onNoteOff }: UseWebMidiOptions) {
+export function useWebMidi({
+  onNoteOn,
+  onNoteOff,
+  onControlChange,
+  onDisconnect,
+}: UseWebMidiOptions = {}) {
   const isSupported =
     typeof navigator !== "undefined" &&
     typeof (navigator as unknown as { requestMIDIAccess?: unknown }).requestMIDIAccess === "function";
@@ -50,28 +60,70 @@ export function useWebMidi({ onNoteOn, onNoteOff }: UseWebMidiOptions) {
 
   const accessRef = useRef<WebMidiAccess | null>(null);
   const activePortRef = useRef<WebMidiInputPort | null>(null);
+  const isConnectedRef = useRef(false);
+  const connectGenRef = useRef(0);
+  const selectedDeviceIdRef = useRef(selectedDeviceId);
   const onNoteOnRef = useRef(onNoteOn);
   const onNoteOffRef = useRef(onNoteOff);
+  const onControlChangeRef = useRef(onControlChange);
+  const onDisconnectRef = useRef(onDisconnect);
+  selectedDeviceIdRef.current = selectedDeviceId;
   onNoteOnRef.current = onNoteOn;
   onNoteOffRef.current = onNoteOff;
-
-  const detachActivePort = useCallback(() => {
-    if (activePortRef.current) {
-      activePortRef.current.onmidimessage = null;
-      activePortRef.current = null;
-    }
-  }, []);
+  onControlChangeRef.current = onControlChange;
+  onDisconnectRef.current = onDisconnect;
 
   const readInputs = useCallback((access: WebMidiAccess): WebMidiInputPort[] => {
     const raw = access.inputs;
     if (raw instanceof Map) {
       return Array.from(raw.values());
     }
+    if (typeof (raw as { values?: () => Iterable<WebMidiInputPort> }).values === "function") {
+      return Array.from((raw as Map<string, WebMidiInputPort>).values());
+    }
     return Array.from(raw).map(([, port]) => port);
   }, []);
 
+  const closePortSafely = useCallback((port: WebMidiInputPort | null | undefined) => {
+    if (!port) return;
+    port.onmidimessage = null;
+    if (typeof port.close === "function") {
+      try {
+        void Promise.resolve(port.close()).catch(() => {});
+      } catch {
+        // Ignore close errors in mocked or restricted environments
+      }
+    }
+  }, []);
+
+  const detachActivePort = useCallback(() => {
+    if (activePortRef.current) {
+      closePortSafely(activePortRef.current);
+      activePortRef.current = null;
+    }
+  }, [closePortSafely]);
+
+  const unbindAndCloseAllInputs = useCallback(
+    (access: WebMidiAccess | null | undefined) => {
+      const closedPorts = new Set<WebMidiInputPort>();
+      if (activePortRef.current) {
+        closedPorts.add(activePortRef.current);
+        closePortSafely(activePortRef.current);
+        activePortRef.current = null;
+      }
+      if (!access) return;
+      for (const port of readInputs(access)) {
+        if (closedPorts.has(port)) continue;
+        closedPorts.add(port);
+        closePortSafely(port);
+      }
+    },
+    [closePortSafely, readInputs],
+  );
+
   const syncDevices = useCallback(
     (access: WebMidiAccess, preferredId?: string) => {
+      if (!isConnectedRef.current) return;
       const ports = readInputs(access).filter((p) => p.state !== "disconnected");
       const list: MidiInputDeviceInfo[] = ports.map((p, idx) => ({
         id: p.id,
@@ -101,7 +153,7 @@ export function useWebMidi({ onNoteOn, onNoteOff }: UseWebMidiOptions) {
   // Attach listener strictly to the currently selected MIDI input port
   useEffect(() => {
     const access = accessRef.current;
-    if (!access || !selectedDeviceId) {
+    if (!access || !selectedDeviceId || !isConnectedRef.current) {
       detachActivePort();
       return;
     }
@@ -113,18 +165,37 @@ export function useWebMidi({ onNoteOn, onNoteOff }: UseWebMidiOptions) {
       return;
     }
 
-    detachActivePort();
+    for (const p of ports) {
+      if (p !== port) {
+        p.onmidimessage = null;
+      }
+    }
+    if (activePortRef.current && activePortRef.current !== port) {
+      detachActivePort();
+    }
+
+    if (typeof port.open === "function" && port.connection !== "open") {
+      try {
+        void Promise.resolve(port.open()).catch(() => {});
+      } catch {
+        // Ignore open errors in mocked or restricted environments
+      }
+    }
+
     port.onmidimessage = (event: WebMidiMessageEvent) => {
+      if (!isConnectedRef.current || activePortRef.current !== port) return;
       const data = event.data;
       if (!data || data.length < 2) return;
       const command = data[0] & 0xf0;
-      const pitch = data[1];
-      const velocity = data.length >= 3 ? data[2] : 0;
+      const param1 = data[1];
+      const param2 = data.length >= 3 ? data[2] : 0;
 
-      if (command === 0x90 && velocity > 0) {
-        onNoteOnRef.current?.(pitch, velocity, event.timeStamp);
-      } else if (command === 0x80 || (command === 0x90 && velocity === 0)) {
-        onNoteOffRef.current?.(pitch, event.timeStamp);
+      if (command === 0x90 && param2 > 0) {
+        onNoteOnRef.current?.(param1, param2, event.timeStamp);
+      } else if (command === 0x80 || (command === 0x90 && param2 === 0)) {
+        onNoteOffRef.current?.(param1, event.timeStamp);
+      } else if (command === 0xb0) {
+        onControlChangeRef.current?.(param1, param2, event.timeStamp);
       }
     };
     activePortRef.current = port;
@@ -137,16 +208,22 @@ export function useWebMidi({ onNoteOn, onNoteOff }: UseWebMidiOptions) {
     };
   }, [selectedDeviceId, devices, detachActivePort, readInputs]);
 
-  // Clean up on unmount
+  // Clean up and close all MIDI input ports on unmount
   useEffect(() => {
     return () => {
-      detachActivePort();
-      if (accessRef.current) {
-        accessRef.current.onstatechange = null;
+      connectGenRef.current += 1;
+      isConnectedRef.current = false;
+      const access = accessRef.current;
+      if (access) {
+        access.onstatechange = null;
+        unbindAndCloseAllInputs(access);
         accessRef.current = null;
+      } else {
+        detachActivePort();
       }
+      onDisconnectRef.current?.();
     };
-  }, [detachActivePort]);
+  }, [detachActivePort, unbindAndCloseAllInputs]);
 
   const connect = useCallback(async () => {
     if (!isSupported) {
@@ -154,36 +231,61 @@ export function useWebMidi({ onNoteOn, onNoteOff }: UseWebMidiOptions) {
       setErrorMessage("Web MIDI API is not supported in this browser.");
       return;
     }
+    const gen = ++connectGenRef.current;
+    isConnectedRef.current = true;
+    if (accessRef.current) {
+      accessRef.current.onstatechange = null;
+      unbindAndCloseAllInputs(accessRef.current);
+      accessRef.current = null;
+    }
+
     try {
       setErrorMessage(null);
       const req = (navigator as unknown as {
         requestMIDIAccess: (opts?: { sysex?: boolean }) => Promise<WebMidiAccess>;
       }).requestMIDIAccess;
       const access = await req.call(navigator, { sysex: false });
+      if (connectGenRef.current !== gen || !isConnectedRef.current) {
+        access.onstatechange = null;
+        unbindAndCloseAllInputs(access);
+        return;
+      }
       accessRef.current = access;
       access.onstatechange = () => {
-        syncDevices(access, selectedDeviceId);
+        if (!isConnectedRef.current || accessRef.current !== access) return;
+        syncDevices(access, selectedDeviceIdRef.current);
       };
-      syncDevices(access, selectedDeviceId);
+      syncDevices(access, selectedDeviceIdRef.current);
     } catch (err) {
+      if (connectGenRef.current !== gen || !isConnectedRef.current) {
+        return;
+      }
+      isConnectedRef.current = false;
       detachActivePort();
       setDevices([]);
       setSelectedDeviceId("");
       setStatus("permission_denied");
       setErrorMessage(err instanceof Error ? err.message : "MIDI access permission was denied.");
     }
-  }, [isSupported, selectedDeviceId, syncDevices, detachActivePort]);
+  }, [isSupported, syncDevices, detachActivePort, unbindAndCloseAllInputs]);
 
   const disconnect = useCallback(() => {
-    detachActivePort();
-    if (accessRef.current) {
-      accessRef.current.onstatechange = null;
+    connectGenRef.current += 1;
+    isConnectedRef.current = false;
+    const access = accessRef.current;
+    if (access) {
+      access.onstatechange = null;
+      unbindAndCloseAllInputs(access);
       accessRef.current = null;
+    } else {
+      detachActivePort();
     }
+    onDisconnectRef.current?.();
     setDevices([]);
     setSelectedDeviceId("");
+    setErrorMessage(null);
     setStatus(isSupported ? "not_connected" : "not_supported");
-  }, [detachActivePort, isSupported]);
+  }, [detachActivePort, isSupported, unbindAndCloseAllInputs]);
 
   const selectedDevice = devices.find((d) => d.id === selectedDeviceId) || null;
 

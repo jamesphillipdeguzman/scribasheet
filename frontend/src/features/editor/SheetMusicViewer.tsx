@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import {
   ArrowDown,
@@ -139,7 +139,7 @@ const EMPTY_CHORDS: ScoreChord[] = [];
 const EMPTY_TRACKS: ScoreTrack[] = [];
 const EMPTY_MUTED: Record<string, boolean> = {};
 
-export function SheetMusicViewer({
+export const SheetMusicViewer = memo(function SheetMusicViewer({
   musicxml,
   scoreTitle,
   notes = EMPTY_NOTES,
@@ -744,7 +744,7 @@ export function SheetMusicViewer({
             const notesUnder = osmd.cursor.NotesUnderCursor() as Array<{ isRest?: () => boolean; IsRest?: boolean }>;
             if (Array.isArray(notesUnder) && notesUnder.length > 0) {
               hasSounding = notesUnder.some((n) =>
-                typeof n.isRest === "function" ? !n.isRest() : !Boolean(n.IsRest),
+                typeof n.isRest === "function" ? !n.isRest() : !n.IsRest,
               );
             }
           }
@@ -1768,4 +1768,4 @@ export function SheetMusicViewer({
       </div>
     </div>
   );
-}
+});

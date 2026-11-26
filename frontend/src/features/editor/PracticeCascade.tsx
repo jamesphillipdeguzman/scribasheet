@@ -10,8 +10,11 @@ import {
   SATB_CASCADE_COLORS,
 } from "@/features/editor/cascadeUtils";
 import { midiSynth } from "@/features/editor/midiSynth";
+import type { LiveMidiPitchStore } from "@/features/editor/VirtualPianoKeyboard";
 import { midiToNoteName } from "@/lib/utils";
 import type { ScoreNote, ScoreTrack } from "@/types/api";
+
+const EMPTY_MIDI_PITCHES = new Set<number>();
 
 interface PracticeCascadeProps {
   notes: ScoreNote[];
@@ -21,7 +24,8 @@ interface PracticeCascadeProps {
   timeSignature?: string;
   playheadSec: number;
   isPlaying?: boolean;
-  activeMidiPitches: Set<number>;
+  activeMidiPitches?: Set<number>;
+  activeMidiPitchesStore?: LiveMidiPitchStore;
   minPitch?: number;
   maxPitch?: number;
   keyboardBodyRef: React.RefObject<HTMLDivElement>;
@@ -58,7 +62,7 @@ function drawRoundedRect(
   ctx.rect(x, y, w, h);
 }
 
-export function PracticeCascade({
+export const PracticeCascade = React.memo(function PracticeCascade({
   notes,
   tracks,
   durationSeconds,
@@ -67,6 +71,7 @@ export function PracticeCascade({
   playheadSec,
   isPlaying = false,
   activeMidiPitches,
+  activeMidiPitchesStore,
   minPitch = 21,
   maxPitch = 108,
   keyboardBodyRef,
@@ -118,6 +123,7 @@ export function PracticeCascade({
     showPitchLabels,
     showBeatIndicator,
     activeMidiPitches,
+    activeMidiPitchesStore,
     keyLayout,
     satbSoloVoice,
     satbMutedVoices,
@@ -136,6 +142,7 @@ export function PracticeCascade({
     showPitchLabels,
     showBeatIndicator,
     activeMidiPitches,
+    activeMidiPitchesStore,
     keyLayout,
     satbSoloVoice,
     satbMutedVoices,
@@ -314,12 +321,14 @@ export function PracticeCascade({
           }
 
           // 4. Falling MIDI note bars
+          const liveActiveMidiPitches =
+            s.activeMidiPitches ?? s.activeMidiPitchesStore?.getSnapshot() ?? EMPTY_MIDI_PITCHES;
           const positioned = computeCascadeNotePositions(
             s.notes,
             currentSec,
             s.lookAheadSec,
             hitLineY,
-            s.activeMidiPitches,
+            liveActiveMidiPitches,
           );
 
           const activeFilter = s.satbSoloVoice || (s.localPartFilter !== "all" ? s.localPartFilter : null);
@@ -396,7 +405,7 @@ export function PracticeCascade({
           ctx.lineTo(containerWidth, hitLineY);
           ctx.stroke();
 
-          for (const pitch of s.activeMidiPitches) {
+          for (const pitch of liveActiveMidiPitches) {
             const rect = s.keyLayout.get(pitch);
             if (!rect) continue;
             ctx.save();
@@ -599,4 +608,4 @@ export function PracticeCascade({
       </div>
     </div>
   );
-}
+});

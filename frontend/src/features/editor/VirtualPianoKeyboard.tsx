@@ -1,4 +1,4 @@
-import React, { useMemo, useRef } from "react";
+import React, { useMemo, useRef, useSyncExternalStore } from "react";
 import { midiToNoteName } from "@/lib/utils";
 
 export interface PlaybackActivePitch {
@@ -6,11 +6,62 @@ export interface PlaybackActivePitch {
   trackIndex: number;
 }
 
+export interface LiveMidiPitchStore {
+  getSnapshot: () => Set<number>;
+  subscribe: (listener: () => void) => () => void;
+  noteOn: (pitchMidi: number) => void;
+  noteOff: (pitchMidi: number) => void;
+  clear: () => void;
+}
+
+export function createLiveMidiPitchStore(): LiveMidiPitchStore {
+  let active = new Set<number>();
+  const listeners = new Set<() => void>();
+  const notify = () => {
+    for (const listener of listeners) {
+      listener();
+    }
+  };
+  return {
+    getSnapshot: () => active,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    noteOn: (pitchMidi) => {
+      if (active.has(pitchMidi)) return;
+      const next = new Set(active);
+      next.add(pitchMidi);
+      active = next;
+      notify();
+    },
+    noteOff: (pitchMidi) => {
+      if (!active.has(pitchMidi)) return;
+      const next = new Set(active);
+      next.delete(pitchMidi);
+      active = next;
+      notify();
+    },
+    clear: () => {
+      if (active.size === 0) return;
+      active = new Set();
+      notify();
+    },
+  };
+}
+
+const EMPTY_MIDI_SET = new Set<number>();
+const SUBSCRIBE_NOOP = () => () => {};
+const GET_EMPTY_MIDI_SET = () => EMPTY_MIDI_SET;
+
 interface VirtualPianoKeyboardProps {
   minPitch?: number;
   maxPitch?: number;
   activePlaybackNotes: PlaybackActivePitch[];
-  activeMidiPitches: Set<number>;
+  activeMidiPitches?: Set<number>;
+  activeMidiPitchesStore?: LiveMidiPitchStore;
   rePitchArmed?: boolean;
   isFocusMode?: boolean;
   keyboardBodyRef?: React.RefObject<HTMLDivElement>;
@@ -20,17 +71,24 @@ interface VirtualPianoKeyboardProps {
 
 const BLACK_PCS = new Set([1, 3, 6, 8, 10]);
 
-export function VirtualPianoKeyboard({
+export const VirtualPianoKeyboard = React.memo(function VirtualPianoKeyboard({
   minPitch = 21, // A0 (88-key lower bound)
   maxPitch = 108, // C8 (88-key upper bound)
   activePlaybackNotes,
   activeMidiPitches,
+  activeMidiPitchesStore,
   rePitchArmed = false,
   isFocusMode = false,
   keyboardBodyRef,
   onKeyDown,
   onKeyUp,
 }: VirtualPianoKeyboardProps) {
+  const storeActivePitches = useSyncExternalStore(
+    activeMidiPitchesStore ? activeMidiPitchesStore.subscribe : SUBSCRIBE_NOOP,
+    activeMidiPitchesStore ? activeMidiPitchesStore.getSnapshot : GET_EMPTY_MIDI_SET,
+    GET_EMPTY_MIDI_SET,
+  );
+  const resolvedActiveMidiPitches = activeMidiPitches ?? storeActivePitches;
   const pressedMouseKeysRef = useRef<Set<number>>(new Set());
 
   const { whiteKeys, blackKeys } = useMemo(() => {
@@ -98,7 +156,7 @@ export function VirtualPianoKeyboard({
         <div className="flex h-full w-full">
           {whiteKeys.map((pitch) => {
             const isC = pitch % 12 === 0;
-            const isMidiActive = activeMidiPitches.has(pitch);
+            const isMidiActive = resolvedActiveMidiPitches.has(pitch);
             const playbackTrack = playbackTrackByPitch.get(pitch);
             const isVocalPlaying = playbackTrack === 0;
             const isAccompPlaying = playbackTrack !== undefined && playbackTrack > 0;
@@ -143,7 +201,7 @@ export function VirtualPianoKeyboard({
 
         {/* Black Keys */}
         {blackKeys.map(({ pitch, leftPercent }) => {
-          const isMidiActive = activeMidiPitches.has(pitch);
+          const isMidiActive = resolvedActiveMidiPitches.has(pitch);
           const playbackTrack = playbackTrackByPitch.get(pitch);
           const isVocalPlaying = playbackTrack === 0;
           const isAccompPlaying = playbackTrack !== undefined && playbackTrack > 0;
@@ -183,4 +241,4 @@ export function VirtualPianoKeyboard({
       </div>
     </div>
   );
-}
+});
