@@ -11,6 +11,7 @@ import type { ScoreChord, ScoreNote, ScoreTrack } from "@/types/api";
 
 export interface AlphaTabSheetViewerProps {
   musicxml: string | null;
+  scoreTitle?: string | null;
   notes?: ScoreNote[];
   chords?: ScoreChord[];
   showChordSymbols?: boolean;
@@ -70,6 +71,7 @@ export function resolveAlphaTabTrackRole(
 
 export function AlphaTabSheetViewer({
   musicxml,
+  scoreTitle,
   notes = EMPTY_NOTES,
   chords = EMPTY_CHORDS,
   showChordSymbols = true,
@@ -265,6 +267,13 @@ export function AlphaTabSheetViewer({
 
       unsubs.push(
         api.scoreLoaded.on((score) => {
+          if (
+            score.subTitle &&
+            score.title &&
+            score.subTitle.trim().toLowerCase() === score.title.trim().toLowerCase()
+          ) {
+            score.subTitle = "";
+          }
           loadedTracksRef.current = score.tracks || [];
           if (score.tracks && score.tracks.length > 0) {
             api.renderTracks(score.tracks);
@@ -467,7 +476,7 @@ export function AlphaTabSheetViewer({
 
   // Load and normalize MusicXML / MXL / URL payloads into AlphaTab
   useEffect(() => {
-    const normalized = normalizeScorePayload(musicxml, effectiveShowChords);
+    const normalized = normalizeScorePayload(musicxml, effectiveShowChords, { scoreTitle });
     if (normalized.kind === "empty") {
       clearSafetyTimer();
       lastLoadedXmlRef.current = null;
@@ -506,7 +515,7 @@ export function AlphaTabSheetViewer({
             throw new Error(`Failed to retrieve sheet music (${resp.status}).`);
           }
           const fetchedText = await resp.text();
-          const reNormalized = normalizeScorePayload(fetchedText, effectiveShowChords);
+          const reNormalized = normalizeScorePayload(fetchedText, effectiveShowChords, { scoreTitle });
           if (reNormalized.kind !== "xml") {
             throw new Error("Retrieved score file is not valid MusicXML.");
           }
@@ -547,7 +556,7 @@ export function AlphaTabSheetViewer({
     return () => {
       cancelled = true;
     };
-  }, [musicxml, effectiveShowChords, chords, notes, tempoBpm, clearSafetyTimer, loadXmlIntoApi]);
+  }, [musicxml, scoreTitle, effectiveShowChords, chords, notes, tempoBpm, clearSafetyTimer, loadXmlIntoApi]);
 
   // Sync AlphaTab cursor when paused/seeking/stopped
   useEffect(() => {

@@ -23,6 +23,7 @@ from app.models import (
     User,
     WorkerNode,
 )
+from app.notation.generator import apply_scribasheet_musicxml_branding, resolve_project_score_title
 from app.schemas.common import serialize_utc_z
 from app.schemas.score import ScoreData
 from app.storage.service import storage_service
@@ -418,6 +419,7 @@ def claim_next_job(
         "job": {
             "id": job.id,
             "project_id": job.project_id,
+            "project_title": project.title if project else None,
             "engine": job.engine,
             "settings": job.settings_json,
             "attempt_count": job.attempt_count,
@@ -546,6 +548,7 @@ def complete_job(
             )
 
     project = db.query(Project).filter(Project.id == job.project_id).first()
+    resolved_score_title = resolve_project_score_title(project.title if project else None)
 
     # Persist inline MIDI / MusicXML payloads when STORAGE_BACKEND=local (no direct R2 PUT)
     midi_size_bytes = 0
@@ -560,10 +563,29 @@ def complete_job(
 
     xml_size_bytes = 0
     if not xml_key and payload.musicxml_content and not is_simulated:
-        xml_bytes = payload.musicxml_content.encode("utf-8")
+        branded_xml = apply_scribasheet_musicxml_branding(
+            payload.musicxml_content,
+            title=resolved_score_title,
+            force_title=True,
+        )
+        xml_bytes = branded_xml.encode("utf-8")
         xml_key = storage_service.build_key(job.user_id, job.project_id, "musicxml", "score.musicxml")
         storage_service.save_bytes(xml_key, xml_bytes, content_type="application/vnd.recordare.musicxml+xml")
         xml_size_bytes = len(xml_bytes)
+    elif xml_key and not is_simulated:
+        try:
+            raw_xml = storage_service.read_bytes(xml_key).decode("utf-8-sig", errors="replace")
+            branded_xml = apply_scribasheet_musicxml_branding(
+                raw_xml,
+                title=resolved_score_title,
+                force_title=True,
+            )
+            if branded_xml != raw_xml:
+                xml_bytes = branded_xml.encode("utf-8")
+                storage_service.save_bytes(xml_key, xml_bytes, content_type="application/vnd.recordare.musicxml+xml")
+                xml_size_bytes = len(xml_bytes)
+        except FileNotFoundError:
+            pass
 
     midi_asset_id: str | None = None
     if midi_key:
@@ -574,7 +596,7 @@ def complete_job(
             user_id=job.user_id,
             asset_type="midi",
             storage_path=midi_key,
-            original_filename=f"{project.title if project else 'transcription'}.mid",
+            original_filename=f"{resolved_score_title}.mid",
             mime_type="audio/midi",
             size_bytes=midi_size_bytes,
             duration_seconds=payload.duration_seconds,
@@ -592,7 +614,7 @@ def complete_job(
             user_id=job.user_id,
             asset_type="musicxml",
             storage_path=xml_key,
-            original_filename=f"{project.title if project else 'score'}.musicxml",
+            original_filename=f"{resolved_score_title}.musicxml",
             mime_type="application/vnd.recordare.musicxml+xml",
             size_bytes=xml_size_bytes,
             duration_seconds=payload.duration_seconds,
@@ -652,6 +674,7 @@ def complete_job(
             persisted_score_version = existing_score.version if existing_score else None
     elif not is_simulated and validated_score is not None:
         score_dict = validated_score.model_dump()
+        score_dict["title"] = resolved_score_title
         new_analysis = dict(score_dict.get("analysis") or {})
         new_analysis["is_active"] = True
         new_analysis["job_id"] = job.id
@@ -698,7 +721,7 @@ def complete_job(
                 user_id=job.user_id,
                 asset_type="pdf",
                 storage_path=pdf_key,
-                original_filename=f"{project.title if project else 'score'}.pdf",
+                original_filename=f"{resolved_score_title}.pdf",
                 mime_type="application/pdf",
                 size_bytes=len(pdf_bytes),
                 duration_seconds=payload.duration_seconds,

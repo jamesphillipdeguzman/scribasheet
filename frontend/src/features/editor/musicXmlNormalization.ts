@@ -1,3 +1,5 @@
+import { resolveDisplayScoreTitle } from "@/lib/utils";
+
 export type NormalizedScorePayload =
   | { kind: "empty" }
   | { kind: "url"; url: string }
@@ -478,6 +480,107 @@ export function cleanDisplayScoreTitle(rawTitle: string): string {
   return rawTitle.trim().replace(TITLE_EXT_RE, "").trim();
 }
 
+function applyScoreTitleToDocument(
+  doc: Document,
+  scoreTitle?: string | null,
+  options?: { deduplicateMovementTitle?: boolean },
+): void {
+  const root = doc.documentElement;
+  if (!root) return;
+
+  const workTitleExisting = doc.getElementsByTagName("work-title")[0]?.textContent?.trim() || "";
+  const movTitleExisting = doc.getElementsByTagName("movement-title")[0]?.textContent?.trim() || "";
+  const hasExplicitTitle = scoreTitle !== undefined && scoreTitle !== null;
+  if (!hasExplicitTitle && !workTitleExisting && !movTitleExisting) {
+    return;
+  }
+
+  const resolvedTitle = resolveDisplayScoreTitle(
+    hasExplicitTitle ? scoreTitle : workTitleExisting || movTitleExisting,
+  );
+
+  let workEl = Array.from(root.children).find((c) => c.tagName.toLowerCase() === "work");
+  if (!workEl) {
+    workEl = doc.createElement("work");
+    root.insertBefore(workEl, root.firstChild);
+  }
+  let workTitleEl = Array.from(workEl.children).find((c) => c.tagName.toLowerCase() === "work-title");
+  if (!workTitleEl) {
+    workTitleEl = doc.createElement("work-title");
+    workEl.appendChild(workTitleEl);
+  }
+  workTitleEl.textContent = resolvedTitle;
+
+  const movTitleEl = Array.from(root.children).find((c) => c.tagName.toLowerCase() === "movement-title");
+  if (options?.deduplicateMovementTitle) {
+    if (movTitleEl) {
+      const cleanedMov = resolveDisplayScoreTitle(movTitleEl.textContent || "");
+      if (hasExplicitTitle || cleanedMov.toLowerCase() === resolvedTitle.toLowerCase() || cleanedMov === "Untitled Score") {
+        movTitleEl.parentNode?.removeChild(movTitleEl);
+      } else {
+        movTitleEl.textContent = cleanDisplayScoreTitle(movTitleEl.textContent || "");
+      }
+    }
+  } else {
+    const targetMov = movTitleEl || doc.createElement("movement-title");
+    targetMov.textContent = resolvedTitle;
+    if (!movTitleEl) {
+      if (workEl.nextSibling) {
+        root.insertBefore(targetMov, workEl.nextSibling);
+      } else {
+        root.appendChild(targetMov);
+      }
+    }
+  }
+
+  for (const creditEl of Array.from(root.children).filter((c) => c.tagName.toLowerCase() === "credit")) {
+    const ctype = (creditEl.getElementsByTagName("credit-type")[0]?.textContent || "").trim().toLowerCase();
+    const cwords = Array.from(creditEl.getElementsByTagName("credit-words"))
+      .map((w) => w.textContent || "")
+      .join(" ")
+      .trim()
+      .toLowerCase();
+    if (ctype === "title") {
+      for (const cw of Array.from(creditEl.getElementsByTagName("credit-words"))) {
+        cw.textContent = resolvedTitle;
+      }
+    } else if (ctype === "subtitle" && cwords === resolvedTitle.toLowerCase()) {
+      creditEl.parentNode?.removeChild(creditEl);
+    }
+  }
+}
+
+export function applyScoreTitleToMusicXml(
+  xml: string,
+  scoreTitle?: string | null,
+  options?: { deduplicateMovementTitle?: boolean },
+): string {
+  const stripped = (xml || "").replace(/^\uFEFF/, "").trim();
+  if (!isMusicXmlDocument(stripped)) {
+    return xml;
+  }
+  const declMatch = stripped.match(XML_DECL_RE);
+  const existingDecl = declMatch ? declMatch[0].trim() : null;
+
+  if (typeof DOMParser !== "undefined" && typeof XMLSerializer !== "undefined") {
+    try {
+      const doc = new DOMParser().parseFromString(stripped, "application/xml");
+      if (!doc.querySelector("parsererror")) {
+        applyScoreTitleToDocument(doc, scoreTitle, options);
+        const serialized = new XMLSerializer().serializeToString(doc).replace(/^\uFEFF/, "").trim();
+        if (serialized.startsWith("<?xml")) {
+          return serialized;
+        }
+        const decl = existingDecl || '<?xml version="1.0" encoding="UTF-8"?>';
+        return `${decl}\n${serialized}`;
+      }
+    } catch {
+      // fall back to original string if DOMParser fails
+    }
+  }
+  return xml;
+}
+
 export function isMusicXmlDocument(text: string): boolean {
   return /<score-(?:partwise|timewise)\b/i.test(text);
 }
@@ -867,7 +970,7 @@ export function upsertArrangerCredit(doc: Document, transcribedBy?: string | nul
 export function prepareDisplayMusicXml(
   xml: string,
   showChords: boolean,
-  options?: { fallbackKeySignature?: string | null; transcribedBy?: string | null },
+  options?: { fallbackKeySignature?: string | null; transcribedBy?: string | null; scoreTitle?: string | null },
 ): string {
   const stripped = xml.replace(/^\uFEFF/, "").trim();
   if (!isMusicXmlDocument(stripped)) {
@@ -889,12 +992,7 @@ export function prepareDisplayMusicXml(
         } else {
           sanitizeSatbHarmonies(doc);
         }
-        for (const tag of ["work-title", "movement-title"]) {
-          const el = doc.getElementsByTagName(tag)[0];
-          if (el?.textContent) {
-            el.textContent = cleanDisplayScoreTitle(el.textContent);
-          }
-        }
+        applyScoreTitleToDocument(doc, options?.scoreTitle, { deduplicateMovementTitle: true });
         for (const creator of Array.from(doc.getElementsByTagName("creator"))) {
           if ((creator.textContent || "").trim().toLowerCase().startsWith("music21")) {
             creator.textContent = "ScribaSheet";
@@ -944,6 +1042,7 @@ export function prepareDisplayMusicXml(
 export function normalizeScorePayload(
   raw: string | null | undefined,
   showChords = true,
+  options?: { scoreTitle?: string | null },
 ): NormalizedScorePayload {
   if (typeof raw !== "string") {
     return { kind: "empty" };
@@ -975,6 +1074,6 @@ export function normalizeScorePayload(
   }
   return {
     kind: "xml",
-    xml: prepareDisplayMusicXml(cleaned, showChords),
+    xml: prepareDisplayMusicXml(cleaned, showChords, { scoreTitle: options?.scoreTitle }),
   };
 }

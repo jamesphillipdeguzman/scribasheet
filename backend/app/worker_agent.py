@@ -48,7 +48,7 @@ from app.notation.generator import (
     _render_pdf_from_musicxml_via_musescore,
     build_piano_vocal_score_data,
     build_score_data,
-    clean_score_title,
+    resolve_project_score_title,
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
@@ -319,16 +319,17 @@ class RealTranscriptionHandler:
                     else "Inspecting sheet music PDF pages.",
                 )
                 try:
+                    score_title = resolve_project_score_title(job.get("project_title"))
                     if is_direct_xml:
                         omr_res = process_satb_musicxml(
                             local_source,
-                            title=clean_score_title(job.get("project_title") or safe_name),
+                            title=score_title,
                             satb_mode=satb_mode,
                         )
                     else:
                         omr_res = process_satb_pdf(
                             local_source,
-                            title=clean_score_title(job.get("project_title") or safe_name),
+                            title=score_title,
                             work_dir=tmp_path / "omr",
                             satb_mode=satb_mode,
                         )
@@ -807,7 +808,7 @@ class RealTranscriptionHandler:
                     refined_notes,
                 )
                 score_data = build_piano_vocal_score_data(
-                    title=clean_score_title(job.get("project_title") or safe_name),
+                    title=resolve_project_score_title(job.get("project_title")),
                     melody_notes=arranged_notes,
                     chord_source_notes=chord_source,
                     bass_notes=bass_refined_notes or None,
@@ -826,7 +827,7 @@ class RealTranscriptionHandler:
                 )
             else:
                 score_data = build_score_data(
-                    title=clean_score_title(job.get("project_title") or safe_name),
+                    title=resolve_project_score_title(job.get("project_title")),
                     detected_notes=arranged_notes,
                     tempo_bpm=tempo_bpm,
                     tempo_estimated=tempo_est,

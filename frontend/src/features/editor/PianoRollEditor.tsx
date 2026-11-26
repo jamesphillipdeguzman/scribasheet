@@ -66,6 +66,7 @@ interface PianoRollEditorProps {
   activeBeat?: number | null;
   onActiveBeatChange?: (beat: number | null) => void;
   musicxml?: string | null;
+  scoreTitle?: string | null;
   showChordSymbols?: boolean;
   onToggleChordSymbols?: (value: boolean) => void;
   onMusicXmlChange?: (nextXml: string) => void;
@@ -127,6 +128,7 @@ export function PianoRollEditor({
   activeBeat: controlledBeat,
   onActiveBeatChange,
   musicxml = null,
+  scoreTitle,
   showChordSymbols = true,
   onToggleChordSymbols,
   onMusicXmlChange,
@@ -940,6 +942,7 @@ export function PianoRollEditor({
       ) : (
         <SheetMusicViewer
           musicxml={musicxml}
+          scoreTitle={scoreTitle}
           notes={notes}
           showChordSymbols={showChordSymbols}
           onToggleChordSymbols={onToggleChordSymbols}

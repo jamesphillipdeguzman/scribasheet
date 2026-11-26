@@ -93,6 +93,7 @@ interface RenderedMusicalEvent {
 
 interface SheetMusicViewerProps {
   musicxml: string | null;
+  scoreTitle?: string | null;
   notes?: ScoreNote[];
   chords?: ScoreChord[];
   showChordSymbols?: boolean;
@@ -140,6 +141,7 @@ const EMPTY_MUTED: Record<string, boolean> = {};
 
 export function SheetMusicViewer({
   musicxml,
+  scoreTitle,
   notes = EMPTY_NOTES,
   chords = EMPTY_CHORDS,
   showChordSymbols = true,
@@ -1006,7 +1008,7 @@ export function SheetMusicViewer({
       return;
     }
 
-    const normalized = normalizeScorePayload(musicxml, effectiveShowChords);
+    const normalized = normalizeScorePayload(musicxml, effectiveShowChords, { scoreTitle });
     if (normalized.kind === "empty") {
       disposeOsmdInstance();
       setResolvedXml(null);
@@ -1050,7 +1052,7 @@ export function SheetMusicViewer({
             throw new Error("Compressed .mxl score cannot be loaded directly in browser notation.");
           }
           const fetchedText = await resp.text();
-          const reNormalized = normalizeScorePayload(fetchedText, effectiveShowChords);
+          const reNormalized = normalizeScorePayload(fetchedText, effectiveShowChords, { scoreTitle });
           if (reNormalized.kind !== "xml") {
             throw new Error(
               reNormalized.kind === "empty"
@@ -1167,7 +1169,7 @@ export function SheetMusicViewer({
       clearNoteheadHighlights();
       clearSelectedHighlight();
     };
-  }, [engine, musicxml, zoom, effectiveShowChords, chords, notes, tempoBpm, disposeOsmdInstance]);
+  }, [engine, musicxml, scoreTitle, zoom, effectiveShowChords, chords, notes, tempoBpm, disposeOsmdInstance]);
 
   // Clean up OSMD instance and listeners on unmount
   useEffect(() => {
@@ -1355,6 +1357,7 @@ export function SheetMusicViewer({
     return (
       <AlphaTabSheetViewer
         musicxml={musicxml}
+        scoreTitle={scoreTitle}
         notes={notes}
         chords={chords}
         showChordSymbols={showChordSymbols}

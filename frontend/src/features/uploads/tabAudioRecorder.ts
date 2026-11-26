@@ -1,3 +1,5 @@
+import { buildRecordedAudioFilename } from "@/lib/utils";
+
 export const NO_AUDIO_TRACK_GUIDANCE =
   "No audio track detected. Please try again and enable Share tab audio or Share system audio in the browser prompt.";
 
@@ -166,6 +168,7 @@ export async function decodeBlobToWav(blob: Blob): Promise<Blob> {
 }
 
 export interface TabAudioCaptureCallbacks {
+  projectTitle?: string | null;
   onLevel?: (level: number) => void;
   onComplete: (file: File, info: { mimeType: string; extension: string }) => void;
   onError: (message: string) => void;
@@ -378,7 +381,8 @@ export async function startTabAudioCapture(
     const rawMime = recorder.mimeType || chunks[0]?.type || selectedMime || "audio/webm";
     const { mimeType, extension } = resolveAudioFormatFromMime(rawMime);
     const blob = new Blob(chunks, { type: mimeType });
-    const recordedFile = new File([blob], `tab-audio-${Date.now()}.${extension}`, { type: mimeType });
+    const filename = buildRecordedAudioFilename("tab", callbacks.projectTitle, extension);
+    const recordedFile = new File([blob], filename, { type: mimeType });
     callbacks.onComplete(recordedFile, { mimeType, extension });
   };
 

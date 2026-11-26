@@ -8,6 +8,7 @@ from app.audio.extraction_service import ensure_extracted_audio_asset
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob, User
+from app.notation.generator import apply_scribasheet_musicxml_branding, resolve_project_score_title
 from app.schemas.project import (
     ExtractAudioRequest,
     ExtractAudioResponse,
@@ -104,10 +105,30 @@ def update_project(
         if new_title != project.title:
             project.title = new_title
             if project.score is not None:
+                resolved_title = resolve_project_score_title(new_title)
                 updated_score = dict(project.score.score_json or {})
-                updated_score["title"] = new_title
+                updated_score["title"] = resolved_title
                 project.score.score_json = updated_score
                 project.score.version = int(project.score.version or 1) + 1
+                if project.score.musicxml_path and not project.score.musicxml_path.lower().endswith(".mxl"):
+                    try:
+                        if storage_service.exists(project.score.musicxml_path):
+                            raw_xml = storage_service.read_bytes(project.score.musicxml_path).decode(
+                                "utf-8-sig",
+                                errors="replace",
+                            )
+                            branded_xml = apply_scribasheet_musicxml_branding(
+                                raw_xml,
+                                title=resolved_title,
+                                force_title=True,
+                            )
+                            storage_service.save_bytes(
+                                project.score.musicxml_path,
+                                branded_xml.encode("utf-8"),
+                                content_type="application/vnd.recordare.musicxml+xml",
+                            )
+                    except Exception:
+                        pass
     if payload.description is not None:
         project.description = payload.description.strip()
     if payload.instrument is not None:

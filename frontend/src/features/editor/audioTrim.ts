@@ -600,6 +600,8 @@ export async function decodeAudioBufferFromUrl(
   }
 }
 
+import { slugifyProjectTitle } from "@/lib/utils";
+
 export function buildTrimmedAudioFilename(originalFilename?: string | null, projectTitle?: string | null): string {
   const name = (originalFilename || "").trim();
   const baseNoExt = name.replace(/\.[^.]+$/, "");
@@ -611,10 +613,11 @@ export function buildTrimmedAudioFilename(originalFilename?: string | null, proj
     const stem = baseNoExt.endsWith("-trimmed") ? baseNoExt : `${baseNoExt}-trimmed`;
     return `${stem}.wav`;
   }
-  const cleanTitle = (baseNoExt || projectTitle || "audio")
+  const fallbackBase = slugifyProjectTitle(projectTitle || "") || "audio";
+  const cleanBase = (baseNoExt || fallbackBase)
     .replace(/[<>:"/\\|?*;]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  const stem = cleanTitle.endsWith("-trimmed") ? cleanTitle : `${cleanTitle}-trimmed`;
+  const stem = cleanBase.endsWith("-trimmed") ? cleanBase : `${cleanBase}-trimmed`;
   return `${stem || "audio-trimmed"}.wav`;
 }

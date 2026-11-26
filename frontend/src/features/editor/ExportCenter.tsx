@@ -5,7 +5,12 @@ import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { useAuth } from "@/features/auth/AuthContext";
 import { printScorePdf } from "@/lib/pdfPrint";
-import { formatLocalDateTime, isVideoMediaAsset, sanitizeDownloadTitle } from "@/lib/utils";
+import {
+  formatLocalDateTime,
+  isVideoMediaAsset,
+  resolveDisplayScoreTitle,
+  sanitizeDownloadTitle,
+} from "@/lib/utils";
 import { api, ApiError } from "@/services/api";
 import type { ExportRecord, MediaAsset } from "@/types/api";
 
@@ -65,7 +70,6 @@ const FORMATS: Array<{
 export function ExportCenter({
   projectId,
   projectTitle,
-  scoreTitle,
   hasScore,
   isSatbScore = false,
   uploadedVideoAsset = null,
@@ -148,6 +152,8 @@ export function ExportCenter({
     };
   };
 
+  const scoreDownloadBase = sanitizeDownloadTitle(resolveDisplayScoreTitle(projectTitle), "Untitled Score");
+
   const exportMutation = useMutation({
     mutationFn: async (fmt: ExportFormatId) => {
       if (activeRequestRef.current) return null;
@@ -165,7 +171,7 @@ export function ExportCenter({
             const ext = fmt === "extracted_mp3" ? "mp3" : "wav";
             downloadName = `${sanitizeDownloadTitle(projectTitle)}.${ext}`;
           } else {
-            downloadName = `${projectTitle || "score"}${FORMATS.find((f) => f.id === fmt)?.ext || `.${fmt}`}`;
+            downloadName = `${scoreDownloadBase}${FORMATS.find((f) => f.id === fmt)?.ext || `.${fmt}`}`;
           }
           await api.downloadExportBlob(record.download_url, downloadName);
         }
@@ -476,7 +482,7 @@ export function ExportCenter({
                         filename = `${titleBase}.${ex.format === "extracted_mp3" ? "mp3" : "wav"}`;
                       } else {
                         const ext = FORMATS.find((f) => f.id === ex.format)?.ext || `.${ex.format}`;
-                        filename = `${projectTitle || "score"}${ext}`;
+                        filename = `${scoreDownloadBase}${ext}`;
                       }
                       void api.downloadExportBlob(ex.download_url!, filename);
                     }}

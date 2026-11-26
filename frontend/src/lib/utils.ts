@@ -36,6 +36,73 @@ export function isVideoMediaAsset(
   return mime.startsWith("video/");
 }
 
+export const GENERIC_PROJECT_TITLE_PLACEHOLDERS = new Set([
+  "",
+  "untitled",
+  "untitled project",
+  "untitled score",
+  "new transcription",
+  "scribasheet",
+  "scribasheet transcription",
+  "score",
+]);
+
+const SCORE_OR_MEDIA_EXT_RE =
+  /\.(?:pdf|mxl|musicxml|xml|mid|midi|mp3|wav|webm|ogg|m4a|flac|aac)$/i;
+
+const RECORDING_FILENAME_TITLE_RE =
+  /^(?:tab[-_\s]?audio|mic[-_\s]?recording|recording)[-_\s]*\d+(?:[-_\s]*trimmed)?$/i;
+
+export function isPlaceholderProjectTitle(title?: string | null): boolean {
+  const cleaned = (title || "").trim().replace(SCORE_OR_MEDIA_EXT_RE, "").trim().toLowerCase();
+  if (GENERIC_PROJECT_TITLE_PLACEHOLDERS.has(cleaned)) return true;
+  return RECORDING_FILENAME_TITLE_RE.test(cleaned);
+}
+
+export function resolveDisplayScoreTitle(projectTitle?: string | null): string {
+  const cleaned = (projectTitle || "").trim().replace(SCORE_OR_MEDIA_EXT_RE, "").trim();
+  if (!cleaned) return "Untitled Score";
+  if (
+    GENERIC_PROJECT_TITLE_PLACEHOLDERS.has(cleaned.toLowerCase()) ||
+    RECORDING_FILENAME_TITLE_RE.test(cleaned)
+  ) {
+    return "Untitled Score";
+  }
+  return cleaned;
+}
+
+export function slugifyProjectTitle(projectTitle: string): string {
+  const raw = (projectTitle || "").trim();
+  if (!raw || isPlaceholderProjectTitle(raw)) {
+    return "";
+  }
+  const normalized = raw
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(SCORE_OR_MEDIA_EXT_RE, "");
+  const asciiSafe = Array.from(normalized)
+    .map((ch) => (ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127 ? " " : ch))
+    .join("")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return asciiSafe.slice(0, 80).replace(/^_+|_+$/g, "");
+}
+
+export function buildRecordedAudioFilename(
+  kind: "tab" | "mic",
+  projectTitle?: string | null,
+  extension = "webm",
+  nowMs: number = Date.now(),
+): string {
+  const safeExt = (extension || "webm").trim().replace(/^\.+/, "").toLowerCase() || "webm";
+  const slug = slugifyProjectTitle(projectTitle || "");
+  if (slug) {
+    return `${slug}.${safeExt}`;
+  }
+  const prefix = kind === "tab" ? "tab-audio" : "mic-recording";
+  return `${prefix}-${nowMs}.${safeExt}`;
+}
+
 export function sanitizeDownloadTitle(title?: string | null, fallback = "Extracted Audio"): string {
   const withoutControls = Array.from(title || "")
     .map((ch) => {

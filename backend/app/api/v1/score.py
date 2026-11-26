@@ -12,7 +12,7 @@ from app.notation.generator import (
     apply_scribasheet_musicxml_branding,
     build_piano_vocal_score_data,
     build_score_data,
-    clean_score_title,
+    resolve_project_score_title,
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
@@ -30,7 +30,7 @@ from app.schemas.score import (
     ScoreData,
     ScoreNote,
 )
-from app.storage.service import storage_service
+from app.storage.service import sanitize_download_title, storage_service
 from app.transcription.base import DetectedNote
 from app.transcription.note_refiner import NoteRefinerConfig, refine_detected_notes
 
@@ -55,7 +55,7 @@ def get_project_score(
             detail="Score processing is in progress or previous score was superseded.",
         )
 
-    clean_title = clean_score_title(project.title)
+    resolved_title = resolve_project_score_title(project.title)
     musicxml_str = None
     if score.musicxml_path and storage_service.exists(score.musicxml_path):
         raw_bytes = storage_service.read_bytes(score.musicxml_path)
@@ -75,17 +75,24 @@ def get_project_score(
                     if xml_name:
                         raw_xml = zf.read(xml_name).decode("utf-8-sig", errors="replace")
                         cleaned_xml, _ = sanitize_omr_musicxml(raw_xml)
-                        musicxml_str = apply_scribasheet_musicxml_branding(cleaned_xml, title=clean_title)
+                        musicxml_str = apply_scribasheet_musicxml_branding(
+                            cleaned_xml,
+                            title=resolved_title,
+                            force_title=True,
+                        )
             except Exception:
                 musicxml_str = None
         else:
             raw_xml = raw_bytes.decode("utf-8-sig", errors="replace")
             cleaned_xml, _ = sanitize_omr_musicxml(raw_xml)
-            musicxml_str = apply_scribasheet_musicxml_branding(cleaned_xml, title=clean_title)
+            musicxml_str = apply_scribasheet_musicxml_branding(
+                cleaned_xml,
+                title=resolved_title,
+                force_title=True,
+            )
 
     score_json_out = dict(score.score_json or {})
-    if "title" in score_json_out:
-        score_json_out["title"] = clean_score_title(score_json_out.get("title") or project.title)
+    score_json_out["title"] = resolved_title
 
     return ProjectScoreResponse(
         id=score.id,
@@ -114,15 +121,19 @@ def update_project_score(
             detail=f"Score version conflict: expected {payload.expected_version}, current is {score.version}.",
         )
 
+    resolved_title = resolve_project_score_title(project.title)
+    score_payload = payload.score_json.model_copy(update={"title": resolved_title})
+
     # Persist direct MusicXML edits when provided (branded & validated), otherwise regenerate from score_json
     if payload.musicxml and ("<score-partwise" in payload.musicxml or "<score-timewise" in payload.musicxml):
         musicxml_str = apply_scribasheet_musicxml_branding(
             payload.musicxml,
-            title=clean_score_title(payload.score_json.title or project.title),
+            title=resolved_title,
+            force_title=True,
         )
     else:
-        musicxml_str = score_data_to_musicxml(payload.score_json)
-    midi_bytes = score_data_to_midi_bytes(payload.score_json)
+        musicxml_str = score_data_to_musicxml(score_payload)
+    midi_bytes = score_data_to_midi_bytes(score_payload)
 
     xml_key = storage_service.build_key(current_user.id, project.id, "musicxml", "score.musicxml")
     storage_service.save_bytes(xml_key, musicxml_str.encode("utf-8"), content_type="application/vnd.recordare.musicxml+xml")
@@ -131,7 +142,7 @@ def update_project_score(
     storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
 
     score.version += 1
-    score.score_json = payload.score_json.model_dump()
+    score.score_json = score_payload.model_dump()
     score.musicxml_path = xml_key
     score.midi_path = midi_key
     db.commit()
@@ -157,10 +168,11 @@ def get_project_midi(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MIDI file not found for this project.")
 
     data = storage_service.read_bytes(score.midi_path)
+    midi_filename = sanitize_download_title(resolve_project_score_title(project.title), "Untitled Score")
     return Response(
         content=data,
         media_type="audio/midi",
-        headers={"Content-Disposition": f'inline; filename="{project.title}.mid"'},
+        headers={"Content-Disposition": f'inline; filename="{midi_filename}.mid"'},
     )
 
 
@@ -321,9 +333,10 @@ def regenerate_project_arrangement(
         ]
 
     chord_source = select_chord_source_notes(other_notes, bass_notes, refined_notes)
+    resolved_title = resolve_project_score_title(project.title)
     if piano_vocal_active:
         new_score = build_piano_vocal_score_data(
-            title=project.title,
+            title=resolved_title,
             melody_notes=arranged_notes,
             chord_source_notes=chord_source,
             bass_notes=bass_notes or None,
@@ -341,7 +354,7 @@ def regenerate_project_arrangement(
         )
     else:
         new_score = build_score_data(
-            title=project.title,
+            title=resolved_title,
             detected_notes=arranged_notes,
             tempo_bpm=existing.tempo_bpm,
             tempo_estimated=existing.tempo_estimated,

@@ -25,6 +25,7 @@ import {
   type TabAudioCaptureSession,
 } from "@/features/uploads/tabAudioRecorder";
 import {
+  buildRecordedAudioFilename,
   formatBytes,
   formatDuration,
   isScoreMediaAsset,
@@ -274,7 +275,11 @@ export function MediaUploader({
         const rawMime = recorder.mimeType || chunksRef.current[0]?.type || preferredMime || "audio/webm";
         const { mimeType, extension } = resolveAudioFormatFromMime(rawMime);
         const blob = new Blob(chunksRef.current, { type: mimeType });
-        const recordedFile = new File([blob], `mic-recording-${Date.now()}.${extension}`, { type: mimeType });
+        const recordedFile = new File(
+          [blob],
+          buildRecordedAudioFilename("mic", projectTitle, extension),
+          { type: mimeType },
+        );
         void validateAndUpload(recordedFile);
       };
       mediaRecorderRef.current = recorder;
@@ -328,6 +333,7 @@ export function MediaUploader({
 
     try {
       const session = await startTabAudioCapture({
+        projectTitle,
         onLevel: (level) => setTabInputLevel(level),
         onComplete: (recordedFile) => {
           finishTabRecordingUi();

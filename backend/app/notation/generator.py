@@ -324,11 +324,28 @@ _FILENAME_NOISE_RE = re.compile(
 )
 
 
+_GENERIC_SCORE_TITLES = {
+    "",
+    "untitled",
+    "untitled project",
+    "untitled score",
+    "new transcription",
+    "scribasheet",
+    "scribasheet transcription",
+    "score",
+}
+
+_MEDIA_FILENAME_TITLE_RE = re.compile(
+    r"^(?:tab[-_\s]?audio|mic[-_\s]?recording|recording)[-_\s]*\d+(?:[-_\s]*trimmed)?$",
+    re.IGNORECASE,
+)
+
+
 def clean_score_title(raw_title: str | None) -> str:
     """Clean raw filenames into readable titles while preserving real project titles."""
     text = (raw_title or "").strip()
     if not text:
-        return "ScribaSheet Transcription"
+        return "Untitled Score"
     # Strip known media/score file extensions (case-insensitive)
     if "." in text and text.rsplit(".", 1)[-1].lower() in {
         "wav",
@@ -337,6 +354,7 @@ def clean_score_title(raw_title: str | None) -> str:
         "m4a",
         "aac",
         "ogg",
+        "webm",
         "mid",
         "midi",
         "musicxml",
@@ -353,8 +371,28 @@ def clean_score_title(raw_title: str | None) -> str:
             text = _FILENAME_NOISE_RE.sub("", text).strip("_- ")
         text = re.sub(r"[_-]+", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
-        return text.title() if text else "ScribaSheet Transcription"
-    return text or "ScribaSheet Transcription"
+        return text.title() if text else "Untitled Score"
+    return text or "Untitled Score"
+
+
+def is_generic_or_media_title(raw_title: str | None) -> bool:
+    """Return True if title is blank, a generic project placeholder, or a timestamped recording name."""
+    cleaned = clean_score_title(raw_title) if (raw_title and raw_title.strip()) else ""
+    if not cleaned:
+        return True
+    if cleaned.strip().lower() in _GENERIC_SCORE_TITLES:
+        return True
+    return bool(_MEDIA_FILENAME_TITLE_RE.match(cleaned.strip()))
+
+
+def resolve_project_score_title(project_title: str | None) -> str:
+    """Resolve the authoritative score/export title from project.title."""
+    if not project_title or not project_title.strip():
+        return "Untitled Score"
+    cleaned = clean_score_title(project_title)
+    if cleaned.strip().lower() in _GENERIC_SCORE_TITLES or _MEDIA_FILENAME_TITLE_RE.match(cleaned.strip()):
+        return "Untitled Score"
+    return cleaned
 
 
 def upsert_arranger_credit_in_xml(root: "ET.Element", transcribed_by: str | None) -> None:
@@ -424,6 +462,7 @@ def apply_scribasheet_musicxml_branding(
     *,
     title: str | None = None,
     transcribed_by: str | None = None,
+    force_title: bool = False,
 ) -> str:
     """Replace default Music21 attribution with ScribaSheet, strip title extensions, and preserve XML declaration."""
     import xml.etree.ElementTree as ET
@@ -438,8 +477,7 @@ def apply_scribasheet_musicxml_branding(
     except ET.ParseError:
         return xml_str
 
-    cleaned_title = clean_score_title(title) if (title and title.strip()) else None
-    generic_titles = {"", "untitled", "untitled score", "music21", "scribasheet", "score"}
+    generic_titles = _GENERIC_SCORE_TITLES | {"music21"}
 
     work_el = root.find("work")
     work_title_el = work_el.find("work-title") if work_el is not None else None
@@ -447,15 +485,30 @@ def apply_scribasheet_musicxml_branding(
 
     existing_wt = clean_score_title((work_title_el.text or "").strip()) if (work_title_el is not None and work_title_el.text) else ""
     existing_mt = clean_score_title((mov_title_el.text or "").strip()) if (mov_title_el is not None and mov_title_el.text) else ""
-    existing_non_generic = next(
-        (t for t in (existing_wt, existing_mt) if t and t.lower() not in generic_titles),
+    existing_valid = next(
+        (
+            t
+            for t in (existing_wt, existing_mt)
+            if t and t.lower() not in generic_titles and not _MEDIA_FILENAME_TITLE_RE.match(t)
+        ),
         "",
     )
-    final_title = (
-        existing_non_generic
-        if (cleaned_title is None or (cleaned_title.lower() in generic_titles and existing_non_generic))
-        else cleaned_title
-    ) or existing_wt or existing_mt
+
+    if force_title:
+        final_title = resolve_project_score_title(title)
+    else:
+        cleaned_title = clean_score_title(title) if (title and title.strip()) else None
+        provided_valid = bool(
+            cleaned_title
+            and cleaned_title.lower() not in generic_titles
+            and not _MEDIA_FILENAME_TITLE_RE.match(cleaned_title)
+        )
+        if provided_valid and cleaned_title:
+            final_title = cleaned_title
+        elif existing_valid:
+            final_title = existing_valid
+        else:
+            final_title = "Untitled Score"
 
     if final_title:
         if work_el is None:
@@ -472,11 +525,14 @@ def apply_scribasheet_musicxml_branding(
             root.insert(work_idx + 1, mov_title_el)
         mov_title_el.text = final_title
 
-        for credit_el in root.findall("credit"):
+        for credit_el in list(root.findall("credit")):
             ctype = (credit_el.findtext("credit-type") or "").strip().lower()
+            cwords = " ".join((cw.text or "") for cw in credit_el.findall("credit-words")).strip()
             if ctype == "title":
                 for cw in credit_el.findall("credit-words"):
                     cw.text = final_title
+            elif ctype == "subtitle" and cwords.lower() == final_title.lower():
+                root.remove(credit_el)
 
     ident = root.find("identification")
     if ident is None:
@@ -1114,7 +1170,7 @@ def score_data_to_musicxml(
 ) -> str:
     m21_score = music21.stream.Score()
     m21_score.metadata = music21.metadata.Metadata()
-    clean_title = clean_score_title(score.title)
+    clean_title = resolve_project_score_title(score.title)
     m21_score.metadata.title = clean_title
     m21_score.metadata.movementName = clean_title
     m21_score.metadata.composer = "ScribaSheet"
@@ -1373,7 +1429,7 @@ def add_pdf_footer(pdf_bytes: bytes, title: str | None = None) -> bytes:
         return pdf_bytes
 
     raw_title = (title or "").strip()
-    display_title = clean_score_title(raw_title) if raw_title else ""
+    display_title = resolve_project_score_title(raw_title) if raw_title else ""
 
     writer = PdfWriter()
     font_name = "Helvetica"
@@ -1584,9 +1640,13 @@ def render_score_pdf(
     )
 
     def draw_header(page_num: int) -> float:
-        if (score.title or "").strip():
+        display_header_title = resolve_project_score_title(score.title)
+        if page_num == 1:
             c.setFont("Helvetica-Bold", 17)
-            c.drawCentredString(width / 2, height - 46, clean_score_title(score.title))
+            c.drawCentredString(width / 2, height - 46, display_header_title)
+        else:
+            c.setFont("Helvetica-Bold", 12)
+            c.drawCentredString(width / 2, height - 46, display_header_title)
         c.setFont("Helvetica", 9.5)
         meta = (
             f"Tempo: {score.tempo_bpm:.0f} BPM  |  Time: {score.time_signature}  |  "

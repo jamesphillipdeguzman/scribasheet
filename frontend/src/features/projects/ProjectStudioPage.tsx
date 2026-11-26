@@ -32,6 +32,7 @@ import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { metronomeEngine } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
 import { musicXmlToScoreNotes } from "@/features/editor/musicXmlEditor";
+import { applyScoreTitleToMusicXml } from "@/features/editor/musicXmlNormalization";
 import {
   loadMetronomeSettings,
   type MetronomeSettings,
@@ -44,7 +45,7 @@ import { WaveformPlayer } from "@/features/editor/WaveformPlayer";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { MediaUploader } from "@/features/uploads/MediaUploader";
 import { api, ApiError, WS_BASE_URL, getStoredTokens, isAuthError } from "@/services/api";
-import { isScoreMediaAsset, isVideoMediaAsset } from "@/lib/utils";
+import { isScoreMediaAsset, isVideoMediaAsset, resolveDisplayScoreTitle } from "@/lib/utils";
 import type { Project, ScoreData, ScoreNote, TranscriptionJob, TranscriptionSettings } from "@/types/api";
 
 type StudioTab = "notation" | "pianoroll" | "chords" | "lyrics" | "exports";
@@ -317,8 +318,18 @@ export function ProjectStudioPage() {
       if (targetJobId && typeof resJobId === "string" && resJobId !== targetJobId) {
         return;
       }
-      setScoreData(res.score_json);
-      setMusicxml(res.musicxml);
+      const syncedScore = {
+        ...res.score_json,
+        title: resolveDisplayScoreTitle(projectTitleRef.current || res.score_json.title),
+      };
+      setScoreData(syncedScore);
+      setMusicxml(
+        res.musicxml
+          ? applyScoreTitleToMusicXml(res.musicxml, syncedScore.title, {
+              deduplicateMovementTitle: false,
+            })
+          : res.musicxml,
+      );
       setScoreVersion(res.version);
       setUndoStack([]);
       setRedoStack([]);
@@ -679,7 +690,15 @@ export function ProjectStudioPage() {
       const updated = await api.updateProject(project.id, { title: trimmed });
       queryClient.setQueryData(["project", projectId], updated);
       queryClient.invalidateQueries({ queryKey: ["projects"] });
-      setScoreData((prev) => (prev ? { ...prev, title: updated.title } : prev));
+      queryClient.invalidateQueries({ queryKey: ["exports", projectId] });
+      const nextScoreTitle = resolveDisplayScoreTitle(updated.title);
+      setScoreData((prev) => (prev ? { ...prev, title: nextScoreTitle } : prev));
+      setMusicxml((prev) =>
+        prev ? applyScoreTitleToMusicXml(prev, updated.title, { deduplicateMovementTitle: false }) : prev,
+      );
+      if (scoreData) {
+        setScoreVersion((v) => v + 1);
+      }
       setOptimisticTitle(null);
       setRenameStatus("saved");
       window.setTimeout(() => {
@@ -828,6 +847,9 @@ export function ProjectStudioPage() {
     isScoreAsset ||
     (!originalAsset &&
       (project?.transcription_mode === "satb_pdf" || scoreData?.analysis?.mode === "satb_pdf"));
+
+  const effectiveProjectTitle = optimisticTitle ?? project.title;
+  const effectiveScoreTitle = resolveDisplayScoreTitle(effectiveProjectTitle);
 
   return (
     <AppShell>
@@ -981,7 +1003,7 @@ export function ProjectStudioPage() {
                 <h2 className="text-sm font-semibold">1. Media or Score Input</h2>
                 <MediaUploader
                   projectId={project.id}
-                  projectTitle={project.title}
+                  projectTitle={effectiveProjectTitle}
                   existingAssets={project.media_assets}
                   selectedSourceAssetId={effectiveSourceAssetId}
                   onSelectSourceAsset={setSelectedSourceAssetId}
@@ -1156,7 +1178,7 @@ export function ProjectStudioPage() {
             {!isScoreProject && activeAudioAsset && (
               <AudioTrimPanel
                 projectId={project.id}
-                projectTitle={project.title}
+                projectTitle={effectiveProjectTitle}
                 mediaAsset={activeAudioAsset}
                 signedAudioUrl={waveformSignedUrl}
                 decodedAudioBuffer={waveformDecodedBuffer}
@@ -1260,7 +1282,7 @@ export function ProjectStudioPage() {
               {canShowMixer && scoreData && mixerOpen && !isJobRunning && !isStartingJob && (
                 <SATBMixerPanel
                   projectId={project.id}
-                  projectTitle={project.title}
+                  projectTitle={effectiveProjectTitle}
                   scoreData={scoreData}
                   soloVoice={satbSoloVoice}
                   onSoloVoiceChange={setSatbSoloVoice}
@@ -1377,6 +1399,7 @@ export function ProjectStudioPage() {
                 ) : (
                   <SheetMusicViewer
                     musicxml={musicxml}
+                    scoreTitle={effectiveScoreTitle}
                     notes={scoreData?.notes}
                     chords={scoreData?.chords}
                     showChordSymbols={showChordSymbols}
@@ -1439,6 +1462,7 @@ export function ProjectStudioPage() {
                     activeBeat={activeMetronomeBeat}
                     onActiveBeatChange={setActiveMetronomeBeat}
                     musicxml={musicxml}
+                    scoreTitle={effectiveScoreTitle}
                     showChordSymbols={showChordSymbols}
                     onToggleChordSymbols={handleToggleChordSymbols}
                     isFocusMode={isFocusMode}
@@ -1478,7 +1502,7 @@ export function ProjectStudioPage() {
               {activeTab === "lyrics" && (
                 <LyricsPanel
                   projectId={project.id}
-                  projectTitle={project.title}
+                  projectTitle={effectiveProjectTitle}
                   hasMedia={Boolean(originalAsset)}
                   activeJob={activeJob}
                   onJobStarted={(job) => setActiveJob(job)}
@@ -1490,8 +1514,8 @@ export function ProjectStudioPage() {
               {activeTab === "exports" && (
                 <ExportCenter
                   projectId={project.id}
-                  projectTitle={project.title}
-                  scoreTitle={scoreData?.title}
+                  projectTitle={effectiveProjectTitle}
+                  scoreTitle={effectiveScoreTitle}
                   hasScore={Boolean(scoreData)}
                   isSatbScore={isGenuineSatb}
                   uploadedVideoAsset={uploadedVideoAsset}

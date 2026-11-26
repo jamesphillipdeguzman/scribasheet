@@ -29,6 +29,7 @@ from app.notation.generator import (
     count_pdf_pages,
     render_score_pdf,
     render_score_wav,
+    resolve_project_score_title,
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
@@ -100,6 +101,7 @@ def _prepare_export_musicxml(
         base_xml,
         title=score.title,
         transcribed_by=transcribed_by,
+        force_title=True,
     )
 
 
@@ -261,15 +263,7 @@ def create_export(
 
     try:
         score = ScoreData(**score_row.score_json)
-        generic_titles = {"", "untitled", "untitled score", "scribasheet", "score"}
-        raw_score_title = clean_score_title(score.title or "")
-        raw_proj_title = clean_score_title(project.title or "")
-        if raw_proj_title and raw_proj_title.lower() not in generic_titles:
-            score.title = raw_proj_title
-        elif raw_score_title:
-            score.title = raw_score_title
-        else:
-            score.title = clean_score_title(project.title)
+        score.title = resolve_project_score_title(project.title)
         mime_type, ext = EXPORT_MIME_TYPES[payload.format]
 
         raw_credit = payload.transcribed_by if payload.transcribed_by is not None else DEFAULT_TRANSCRIBED_BY
@@ -396,7 +390,8 @@ def download_export(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Export is not ready for download.")
 
     project = db.query(Project).filter(Project.id == export.project_id).first()
-    base_name = sanitize_filename(clean_score_title(project.title if project else "scribasheet_score"))
+    resolved_title = resolve_project_score_title(project.title if project else None)
+    base_name = sanitize_filename(resolved_title)
     mime_type, ext = EXPORT_MIME_TYPES.get(export.format, ("application/octet-stream", "bin"))
     if export.format in ("soprano_mp3", "alto_mp3", "tenor_mp3", "bass_mp3"):
         voice_label = export.format.split("_", 1)[0].capitalize()
