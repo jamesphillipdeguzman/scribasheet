@@ -64,3 +64,48 @@ def test_auth_lifecycle_and_ownership(client):
 
     # Delete copy
     assert client.delete(f"/api/v1/projects/{dup.json()['id']}", headers=headers_a).status_code == 204
+
+
+def test_delete_account_authorization_ownership_and_cleanup(client):
+    # Unauthenticated and invalid-token requests must be rejected
+    assert client.delete("/api/v1/users/me").status_code == 401
+    assert (
+        client.delete("/api/v1/users/me", headers={"Authorization": "Bearer invalid.jwt.token"}).status_code == 401
+    )
+
+    reg_a = client.post(
+        "/api/v1/auth/register",
+        json={"email": "delete_owner_a@example.com", "password": "StrongPass123!", "display_name": "Owner A"},
+    )
+    assert reg_a.status_code == 201
+    tokens_a = reg_a.json()
+    headers_a = {"Authorization": f"Bearer {tokens_a['access_token']}"}
+    headers_refresh_a = {"Authorization": f"Bearer {tokens_a['refresh_token']}"}
+
+    # Refresh token cannot be used as access token to delete account
+    assert client.delete("/api/v1/users/me", headers=headers_refresh_a).status_code == 401
+
+    headers_b, _ = _register_and_headers(client, "delete_owner_b@example.com", name="Owner B")
+
+    proj_a = client.post(
+        "/api/v1/projects",
+        headers=headers_a,
+        json={"title": "Owner A Private Piece", "instrument": "piano", "transcription_mode": "piano"},
+    )
+    proj_b = client.post(
+        "/api/v1/projects",
+        headers=headers_b,
+        json={"title": "Owner B Intact Piece", "instrument": "piano", "transcription_mode": "piano"},
+    )
+    assert proj_a.status_code == 201 and proj_b.status_code == 201
+
+    # Owner A deletes their own account -> 204, tokens become invalid, User B unaffected
+    del_res = client.delete("/api/v1/users/me", headers=headers_a)
+    assert del_res.status_code == 204
+    assert client.get("/api/v1/users/me", headers=headers_a).status_code == 401
+    assert client.delete("/api/v1/users/me", headers=headers_a).status_code == 401
+
+    # Owner B account and project remain completely untouched
+    b_proj_check = client.get(f"/api/v1/projects/{proj_b.json()['id']}", headers=headers_b)
+    assert b_proj_check.status_code == 200
+    assert b_proj_check.json()["title"] == "Owner B Intact Piece"

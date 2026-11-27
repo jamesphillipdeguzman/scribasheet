@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Trash2 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { useAuth } from "@/features/auth/AuthContext";
+import { DeleteAccountModal } from "@/features/auth/DeleteAccountModal";
 import { formatBytes } from "@/lib/utils";
 import { api } from "@/services/api";
 
@@ -14,22 +15,26 @@ function getStorageStatusMeta(status?: string): { label: string; className: stri
     case "full":
       return {
         label: "Volume Full",
-        className: "border-red-500/40 bg-red-500/15 text-red-300",
+        className:
+          "bg-red-100 text-red-900 border border-red-300 dark:bg-red-500/15 dark:text-red-300 dark:border-red-500/30",
       };
     case "low_space":
       return {
         label: "Low Server Space",
-        className: "border-amber-500/40 bg-amber-500/15 text-amber-200",
+        className:
+          "bg-amber-100 text-amber-900 border border-amber-300 dark:bg-amber-500/15 dark:text-amber-300 dark:border-amber-500/30",
       };
     case "unavailable":
       return {
         label: "Storage Unavailable",
-        className: "border-red-500/40 bg-red-500/15 text-red-300",
+        className:
+          "bg-red-100 text-red-900 border border-red-300 dark:bg-red-500/15 dark:text-red-300 dark:border-red-500/30",
       };
     default:
       return {
         label: "Available",
-        className: "border-emerald-500/35 bg-emerald-500/10 text-emerald-300",
+        className:
+          "bg-emerald-100 text-emerald-900 border border-emerald-300 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/35",
       };
   }
 }
@@ -40,7 +45,8 @@ export function SettingsPage() {
   const [displayName, setDisplayName] = useState(user?.display_name || "");
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const deleteButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,8 +65,9 @@ export function SettingsPage() {
 
   const handleDeleteAccount = async () => {
     await api.deleteMe();
+    setIsDeleteModalOpen(false);
     logout();
-    navigate("/");
+    navigate("/", { replace: true });
   };
 
   return (
@@ -125,7 +132,7 @@ export function SettingsPage() {
                       <span className="text-xs text-[#A1A1AA]">Private Storage Used</span>
                       <span
                         data-testid="storage-health-badge"
-                        className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusMeta.className}`}
+                        className={`whitespace-nowrap shrink-0 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${statusMeta.className}`}
                       >
                         {statusMeta.label}
                       </span>
@@ -148,32 +155,34 @@ export function SettingsPage() {
           );
         })()}
 
-        <Card className="border-red-500/30">
+        <Card className="border-red-300 dark:border-red-500/30">
           <CardHeader>
-            <CardTitle className="text-red-300">Danger Zone</CardTitle>
+            <CardTitle className="text-red-700 dark:text-red-300">Danger Zone</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm text-[#A1A1AA]">
               Permanently delete your account, all projects, uploaded recordings, and exported files.
             </p>
-            {!confirmDelete ? (
-              <Button variant="danger" size="sm" onClick={() => setConfirmDelete(true)}>
-                <Trash2 className="h-4 w-4" />
-                Delete Account
-              </Button>
-            ) : (
-              <div className="flex items-center gap-3">
-                <Button variant="danger" size="sm" onClick={handleDeleteAccount}>
-                  Confirm Permanent Deletion
-                </Button>
-                <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>
-                  Cancel
-                </Button>
-              </div>
-            )}
+            <Button
+              ref={deleteButtonRef}
+              variant="danger"
+              size="sm"
+              onClick={() => setIsDeleteModalOpen(true)}
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete Account
+            </Button>
           </CardContent>
         </Card>
       </div>
+
+      <DeleteAccountModal
+        isOpen={isDeleteModalOpen}
+        userEmail={user?.email}
+        onClose={() => setIsDeleteModalOpen(false)}
+        onConfirmDelete={handleDeleteAccount}
+        restoreFocusRef={deleteButtonRef}
+      />
     </AppShell>
   );
 }
