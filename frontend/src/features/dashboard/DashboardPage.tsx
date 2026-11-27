@@ -2,32 +2,36 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
-  Archive,
   ArchiveRestore,
-  Clock,
-  Copy,
-  Edit3,
   FolderPlus,
   Loader2,
   Music2,
   Piano,
   Plus,
   Search,
-  Trash2,
   X,
 } from "lucide-react";
 import { AmbientScoreBackdrop } from "@/components/AmbientScoreBackdrop";
 import { AppShell } from "@/components/AppShell";
 import { WorkerControlPanel } from "@/components/WorkerControlPanel";
 import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
-import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { useAuth } from "@/features/auth/AuthContext";
+import {
+  DashboardViewSwitcher,
+  type DashboardViewMode,
+  loadDashboardViewMode,
+  type ProjectActionHandlers,
+  ProjectCarouselView,
+  ProjectGridView,
+  ProjectListView,
+  saveDashboardViewMode,
+} from "@/features/dashboard/ProjectViews";
 import { ArchiveExportModal } from "@/features/projects/ArchiveExportModal";
 import { ArchiveImportModal } from "@/features/projects/ArchiveImportModal";
-import { formatBytes, formatDuration, formatLocalDateTime, SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
+import { formatBytes, SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
 import { api, ApiError } from "@/services/api";
 import type { Project } from "@/types/api";
 
@@ -39,7 +43,13 @@ export function DashboardPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortBy, setSortBy] = useState("updated_at");
+  const [viewMode, setViewMode] = useState<DashboardViewMode>(() => loadDashboardViewMode());
   const [showCreateModal, setShowCreateModal] = useState(false);
+
+  const handleViewModeChange = (nextMode: DashboardViewMode) => {
+    setViewMode(nextMode);
+    saveDashboardViewMode(nextMode);
+  };
 
   useEffect(() => {
     if (!showCreateModal) return;
@@ -131,6 +141,22 @@ export function DashboardPage() {
   });
 
   const projects = data?.items || [];
+
+  const projectActionHandlers: ProjectActionHandlers = {
+    renamingId,
+    renameValue,
+    onRenameValueChange: setRenameValue,
+    onOpenStudio: (projectId) => navigate(`/projects/${projectId}`),
+    onStartRename: (project) => {
+      setRenamingId(project.id);
+      setRenameValue(project.title);
+    },
+    onSubmitRename: (id, title) => renameMutation.mutate({ id, title }),
+    onCancelRename: () => setRenamingId(null),
+    onArchive: (project) => setArchivingProject(project),
+    onDuplicate: (id) => duplicateMutation.mutate(id),
+    onDelete: (id) => deleteMutation.mutate(id),
+  };
 
   return (
     <AppShell>
@@ -317,6 +343,7 @@ export function DashboardPage() {
             <option value="created_at">Date Created</option>
             <option value="title">Title (A–Z)</option>
           </select>
+          <DashboardViewSwitcher viewMode={viewMode} onChange={handleViewModeChange} />
         </div>
 
         {/* Project List */}
@@ -350,114 +377,12 @@ export function DashboardPage() {
               </Button>
             </CardContent>
           </Card>
+        ) : viewMode === "list" ? (
+          <ProjectListView projects={projects} actions={projectActionHandlers} />
+        ) : viewMode === "carousel" ? (
+          <ProjectCarouselView projects={projects} actions={projectActionHandlers} />
         ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {projects.map((p: Project) => (
-              <Card key={p.id} className="min-w-0 hover:border-[#A78BFA]/40 transition-colors flex flex-col justify-between">
-                <CardContent className="p-4 sm:p-5 space-y-4 min-w-0">
-                  <div className="flex items-start justify-between gap-2 min-w-0">
-                    {renamingId === p.id ? (
-                      <form
-                        className="flex-1 flex gap-2 min-w-0"
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          if (renameValue.trim()) {
-                            renameMutation.mutate({ id: p.id, title: renameValue.trim() });
-                          }
-                        }}
-                      >
-                        <input
-                          value={renameValue}
-                          onChange={(e) => setRenameValue(e.target.value)}
-                          autoFocus
-                          className="flex-1 min-w-0 h-9 rounded px-2 text-sm bg-white text-stone-900 border border-violet-500 ring-2 ring-violet-500/20 placeholder:text-stone-400 focus:outline-none dark:bg-slate-900 dark:text-white dark:border-violet-400 dark:ring-violet-400/25"
-                        />
-                        <Button type="submit" size="sm">Save</Button>
-                      </form>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => navigate(`/projects/${p.id}`)}
-                        className="min-w-0 flex-1 text-left font-semibold text-[#F5F3FF] hover:text-[#A78BFA] transition-colors truncate"
-                      >
-                        {p.title}
-                      </button>
-                    )}
-                    <StatusBadge status={p.status} />
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-3 text-xs text-[#A1A1AA]">
-                    <span className="inline-flex items-center gap-1 capitalize">
-                      <Music2 className="h-3.5 w-3.5 text-[#A78BFA]" />
-                      {p.instrument.replace(/_/g, " ")}
-                    </span>
-                    {p.transcription_mode === "midi_playground" && (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-violet-400/40 bg-violet-500/15 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">
-                        <Piano className="h-2.5 w-2.5" />
-                        MIDI Playground
-                      </span>
-                    )}
-                    <span className="inline-flex items-center gap-1">
-                      <Clock className="h-3.5 w-3.5" />
-                      {formatDuration(p.duration_seconds)}
-                    </span>
-                  </div>
-
-                  <div className="text-xs text-[#71717A]">
-                    Updated {formatLocalDateTime(p.updated_at)}
-                  </div>
-
-                  <div className="pt-2 border-t border-[#27273A] flex items-center justify-between gap-2">
-                    <Button size="sm" onClick={() => navigate(`/projects/${p.id}`)}>
-                      Open Studio
-                    </Button>
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        title="Rename project"
-                        aria-label="Rename project"
-                        onClick={() => {
-                          setRenamingId(p.id);
-                          setRenameValue(p.title);
-                        }}
-                        className="p-2 rounded-lg text-stone-600 hover:bg-violet-50 hover:text-violet-700 border border-transparent hover:border-violet-200 transition-colors dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white dark:hover:border-white/10"
-                      >
-                        <Edit3 className="h-4 w-4" />
-                      </button>
-                      <button
-                        type="button"
-                        title="Archive session (.scribasheet)"
-                        aria-label="Archive session (.scribasheet)"
-                        data-testid={`archive-project-${p.id}`}
-                        onClick={() => setArchivingProject(p)}
-                        className="p-2 rounded-lg text-stone-600 hover:bg-violet-50 hover:text-violet-700 border border-transparent hover:border-violet-200 transition-colors dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white dark:hover:border-white/10"
-                      >
-                        <Archive className="h-4 w-4" />
-                      </button>
-                      <button
-                        type="button"
-                        title="Duplicate project"
-                        aria-label="Duplicate project"
-                        onClick={() => duplicateMutation.mutate(p.id)}
-                        className="p-2 rounded-lg text-stone-600 hover:bg-violet-50 hover:text-violet-700 border border-transparent hover:border-violet-200 transition-colors dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white dark:hover:border-white/10"
-                      >
-                        <Copy className="h-4 w-4" />
-                      </button>
-                      <button
-                        type="button"
-                        title="Delete project"
-                        aria-label="Delete project"
-                        onClick={() => deleteMutation.mutate(p.id)}
-                        className="p-2 rounded-lg text-stone-600 hover:bg-rose-50 hover:text-rose-700 border border-transparent hover:border-rose-200 transition-colors dark:text-slate-400 dark:hover:bg-rose-500/15 dark:hover:text-rose-300 dark:hover:border-rose-500/30"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
+          <ProjectGridView projects={projects} actions={projectActionHandlers} />
         )}
       </div>
 
