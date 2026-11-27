@@ -1145,7 +1145,7 @@ export function ProjectStudioPage() {
         {/* Top Studio Toolbar */}
         <div
           data-testid="studio-header"
-          className="relative z-10 flex flex-col gap-3 rounded-xl border border-[#27273A] bg-[#11111B]/90 backdrop-blur-sm px-3 sm:px-4 py-3 min-w-0 sm:flex-row sm:items-center sm:justify-between"
+          className="relative z-20 flex flex-col gap-3 rounded-xl border border-[#27273A] bg-[#11111B]/90 backdrop-blur-sm px-3 sm:px-4 py-3 min-w-0 sm:flex-row sm:items-center sm:justify-between"
         >
           {/* Row 1 on mobile: Navigation (left) + Actions (right); on sm+: contents flatten into single row */}
           <div className="flex items-center justify-between gap-2 w-full sm:w-auto sm:contents">

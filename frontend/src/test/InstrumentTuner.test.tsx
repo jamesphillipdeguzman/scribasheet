@@ -409,4 +409,66 @@ describe("InstrumentTunerControl Lifecycle, Drone Playback & Studio Isolation", 
     expect(tunerBtn.className).toContain("dark:bg-[#181825]");
     expect(getUserMediaMock).not.toHaveBeenCalled();
   });
+
+  it("renders popover with responsive 340px/380px width, right-aligned positioning, single-line header, full preset names, and aligned cents scale", async () => {
+    const harness = createMockAudioHarness({ sampleRate: 48000, signalFreqHz: 440 });
+    vi.stubGlobal("AudioContext", harness.MockAudioContext);
+
+    render(<InstrumentTunerControl />);
+    const btn = screen.getByTestId("studio-tuner-btn");
+    expect(btn.parentElement?.className).toContain("relative");
+
+    fireEvent.click(btn);
+    const popover = await screen.findByTestId("instrument-tuner-popover");
+    const cls = popover.className;
+    expect(cls).toContain("w-[340px]");
+    expect(cls).toContain("sm:w-[380px]");
+    expect(cls).toContain("max-w-[calc(100vw-2rem)]");
+    expect(cls).toContain("right-0");
+    expect(cls).toContain("top-full");
+    expect(cls).toContain("mt-2");
+    expect(cls).toContain("z-50");
+    expect(cls).not.toMatch(/(^|\s)max-w-full(\s|$)/);
+
+    // Single-line header: title + status badge + close button stay in header row
+    const titleEl = within(popover).getByText("Instrument Tuner");
+    expect(titleEl.className).toContain("whitespace-nowrap");
+    const closeBtn = within(popover).getByRole("button", { name: "Close tuner" });
+    expect(closeBtn.className).toContain("shrink-0");
+
+    // Preset selector spans full available width and includes full preset names
+    const presetSelect = within(popover).getByLabelText("Instrument preset") as HTMLSelectElement;
+    expect(presetSelect.className).toContain("w-full");
+    expect(presetSelect.className).toContain("min-w-0");
+    expect(presetSelect.className).toContain("box-border");
+    const optionTexts = Array.from(presetSelect.options).map((o) => o.text);
+    expect(optionTexts.some((t) => t.includes("Chromatic (All Notes)"))).toBe(true);
+    expect(optionTexts.some((t) => t.includes("Violin (G3–D4–A4–E5)"))).toBe(true);
+    expect(optionTexts.some((t) => t.includes("Guitar Standard"))).toBe(true);
+    expect(optionTexts.some((t) => t.includes("Ukulele Standard High-G"))).toBe(true);
+
+    // Pitch gauge cents scale (-50¢, 0¢, +50¢) and aligned labels (Flat, In Tune, Sharp)
+    const centsScale = within(popover).getByTestId("tuner-cents-scale");
+    expect(centsScale.className).toContain("flex");
+    expect(centsScale.className).toContain("items-center");
+    expect(centsScale.className).toContain("justify-between");
+    expect(centsScale.className).toContain("text-xs");
+    expect(centsScale).toHaveTextContent("-50¢0¢+50¢");
+
+    const centsLabels = within(popover).getByTestId("tuner-cents-labels");
+    expect(centsLabels.className).toContain("flex");
+    expect(centsLabels.className).toContain("items-center");
+    expect(centsLabels.className).toContain("justify-between");
+    expect(centsLabels).toHaveTextContent("FlatIn TuneSharp");
+
+    // Reference tone controls & calibration slider remain contained
+    const playA4Btn = within(popover).getByTestId("tuner-drone-a4");
+    expect(playA4Btn.className).toContain("max-w-full");
+    const waveformSelect = within(popover).getByLabelText("Reference tone waveform");
+    expect(waveformSelect.className).toContain("min-w-0");
+    expect(waveformSelect.className).toContain("box-border");
+    const calibSlider = within(popover).getByLabelText("A4 reference frequency");
+    expect(calibSlider.className).toContain("min-w-0");
+    expect(calibSlider.className).toContain("box-border");
+  });
 });

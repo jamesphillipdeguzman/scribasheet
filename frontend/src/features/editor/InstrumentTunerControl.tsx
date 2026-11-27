@@ -522,17 +522,17 @@ export function InstrumentTunerControl() {
           role="dialog"
           aria-label="Instrument Tuner"
           data-testid="instrument-tuner-popover"
-          className="fixed inset-x-3 top-20 sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 z-50 w-auto sm:w-[360px] max-w-full rounded-xl border border-stone-200 bg-white p-4 shadow-2xl space-y-3.5 text-xs text-stone-900 dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#F5F3FF]"
+          className="absolute right-0 top-full mt-2 z-50 w-[340px] sm:w-[380px] max-w-[calc(100vw-2rem)] box-border overflow-x-hidden rounded-xl border border-stone-200 bg-white p-4 shadow-2xl space-y-3.5 text-xs text-stone-900 dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#F5F3FF]"
         >
           {/* Header */}
           <div className="flex items-center justify-between gap-2 border-b border-stone-200 pb-2.5 dark:border-[#27273A]">
-            <div className="flex items-center gap-2">
-              <Gauge className="h-4 w-4 text-violet-600 dark:text-[#A78BFA]" aria-hidden="true" />
-              <span className="text-sm font-semibold">Instrument Tuner</span>
+            <div className="flex items-center gap-2 min-w-0">
+              <Gauge className="h-4 w-4 shrink-0 text-violet-600 dark:text-[#A78BFA]" aria-hidden="true" />
+              <span className="text-sm font-semibold whitespace-nowrap truncate">Instrument Tuner</span>
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 shrink-0">
               <span
-                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                className={`inline-flex items-center gap-1 whitespace-nowrap shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
                   micStatus === "listening"
                     ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-300"
                     : micStatus === "paused_for_drone"
@@ -543,9 +543,9 @@ export function InstrumentTunerControl() {
                 }`}
               >
                 {micStatus === "listening" ? (
-                  <Mic className="h-3 w-3" aria-hidden="true" />
+                  <Mic className="h-3 w-3 shrink-0" aria-hidden="true" />
                 ) : (
-                  <MicOff className="h-3 w-3" aria-hidden="true" />
+                  <MicOff className="h-3 w-3 shrink-0" aria-hidden="true" />
                 )}
                 {micStatus === "listening"
                   ? "Live"
@@ -561,7 +561,7 @@ export function InstrumentTunerControl() {
                 type="button"
                 aria-label="Close tuner"
                 onClick={() => setOpen(false)}
-                className="rounded-lg p-1 text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-[#A1A1AA] dark:hover:bg-white/10 dark:hover:text-white"
+                className="shrink-0 rounded-lg p-1 text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-[#A1A1AA] dark:hover:bg-white/10 dark:hover:text-white"
               >
                 <X className="h-4 w-4" aria-hidden="true" />
               </button>
@@ -569,7 +569,7 @@ export function InstrumentTunerControl() {
           </div>
 
           {/* Preset Selector */}
-          <div className="space-y-1">
+          <div className="space-y-1 min-w-0">
             <label
               htmlFor={presetSelectId}
               className="block text-[11px] font-medium text-stone-600 dark:text-[#A1A1AA]"
@@ -581,7 +581,7 @@ export function InstrumentTunerControl() {
               aria-label="Instrument preset"
               value={instrumentId}
               onChange={(e) => handleInstrumentChange(e.target.value as TunerInstrumentId)}
-              className="w-full h-8 rounded-lg border border-stone-300 bg-white px-2.5 text-xs text-stone-900 focus:border-violet-500 focus:outline-none dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
+              className="w-full min-w-0 max-w-full box-border h-8 rounded-lg border border-stone-300 bg-white px-2.5 text-xs text-stone-900 focus:border-violet-500 focus:outline-none dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
             >
               {TUNER_PRESETS.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -610,9 +610,9 @@ export function InstrumentTunerControl() {
           )}
 
           {/* Readout & Cents Meter */}
-          <div className="rounded-xl border border-stone-200 bg-stone-50 p-3 space-y-3 dark:border-[#27273A] dark:bg-[#09090F]">
-            <div className="flex items-center justify-between gap-2">
-              <div>
+          <div className="rounded-xl border border-stone-200 bg-stone-50 p-3 space-y-3 min-w-0 box-border dark:border-[#27273A] dark:bg-[#09090F]">
+            <div className="flex items-center justify-between gap-2 min-w-0">
+              <div className="min-w-0 shrink-0">
                 <div
                   data-testid="tuner-detected-note"
                   className={`text-3xl font-bold tracking-tight font-mono ${
@@ -635,7 +635,7 @@ export function InstrumentTunerControl() {
                 </div>
               </div>
 
-              <div className="text-right space-y-1">
+              <div className="min-w-0 text-right space-y-1">
                 <div
                   data-testid="tuner-detected-cents"
                   className={`text-base font-semibold font-mono ${
@@ -650,7 +650,7 @@ export function InstrumentTunerControl() {
                 </div>
                 <div
                   data-testid="tuner-status-badge"
-                  className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                  className={`inline-block max-w-full truncate rounded-full px-2 py-0.5 text-[10px] font-semibold ${
                     !isSignalReliable
                       ? "bg-stone-200 text-stone-600 dark:bg-[#181825] dark:text-[#A1A1AA]"
                       : isInTune
@@ -664,8 +664,8 @@ export function InstrumentTunerControl() {
             </div>
 
             {/* Visual Cents Meter (-50 to +50) */}
-            <div className="space-y-1">
-              <div className="relative h-5 rounded-full bg-stone-200 dark:bg-[#181825] overflow-hidden border border-stone-300 dark:border-[#27273A]">
+            <div className="space-y-1.5 min-w-0">
+              <div className="relative w-full h-5 rounded-full bg-stone-200 dark:bg-[#181825] overflow-hidden border border-stone-300 dark:border-[#27273A]">
                 {/* ±5c In-tune green zone */}
                 <div
                   aria-hidden="true"
@@ -689,18 +689,33 @@ export function InstrumentTunerControl() {
                   }`}
                 />
               </div>
-              <div className="flex justify-between text-[10px] font-mono text-stone-500 dark:text-[#A1A1AA]">
-                <span>-50¢ Flat</span>
-                <span>0¢</span>
-                <span>+50¢ Sharp</span>
+              <div className="space-y-0.5">
+                <div
+                  data-testid="tuner-cents-scale"
+                  className="flex items-center justify-between text-xs font-mono text-stone-500 dark:text-[#A1A1AA]"
+                >
+                  <span className="whitespace-nowrap">-50¢</span>
+                  <span className="whitespace-nowrap">0¢</span>
+                  <span className="whitespace-nowrap">+50¢</span>
+                </div>
+                <div
+                  data-testid="tuner-cents-labels"
+                  className="flex items-center justify-between text-[11px] text-stone-500 dark:text-[#A1A1AA]"
+                >
+                  <span className="whitespace-nowrap">Flat</span>
+                  <span className="whitespace-nowrap font-medium text-emerald-700 dark:text-emerald-400">
+                    In Tune
+                  </span>
+                  <span className="whitespace-nowrap">Sharp</span>
+                </div>
               </div>
             </div>
           </div>
 
           {/* String Target Buttons & Reference Drone Controls */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] font-medium text-stone-600 dark:text-[#A1A1AA]">
+          <div className="space-y-2 min-w-0">
+            <div className="flex items-center justify-between gap-2 min-w-0">
+              <span className="text-[11px] font-medium text-stone-600 dark:text-[#A1A1AA] truncate">
                 {preset.strings.length > 0
                   ? "Strings (Click to hear reference tone & target)"
                   : "Reference Tone"}
@@ -712,7 +727,7 @@ export function InstrumentTunerControl() {
                     setAutoStringDetect(true);
                     setSelectedStringId(null);
                   }}
-                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                  className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
                     autoStringDetect
                       ? "bg-violet-100 text-violet-800 dark:bg-violet-500/20 dark:text-violet-300"
                       : "text-stone-500 hover:bg-stone-100 dark:text-[#A1A1AA] dark:hover:bg-white/10"
@@ -724,7 +739,7 @@ export function InstrumentTunerControl() {
             </div>
 
             {preset.strings.length > 0 ? (
-              <div className="grid grid-cols-4 sm:grid-cols-6 gap-1.5">
+              <div className="grid grid-cols-4 sm:grid-cols-6 gap-1.5 min-w-0">
                 {preset.strings.map((str) => {
                   const isTarget = activeStringTarget?.id === str.id;
                   const isPlayingDrone = activeDroneMidi === str.midi;
@@ -741,7 +756,7 @@ export function InstrumentTunerControl() {
                         setAutoStringDetect(false);
                         void startDroneTone(str.midi, str.label);
                       }}
-                      className={`flex flex-col items-center justify-center rounded-lg border py-1.5 px-1 transition-colors cursor-pointer ${
+                      className={`min-w-0 box-border flex flex-col items-center justify-center rounded-lg border py-1.5 px-1 transition-colors cursor-pointer ${
                         isPlayingDrone
                           ? "border-emerald-500 bg-emerald-50 text-emerald-900 dark:border-emerald-500/60 dark:bg-emerald-500/20 dark:text-emerald-200"
                           : isTarget
@@ -758,37 +773,37 @@ export function InstrumentTunerControl() {
                 })}
               </div>
             ) : (
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 min-w-0">
                 <button
                   type="button"
                   data-testid="tuner-drone-a4"
                   onClick={() => void startDroneTone(69, `A4 (${referenceA4Hz} Hz)`)}
-                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                  className={`inline-flex items-center gap-1.5 max-w-full box-border whitespace-nowrap rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
                     activeDroneMidi === 69
                       ? "border-emerald-500 bg-emerald-50 text-emerald-900 dark:border-emerald-500/60 dark:bg-emerald-500/20 dark:text-emerald-200"
                       : "border-stone-300 bg-white text-stone-800 hover:bg-stone-100 dark:border-[#27273A] dark:bg-[#181825] dark:text-[#F5F3FF]"
                   }`}
                 >
-                  <Volume2 className="h-3.5 w-3.5" aria-hidden="true" />
-                  Play A4 ({referenceA4Hz} Hz)
+                  <Volume2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span>Play A4 ({referenceA4Hz} Hz)</span>
                 </button>
               </div>
             )}
 
             {/* Drone waveform, volume & Stop control */}
-            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-              <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 min-w-0 flex-1">
                 <select
                   aria-label="Reference tone waveform"
                   value={droneWaveform}
                   onChange={(e) => setDroneWaveform(e.target.value as DroneWaveform)}
-                  className="h-7 rounded border border-stone-300 bg-white px-2 text-[11px] text-stone-800 dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
+                  className="h-7 min-w-0 max-w-full box-border rounded border border-stone-300 bg-white px-2 text-[11px] text-stone-800 dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
                 >
                   <option value="triangle">Triangle tone</option>
                   <option value="sine">Sine tone</option>
                 </select>
-                <label className="inline-flex items-center gap-1 text-[10px] text-stone-500 dark:text-[#A1A1AA]">
-                  Vol
+                <label className="inline-flex items-center gap-1.5 min-w-0 text-[10px] text-stone-500 dark:text-[#A1A1AA]">
+                  <span className="shrink-0">Vol</span>
                   <input
                     type="range"
                     aria-label="Reference tone volume"
@@ -797,7 +812,7 @@ export function InstrumentTunerControl() {
                     step={0.02}
                     value={droneVolume}
                     onChange={(e) => setDroneVolume(Number(e.target.value))}
-                    className="w-14 accent-violet-600 dark:accent-[#8B5CF6]"
+                    className="w-20 min-w-0 max-w-full box-border accent-violet-600 dark:accent-[#8B5CF6]"
                   />
                 </label>
               </div>
@@ -807,9 +822,9 @@ export function InstrumentTunerControl() {
                   type="button"
                   data-testid="tuner-stop-drone-btn"
                   onClick={stopDrone}
-                  className="inline-flex h-7 items-center gap-1 rounded border border-red-300 bg-red-50 px-2 text-[11px] font-medium text-red-700 hover:bg-red-100 dark:border-red-500/40 dark:bg-red-500/15 dark:text-red-300"
+                  className="inline-flex h-7 shrink-0 whitespace-nowrap items-center gap-1 rounded border border-red-300 bg-red-50 px-2 text-[11px] font-medium text-red-700 hover:bg-red-100 dark:border-red-500/40 dark:bg-red-500/15 dark:text-red-300"
                 >
-                  <Square className="h-3 w-3" aria-hidden="true" />
+                  <Square className="h-3 w-3 shrink-0" aria-hidden="true" />
                   Stop Tone
                 </button>
               )}
@@ -817,20 +832,20 @@ export function InstrumentTunerControl() {
           </div>
 
           {/* Reference Frequency Calibration (432 - 445 Hz) */}
-          <div className="border-t border-stone-200 pt-2.5 space-y-1.5 dark:border-[#27273A]">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-stone-600 dark:text-[#A1A1AA]">Calibration (A4 Reference)</span>
-              <span data-testid="tuner-reference-hz" className="font-mono font-semibold">
+          <div className="border-t border-stone-200 pt-2.5 space-y-1.5 min-w-0 dark:border-[#27273A]">
+            <div className="flex items-center justify-between gap-2 text-[11px] min-w-0">
+              <span className="truncate text-stone-600 dark:text-[#A1A1AA]">Calibration (A4 Reference)</span>
+              <span data-testid="tuner-reference-hz" className="font-mono font-semibold whitespace-nowrap shrink-0">
                 {referenceA4Hz} Hz
               </span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 min-w-0 w-full box-border">
               <button
                 type="button"
                 aria-label="Decrease A4 reference frequency"
                 onClick={() => setReferenceA4Hz((v) => clampReferenceA4Hz(v - 1))}
                 disabled={referenceA4Hz <= MIN_REFERENCE_A4_HZ}
-                className="h-6 w-6 rounded border border-stone-300 bg-white text-xs font-semibold hover:bg-stone-100 disabled:opacity-40 dark:border-[#27273A] dark:bg-[#181825] dark:hover:bg-white/10"
+                className="h-6 w-6 shrink-0 rounded border border-stone-300 bg-white text-xs font-semibold hover:bg-stone-100 disabled:opacity-40 dark:border-[#27273A] dark:bg-[#181825] dark:hover:bg-white/10"
               >
                 -
               </button>
@@ -842,14 +857,14 @@ export function InstrumentTunerControl() {
                 step={1}
                 value={referenceA4Hz}
                 onChange={(e) => setReferenceA4Hz(clampReferenceA4Hz(Number(e.target.value)))}
-                className="flex-1 accent-violet-600 dark:accent-[#8B5CF6]"
+                className="flex-1 min-w-0 w-full box-border accent-violet-600 dark:accent-[#8B5CF6]"
               />
               <button
                 type="button"
                 aria-label="Increase A4 reference frequency"
                 onClick={() => setReferenceA4Hz((v) => clampReferenceA4Hz(v + 1))}
                 disabled={referenceA4Hz >= MAX_REFERENCE_A4_HZ}
-                className="h-6 w-6 rounded border border-stone-300 bg-white text-xs font-semibold hover:bg-stone-100 disabled:opacity-40 dark:border-[#27273A] dark:bg-[#181825] dark:hover:bg-white/10"
+                className="h-6 w-6 shrink-0 rounded border border-stone-300 bg-white text-xs font-semibold hover:bg-stone-100 disabled:opacity-40 dark:border-[#27273A] dark:bg-[#181825] dark:hover:bg-white/10"
               >
                 +
               </button>
@@ -857,7 +872,7 @@ export function InstrumentTunerControl() {
                 <button
                   type="button"
                   onClick={() => setReferenceA4Hz(DEFAULT_REFERENCE_A4_HZ)}
-                  className="text-[10px] text-violet-700 hover:underline dark:text-[#A78BFA]"
+                  className="shrink-0 whitespace-nowrap text-[10px] text-violet-700 hover:underline dark:text-[#A78BFA]"
                 >
                   440
                 </button>
