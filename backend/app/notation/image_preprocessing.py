@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import io
+import logging
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
 from scipy import ndimage
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_SHEET_IMAGE_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 SUPPORTED_SHEET_IMAGE_MIMES: frozenset[str] = frozenset(
@@ -66,44 +70,90 @@ def is_supported_sheet_image_mime(mime_type: str | None) -> bool:
     return low in SUPPORTED_SHEET_IMAGE_MIMES
 
 
-def _detect_magic_format(data: bytes) -> str | None:
-    if len(data) < 12:
-        return None
+def detect_magic_format(data: bytes) -> str:
+    """Detect canonical score/media format from raw file signature bytes."""
+    if not data:
+        return "unknown"
+    stripped = data.lstrip()
+    if stripped.startswith(b"%PDF-"):
+        return "pdf"
     if data.startswith(b"\xff\xd8\xff"):
-        return "JPEG"
+        return "jpeg"
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "PNG"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "WEBP"
-    return None
+        return "png"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    if data.startswith(b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+                if any(
+                    n.lower().endswith((".xml", ".musicxml")) and "meta-inf" not in n.lower()
+                    for n in zf.namelist()
+                ):
+                    return "mxl"
+        except Exception:
+            pass
+    try:
+        head_text = data[:8192].decode("utf-8-sig", errors="ignore")
+    except Exception:
+        head_text = ""
+    if "<score-partwise" in head_text or "<score-timewise" in head_text:
+        return "musicxml"
+    return "unknown"
+
+
+def detect_score_input_kind(
+    data: bytes,
+    filename: str | None = None,
+    mime_type: str | None = None,
+) -> tuple[str, str]:
+    """Classify score input into ('pdf'|'image'|'musicxml'|'unsupported', fmt) using actual bytes first."""
+    _ = (filename, mime_type)  # Signature wins over extension/MIME; never route images to PDF.
+    magic_fmt = detect_magic_format(data)
+    if magic_fmt == "pdf":
+        return "pdf", "pdf"
+    if magic_fmt in {"jpeg", "png", "webp"}:
+        return "image", magic_fmt
+    if magic_fmt in {"mxl", "musicxml"}:
+        return "musicxml", magic_fmt
+    return "unsupported", "unknown"
+
+
+def _detect_magic_format(data: bytes) -> str | None:
+    fmt = detect_magic_format(data)
+    return {"jpeg": "JPEG", "png": "PNG", "webp": "WEBP"}.get(fmt)
 
 
 def validate_sheet_image_bytes(
     data: bytes,
     filename: str,
     declared_mime: str | None = None,
+    *,
+    strict_extension_match: bool = True,
 ) -> ImageValidationInfo:
-    """Validate actual image content (magic bytes + full Pillow decode) and extension/MIME compatibility."""
+    """Validate actual image content (magic bytes + full Pillow decode) and optional extension/MIME match."""
     if not data or len(data) < 16:
         raise SheetImageValidationError("EMPTY_IMAGE", "Uploaded image file is empty or too small.")
 
-    safe_name = Path(filename or "").name
+    safe_name = Path(filename or "").name or "sheet_image"
     ext = Path(safe_name).suffix.lower()
-    if ext not in SUPPORTED_SHEET_IMAGE_EXTENSIONS:
-        raise SheetImageValidationError(
-            "UNSUPPORTED_IMAGE_FORMAT",
-            f"Unsupported image extension '{ext or '(none)'}'. Supported formats: .jpg, .jpeg, .png, .webp.",
-        )
 
-    clean_mime = (declared_mime or "").split(";", 1)[0].strip().lower()
-    if clean_mime and clean_mime not in SUPPORTED_SHEET_IMAGE_MIMES | {
-        "application/octet-stream",
-        "binary/octet-stream",
-    }:
-        raise SheetImageValidationError(
-            "INVALID_IMAGE_MIME",
-            f"Unsupported MIME type '{declared_mime}' for sheet music image '{safe_name}'.",
-        )
+    if strict_extension_match:
+        if ext not in SUPPORTED_SHEET_IMAGE_EXTENSIONS:
+            raise SheetImageValidationError(
+                "UNSUPPORTED_IMAGE_FORMAT",
+                f"Unsupported image extension '{ext or '(none)'}'. Supported formats: .jpg, .jpeg, .png, .webp.",
+            )
+
+        clean_mime = (declared_mime or "").split(";", 1)[0].strip().lower()
+        if clean_mime and clean_mime not in SUPPORTED_SHEET_IMAGE_MIMES | {
+            "application/octet-stream",
+            "binary/octet-stream",
+        }:
+            raise SheetImageValidationError(
+                "INVALID_IMAGE_MIME",
+                f"Unsupported MIME type '{declared_mime}' for sheet music image '{safe_name}'.",
+            )
 
     magic_fmt = _detect_magic_format(data)
     if magic_fmt not in ALLOWED_PIL_FORMATS:
@@ -112,17 +162,18 @@ def validate_sheet_image_bytes(
             f"File '{safe_name}' does not appear to be a valid JPG, PNG, or WebP image.",
         )
 
-    expected_ext_formats = {
-        ".jpg": "JPEG",
-        ".jpeg": "JPEG",
-        ".png": "PNG",
-        ".webp": "WEBP",
-    }
-    if expected_ext_formats.get(ext) != magic_fmt:
-        raise SheetImageValidationError(
-            "INVALID_IMAGE",
-            f"File '{safe_name}' content ({magic_fmt}) does not match its '{ext}' extension.",
-        )
+    if strict_extension_match:
+        expected_ext_formats = {
+            ".jpg": "JPEG",
+            ".jpeg": "JPEG",
+            ".png": "PNG",
+            ".webp": "WEBP",
+        }
+        if expected_ext_formats.get(ext) != magic_fmt:
+            raise SheetImageValidationError(
+                "INVALID_IMAGE",
+                f"File '{safe_name}' content ({magic_fmt}) does not match its '{ext}' extension.",
+            )
 
     try:
         with Image.open(io.BytesIO(data)) as verify_img:
@@ -355,7 +406,13 @@ def _normalize_lighting_and_contrast(gray: np.ndarray) -> np.ndarray:
     return np.round(stretched).astype(np.uint8)
 
 
-def preprocess_sheet_image_for_omr(input_path: Path, output_path: Path) -> ImagePreprocessReport:
+def preprocess_sheet_image_for_omr(
+    input_path: Path,
+    output_path: Path,
+    *,
+    job_id: str | None = None,
+    page_index: int | None = None,
+) -> ImagePreprocessReport:
     """Conditionally preprocess a sheet music photo/scan to a clean PNG for OMR without mutating input_path."""
     applied_steps: list[str] = []
 
@@ -418,7 +475,7 @@ def preprocess_sheet_image_for_omr(input_path: Path, output_path: Path) -> Image
     output_path.parent.mkdir(parents=True, exist_ok=True)
     gray_img.save(output_path, format="PNG")
 
-    return ImagePreprocessReport(
+    report = ImagePreprocessReport(
         original_size=orig_size,
         output_size=gray_img.size,
         was_clean_scan=is_clean_scan,
@@ -429,3 +486,93 @@ def preprocess_sheet_image_for_omr(input_path: Path, output_path: Path) -> Image
         resized=resized,
         applied_steps=tuple(applied_steps),
     )
+    logger.info(
+        "Preprocessed sheet image (job_id=%s, page=%s, clean=%s, orig=%s, out=%s, skew=%.2f, steps=%s)",
+        job_id or "-",
+        page_index if page_index is not None else "-",
+        report.was_clean_scan,
+        report.original_size,
+        report.output_size,
+        report.skew_angle_deg,
+        list(report.applied_steps),
+    )
+    return report
+
+
+def build_normalized_pdf_from_images(
+    image_paths: list[Path],
+    output_pdf_path: Path,
+    *,
+    dpi: int = 300,
+    job_id: str | None = None,
+) -> Path:
+    """Assemble preprocessed ordered PNG sheet pages into one normalized multi-page PDF at target DPI."""
+    if not image_paths:
+        raise SheetImageValidationError("EMPTY_IMAGE", "No preprocessed images provided for PDF normalization.")
+    if dpi < 72 or dpi > 600:
+        raise SheetImageValidationError("IMAGE_TO_PDF_FAILED", f"Invalid target DPI ({dpi}) for PDF normalization.")
+
+    try:
+        import pymupdf
+    except ImportError as exc:
+        raise SheetImageValidationError(
+            "IMAGE_TO_PDF_FAILED",
+            "PyMuPDF (pymupdf) is required to normalize sheet music images into PDF.",
+        ) from exc
+
+    doc = pymupdf.open()
+    try:
+        for idx, img_path in enumerate(image_paths, start=1):
+            if not img_path.exists():
+                raise SheetImageValidationError(
+                    "IMAGE_TO_PDF_FAILED",
+                    f"Preprocessed image for Page {idx} is missing: {img_path.name}",
+                )
+            with Image.open(img_path) as im:
+                w, h = im.size
+            if w <= 0 or h <= 0:
+                raise SheetImageValidationError(
+                    "IMAGE_TO_PDF_FAILED",
+                    f"Preprocessed Page {idx} has invalid dimensions ({w}x{h}).",
+                )
+            page_w = float(w) * 72.0 / float(dpi)
+            page_h = float(h) * 72.0 / float(dpi)
+            page = doc.new_page(width=page_w, height=page_h)
+            page.insert_image(pymupdf.Rect(0, 0, page_w, page_h), filename=str(img_path))
+
+        output_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(str(output_pdf_path), garbage=3, deflate=True)
+    except SheetImageValidationError:
+        raise
+    except Exception as exc:
+        raise SheetImageValidationError(
+            "IMAGE_TO_PDF_FAILED",
+            f"Failed to normalize sheet music images into multi-page PDF: {exc}",
+        ) from exc
+    finally:
+        doc.close()
+
+    if not output_pdf_path.exists() or output_pdf_path.stat().st_size < 32:
+        raise SheetImageValidationError("IMAGE_TO_PDF_FAILED", "Normalized PDF output was empty or not written.")
+    raw_pdf = output_pdf_path.read_bytes()
+    if not raw_pdf.lstrip().startswith(b"%PDF-"):
+        raise SheetImageValidationError("IMAGE_TO_PDF_FAILED", "Normalized output is not a valid PDF header.")
+
+    check_doc = pymupdf.open(str(output_pdf_path))
+    try:
+        if len(check_doc) != len(image_paths):
+            raise SheetImageValidationError(
+                "IMAGE_TO_PDF_FAILED",
+                f"Normalized PDF page count ({len(check_doc)}) does not match input images ({len(image_paths)}).",
+            )
+    finally:
+        check_doc.close()
+
+    logger.info(
+        "Normalized %d sheet image page(s) into PDF %s at %d DPI (job_id=%s)",
+        len(image_paths),
+        output_pdf_path.name,
+        dpi,
+        job_id or "-",
+    )
+    return output_pdf_path

@@ -13,6 +13,10 @@ from app.models import (
     TranscriptionResult,
     User,
 )
+from app.notation.image_preprocessing import (
+    is_supported_sheet_image_filename,
+    is_supported_sheet_image_mime,
+)
 from app.schemas.transcription import TranscriptionCreateRequest, TranscriptionJobResponse
 from app.workers.job_runner import enqueue_transcription_job
 from app.workers.ws_manager import job_ws_manager
@@ -33,7 +37,19 @@ def _supersede_previous_project_results(db: Session, project_id: str, new_job_id
         .filter(
             TranscriptionJob.project_id == project_id,
             TranscriptionJob.id != new_job_id,
-            TranscriptionJob.status.in_(("queued", "processing", "running")),
+            TranscriptionJob.status.in_(
+                (
+                    "queued",
+                    "validating",
+                    "preprocessing",
+                    "separating",
+                    "transcribing",
+                    "generating_notation",
+                    "finalizing",
+                    "processing",
+                    "running",
+                )
+            ),
         )
         .all()
     )
@@ -276,6 +292,13 @@ def _resolve_retry_source(
                 )
         else:
             settings_json.pop("source_asset_ids", None)
+    elif source_asset and (
+        is_supported_sheet_image_filename(source_asset.original_filename)
+        or is_supported_sheet_image_mime(source_asset.mime_type)
+    ):
+        settings_json["source_asset_ids"] = [source_asset.id]
+        if not settings_json.get("mode"):
+            settings_json["mode"] = "satb_pdf"
 
     if source_asset:
         settings_json.setdefault("source_storage_key", source_asset.storage_path)

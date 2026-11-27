@@ -52,7 +52,12 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
-from app.notation.image_preprocessing import is_supported_sheet_image_filename
+from app.notation.image_preprocessing import (
+    SheetImageValidationError,
+    detect_score_input_kind,
+    is_supported_sheet_image_filename,
+    is_supported_sheet_image_mime,
+)
 from app.notation.melody import (
     extract_lead_melody,
     is_lead_melody_mode,
@@ -268,6 +273,108 @@ class RealTranscriptionHandler:
     def _resolve_download_url(self, raw_url: str) -> str:
         return build_coordinator_url(self.api_base_url, raw_url)
 
+    def _extract_job_page_entries(
+        self,
+        job: dict[str, Any],
+        settings: TranscriptionSettings,
+    ) -> list[dict[str, Any]]:
+        """Collect ordered page entries from the highest-priority non-empty page list."""
+        raw_candidates: list[Any] = []
+        for source_list in (
+            job.get("source_pages"),
+            job.get("media_files"),
+            getattr(settings, "media_files", None),
+            job.get("page_image_urls"),
+            getattr(settings, "page_image_urls", None),
+        ):
+            if isinstance(source_list, list) and len(source_list) > 0:
+                raw_candidates = list(source_list)
+                break
+
+        entries: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        seen_urls: set[str] = set()
+        for idx, item in enumerate(raw_candidates, start=1):
+            if isinstance(item, str):
+                url = item.strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                url_path_name = Path(urlsplit(url).path).name
+                fname = sanitize_filename(url_path_name) if url_path_name else f"page_{idx:03d}.png"
+                entries.append(
+                    {
+                        "asset_id": None,
+                        "page_index": len(entries) + 1,
+                        "filename": fname,
+                        "mime_type": None,
+                        "download_url": url,
+                    }
+                )
+            elif isinstance(item, dict):
+                url = str(item.get("download_url") or item.get("url") or item.get("signed_url") or "").strip()
+                asset_id = str(item.get("asset_id") or item.get("id") or "").strip() or None
+                fname = str(item.get("filename") or item.get("original_filename") or "").strip()
+                mime = item.get("mime_type") or item.get("content_type")
+                if not url and not asset_id:
+                    continue
+                if (asset_id and asset_id in seen_ids) or (url and url in seen_urls):
+                    continue
+                if asset_id:
+                    seen_ids.add(asset_id)
+                if url:
+                    seen_urls.add(url)
+                if not fname and url:
+                    url_path_name = Path(urlsplit(url).path).name
+                    fname = sanitize_filename(url_path_name) if url_path_name else ""
+                entries.append(
+                    {
+                        "asset_id": asset_id,
+                        "page_index": len(entries) + 1,
+                        "filename": sanitize_filename(fname or f"page_{len(entries) + 1:03d}.png"),
+                        "mime_type": mime,
+                        "download_url": url or None,
+                    }
+                )
+        return entries
+
+    def _download_file(
+        self,
+        url: str,
+        dest: Path,
+        *,
+        job_id: str,
+        cancel_event: threading.Event | None,
+        error_code: str = "MEDIA_DOWNLOAD_FAILED",
+        label: str | None = None,
+    ) -> None:
+        try:
+            full_url = self._resolve_download_url(url)
+            with self._client.stream("GET", full_url) as dl_resp:
+                dl_resp.raise_for_status()
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with dest.open("wb") as f:
+                    for chunk in dl_resp.iter_bytes(chunk_size=65536):
+                        self._check_cancelled(job_id, cancel_event)
+                        if chunk:
+                            f.write(chunk)
+        except LeaseLostError:
+            raise
+        except Exception as exc:
+            desc = label or dest.name
+            logger.error("Failed downloading '%s' for job %s: %s", desc, job_id, exc)
+            raise TranscriptionInferenceError(
+                error_code,
+                f"Failed to download '{desc}' (job_id={job_id}): {exc}",
+            ) from exc
+
+        if not dest.exists() or dest.stat().st_size == 0:
+            desc = label or dest.name
+            raise TranscriptionInferenceError(
+                error_code,
+                f"Downloaded file '{desc}' is empty (job_id={job_id}).",
+            )
+
     def handle(
         self,
         job: dict[str, Any],
@@ -275,12 +382,23 @@ class RealTranscriptionHandler:
         cancel_event: threading.Event | None = None,
     ) -> JobCompletionResult:
         job_id = job["id"]
-        source_url = job.get("source_download_url")
+        settings = TranscriptionSettings(**(job.get("settings") or {}))
+        page_entries = self._extract_job_page_entries(job, settings)
+        source_url = job.get("source_download_url") or (
+            page_entries[0].get("download_url") if page_entries else None
+        )
         if not source_url:
             raise TranscriptionInferenceError("MISSING_SOURCE_AUDIO", "Job has no source_download_url.")
 
-        settings = TranscriptionSettings(**(job.get("settings") or {}))
-        safe_name = sanitize_filename(job.get("source_filename") or "input_audio.wav")
+        fallback_name = (
+            page_entries[0].get("filename")
+            if page_entries and page_entries[0].get("filename")
+            else "input_audio.wav"
+        )
+        safe_name = sanitize_filename(job.get("source_filename") or fallback_name)
+        source_mime = job.get("source_mime_type") or (
+            page_entries[0].get("mime_type") if page_entries else None
+        )
         job_engine_raw = job.get("engine")
         job_engine_override = job_engine_raw if job_engine_raw in ("basic_pitch", "transkun") else None
         requested_engine, allow_fallback = resolve_engine_for_instrument(
@@ -294,40 +412,63 @@ class RealTranscriptionHandler:
             local_source = tmp_path / safe_name
             processed_wav = tmp_path / f"normalized_{target_sr}_mono.wav"
 
-            # 1. Download source audio (5%)
+            # 1. Download primary source file (5%)
             self._check_cancelled(job_id, cancel_event)
-            report_progress("validating", 5, "Downloading Source Audio", "Retrieving source media from storage.")
-            full_url = self._resolve_download_url(source_url)
-            with self._client.stream("GET", full_url) as dl_resp:
-                dl_resp.raise_for_status()
-                with local_source.open("wb") as f:
-                    for chunk in dl_resp.iter_bytes(chunk_size=65536):
-                        self._check_cancelled(job_id, cancel_event)
-                        if chunk:
-                            f.write(chunk)
+            report_progress("validating", 5, "Downloading Source Media", "Retrieving source media from storage.")
+            self._download_file(
+                str(source_url),
+                local_source,
+                job_id=job_id,
+                cancel_event=cancel_event,
+                error_code=(
+                    "IMAGE_DOWNLOAD_FAILED"
+                    if (is_supported_sheet_image_filename(safe_name) or is_supported_sheet_image_mime(source_mime))
+                    else "MEDIA_DOWNLOAD_FAILED"
+                ),
+                label=safe_name,
+            )
 
-            if not local_source.exists() or local_source.stat().st_size == 0:
-                raise TranscriptionInferenceError("EMPTY_AUDIO_FILE", "Downloaded source file is empty.")
-
-            # Reverse Transcription: Sheet Music (MXL/MusicXML, PDF, or JPG/PNG/WebP Images) -> ScoreData + MIDI
-            lower_name = safe_name.lower()
-            source_pages = job.get("source_pages") or []
-            is_image_score = is_supported_sheet_image_filename(safe_name) or (
-                bool(source_pages)
-                and any(is_supported_sheet_image_filename(p.get("filename")) for p in source_pages)
+            # Content-signature inspection (never route image bytes to PDF parser even on mismatched extensions)
+            source_bytes = local_source.read_bytes()
+            input_kind, _ = detect_score_input_kind(source_bytes, safe_name, source_mime)
+            has_image_pages = bool(
+                page_entries
+                and any(
+                    is_supported_sheet_image_filename(p.get("filename"))
+                    or is_supported_sheet_image_mime(p.get("mime_type"))
+                    or p.get("download_url") in (job.get("page_image_urls") or [])
+                    for p in page_entries
+                )
+            )
+            is_image_score = input_kind == "image" or (input_kind != "pdf" and input_kind != "musicxml" and has_image_pages)
+            is_direct_xml = input_kind == "musicxml" or (
+                input_kind == "unsupported" and safe_name.lower().endswith((".mxl", ".musicxml"))
+            )
+            is_pdf_score = input_kind == "pdf" or (
+                input_kind == "unsupported"
+                and (safe_name.lower().endswith(".pdf") or str(source_mime or "").lower() == "application/pdf")
             )
             is_score_import = (
                 settings.mode == "satb_pdf"
-                or lower_name.endswith((".pdf", ".mxl", ".musicxml"))
+                or is_direct_xml
                 or is_image_score
+                or is_pdf_score
             )
             if is_score_import:
                 self._check_cancelled(job_id, cancel_event)
-                is_direct_xml = lower_name.endswith((".mxl", ".musicxml"))
                 satb_mode = getattr(settings, "satb_mode", "auto_satb") or "auto_satb"
+
+                if not is_direct_xml and not is_image_score and not is_pdf_score:
+                    hint_img = is_supported_sheet_image_filename(safe_name) or is_supported_sheet_image_mime(source_mime)
+                    err_code = "INVALID_IMAGE" if hint_img else "UNSUPPORTED_INPUT_FORMAT"
+                    raise TranscriptionInferenceError(
+                        err_code,
+                        f"Unsupported or corrupted score input '{safe_name}' (job_id={job_id}). Supported formats: PDF, JPG/JPEG, PNG, WebP, MXL/MusicXML.",
+                    )
+
                 report_progress(
                     "transcribing",
-                    20,
+                    18,
                     "Parsing MusicXML Score"
                     if is_direct_xml
                     else ("Validating Sheet Music Images" if is_image_score else "Validating PDF Score"),
@@ -350,26 +491,39 @@ class RealTranscriptionHandler:
                     elif is_image_score:
                         image_inputs: list[Path] = []
                         image_labels: list[str] = []
-                        if source_pages:
+                        if page_entries:
                             pages_in_dir = tmp_path / "pages_in"
                             pages_in_dir.mkdir(parents=True, exist_ok=True)
-                            for p_idx, p_meta in enumerate(source_pages, start=1):
+                            for p_idx, p_meta in enumerate(page_entries, start=1):
                                 self._check_cancelled(job_id, cancel_event)
                                 raw_p_name = sanitize_filename(p_meta.get("filename") or f"page_{p_idx:03d}.png")
                                 p_ext = Path(raw_p_name).suffix.lower() or ".png"
                                 p_local = pages_in_dir / f"page_{p_idx:03d}{p_ext}"
                                 p_url = p_meta.get("download_url")
                                 if p_idx == 1 and (not p_url or p_url == source_url):
-                                    p_local.write_bytes(local_source.read_bytes())
+                                    p_local.write_bytes(source_bytes)
                                 elif p_url:
-                                    dl_page_url = self._resolve_download_url(str(p_url))
-                                    with self._client.stream("GET", dl_page_url) as p_resp:
-                                        p_resp.raise_for_status()
-                                        with p_local.open("wb") as pf:
-                                            for chunk in p_resp.iter_bytes(chunk_size=65536):
-                                                self._check_cancelled(job_id, cancel_event)
-                                                if chunk:
-                                                    pf.write(chunk)
+                                    self._download_file(
+                                        str(p_url),
+                                        p_local,
+                                        job_id=job_id,
+                                        cancel_event=cancel_event,
+                                        error_code="IMAGE_DOWNLOAD_FAILED",
+                                        label=f"Page {p_idx} ({raw_p_name})",
+                                    )
+                                else:
+                                    raise TranscriptionInferenceError(
+                                        "IMAGE_DOWNLOAD_FAILED",
+                                        f"Missing download URL for Page {p_idx} ({raw_p_name}, job_id={job_id}).",
+                                    )
+                                page_kind, _ = detect_score_input_kind(
+                                    p_local.read_bytes(), raw_p_name, p_meta.get("mime_type")
+                                )
+                                if page_kind != "image":
+                                    raise TranscriptionInferenceError(
+                                        "INVALID_IMAGE",
+                                        f"Page {p_idx} ({raw_p_name}) is not a valid JPG, PNG, or WebP image (detected={page_kind}, job_id={job_id}).",
+                                    )
                                 image_inputs.append(p_local)
                                 image_labels.append(raw_p_name)
                         else:
@@ -384,6 +538,7 @@ class RealTranscriptionHandler:
                             page_filenames=image_labels,
                             progress_callback=lambda pct, stg, msg: report_progress("transcribing", pct, stg, msg),
                             cancel_check=lambda: self._check_cancelled(job_id, cancel_event),
+                            job_id=job_id,
                         )
                     else:
                         omr_res = process_satb_pdf(
@@ -391,15 +546,34 @@ class RealTranscriptionHandler:
                             title=score_title,
                             work_dir=tmp_path / "omr",
                             satb_mode=satb_mode,
+                            job_id=job_id,
                         )
                 except OMRError as exc:
+                    raise TranscriptionInferenceError(exc.code, exc.message) from exc
+                except SheetImageValidationError as exc:
                     raise TranscriptionInferenceError(exc.code, exc.message) from exc
 
                 self._check_cancelled(job_id, cancel_event)
                 report_progress("generating_notation", 75, "Building SATB Score", "Extracting SATB voices and MIDI.")
                 score_data = omr_res.score_data
                 musicxml_str = omr_res.musicxml
-                midi_bytes = score_data_to_midi_bytes(score_data)
+                if not musicxml_str or not score_data or not score_data.notes:
+                    raise TranscriptionInferenceError(
+                        "MUSICXML_GENERATION_FAILED",
+                        f"Score recognition produced no valid MusicXML/notes (job_id={job_id}).",
+                    )
+                try:
+                    midi_bytes = score_data_to_midi_bytes(score_data)
+                except Exception as midi_exc:
+                    raise TranscriptionInferenceError(
+                        "AUDIO_SYNTHESIS_FAILED",
+                        f"Failed generating MIDI/audio representation from recognized score (job_id={job_id}): {midi_exc}",
+                    ) from midi_exc
+                if not midi_bytes:
+                    raise TranscriptionInferenceError(
+                        "AUDIO_SYNTHESIS_FAILED",
+                        f"Generated MIDI output was empty (job_id={job_id}).",
+                    )
                 pdf_b64: str | None = None
                 try:
                     musescore_pdf = _render_pdf_from_musicxml_via_musescore(musicxml_str, title=score_data.title)
@@ -442,6 +616,7 @@ class RealTranscriptionHandler:
                         "engine": "homr",
                         "requested_engine": "homr",
                         "actual_engine": "homr",
+                        "input_type": "musicxml" if is_direct_xml else ("images" if is_image_score else "pdf"),
                         "page_count": omr_res.page_count,
                         "needs_review": omr_res.needs_review,
                         "warnings": omr_res.warnings,

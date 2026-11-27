@@ -16,8 +16,8 @@ import subprocess
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
-from copy import deepcopy
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,6 +26,8 @@ from pypdf import PdfReader
 
 from app.notation.image_preprocessing import (
     SheetImageValidationError,
+    build_normalized_pdf_from_images,
+    detect_score_input_kind,
     preprocess_sheet_image_for_omr,
     validate_sheet_image_bytes,
 )
@@ -316,7 +318,7 @@ def assemble_multipage_musicxml(
 
     if len(page_xml_strings) == 1:
         root = _parse_partwise_root(page_xml_strings[0])
-        has_notes = any(root.findall(".//part/measure/note/pitch"))
+        has_notes = len(root.findall(".//part/measure/note/pitch")) > 0
         if not has_notes:
             raise OMRError(
                 "OMR_PAGE_FAILED",
@@ -1924,6 +1926,7 @@ def _build_separated_satb_musicxml(
 ) -> str:
     """Export cleanly labeled SATB MusicXML preserving measures, rests, ties, fermatas, and lyrics."""
     import music21
+
     from app.notation.generator import apply_scribasheet_musicxml_branding, clean_score_title
 
     out_score = music21.stream.Score()
@@ -2171,11 +2174,33 @@ def process_satb_pdf(
     dpi: int = 250,
     satb_mode: str = "auto_satb",
     omr_engine: str = "auto",
+    job_id: str | None = None,
 ) -> OMRRecognitionResult:
     """Full OMR pipeline: validate PDF -> Audiveris CLI or render+homr -> SATB ScoreData."""
     import music21
 
-    page_count = validate_pdf_bytes(pdf_path.read_bytes())
+    raw_bytes = pdf_path.read_bytes()
+    input_kind, detected_fmt = detect_score_input_kind(raw_bytes, pdf_path.name)
+    if input_kind == "image":
+        logger.warning(
+            "Image content (%s) reached process_satb_pdf (%s, job_id=%s); routing to image OMR pipeline.",
+            detected_fmt,
+            pdf_path.name,
+            job_id or "-",
+        )
+        return process_satb_images(
+            [pdf_path],
+            title=title,
+            work_dir=work_dir,
+            satb_mode=satb_mode,
+            omr_engine=omr_engine,
+            page_filenames=[pdf_path.name],
+            job_id=job_id,
+        )
+    if input_kind == "musicxml":
+        return process_satb_musicxml(pdf_path, title=title, satb_mode=satb_mode)
+
+    page_count = validate_pdf_bytes(raw_bytes)
     use_audiveris = omr_engine == "audiveris" or (
         omr_engine == "auto" and find_audiveris_executable() is not None
     )
@@ -2261,8 +2286,9 @@ def process_satb_images(
     page_filenames: list[str] | None = None,
     progress_callback: Callable[[int, str, str], None] | None = None,
     cancel_check: Callable[[], None] | None = None,
+    job_id: str | None = None,
 ) -> OMRRecognitionResult:
-    """Validate, conditionally preprocess, recognize (per-page), and assemble sheet music images into ScoreData + MusicXML."""
+    """Validate, preprocess, normalize into a 300 DPI PDF, recognize via Audiveris/homr, and return ScoreData + MusicXML."""
     if not image_paths:
         raise OMRError("EMPTY_IMAGE", "No sheet music image files were provided.")
 
@@ -2285,7 +2311,7 @@ def process_satb_images(
     prep_dir = work_dir / "preprocessed"
     prep_dir.mkdir(parents=True, exist_ok=True)
 
-    page_xmls: list[str] = []
+    prep_paths: list[Path] = []
     omr_warnings: list[str] = []
 
     for idx, (src_path, label) in enumerate(zip(image_paths, labels, strict=True), start=1):
@@ -2293,14 +2319,26 @@ def process_satb_images(
             cancel_check()
 
         # 1. Validate content strictly without mutating original image
+        if not src_path.exists():
+            raise OMRError(
+                "INVALID_IMAGE",
+                f"Page {idx} ({label}): downloaded image file is missing on worker.",
+            )
         try:
             raw_bytes = src_path.read_bytes()
-            validate_sheet_image_bytes(raw_bytes, label)
+            validate_sheet_image_bytes(raw_bytes, label, strict_extension_match=False)
         except SheetImageValidationError as exc:
-            raise OMRError(exc.code, f"Page {idx} ({label}): {exc.message}") from exc
+            logger.error(
+                "Invalid image content on Page %s (%s, job_id=%s): %s",
+                idx,
+                label,
+                job_id or "-",
+                exc.message,
+            )
+            raise OMRError("INVALID_IMAGE", f"Page {idx} ({label}): {exc.message}") from exc
 
         if progress_callback:
-            pct = 20 + int(15 * (idx - 1) / max(1, total_pages))
+            pct = 20 + int(12 * (idx - 1) / max(1, total_pages))
             progress_callback(
                 pct,
                 f"Preprocessing Page {idx}/{total_pages}",
@@ -2310,66 +2348,105 @@ def process_satb_images(
         # 2. Conditional OMR preprocessing into work_dir (preserves original file untouched)
         prep_path = prep_dir / f"page_{idx:03d}.png"
         try:
-            preprocess_sheet_image_for_omr(src_path, prep_path)
+            preprocess_sheet_image_for_omr(
+                src_path,
+                prep_path,
+                job_id=job_id,
+                page_index=idx,
+            )
         except Exception as exc:
+            logger.error(
+                "Image preprocessing failed on Page %s (%s, job_id=%s): %s",
+                idx,
+                label,
+                job_id or "-",
+                exc,
+            )
             raise OMRError(
-                "PREPROCESS_FAILED",
+                "IMAGE_PREPROCESS_FAILED",
                 f"Failed to preprocess Page {idx} ({label}) for OMR: {exc}",
             ) from exc
+        prep_paths.append(prep_path)
 
+    if cancel_check:
+        cancel_check()
+
+    # 3. Normalize ordered preprocessed pages into one 300 DPI multi-page PDF for existing Audiveris pipeline
+    if progress_callback:
+        progress_callback(
+            34,
+            "Normalizing Sheet Music Pages",
+            f"Building normalized 300 DPI PDF from {total_pages} page image(s).",
+        )
+    normalized_pdf = work_dir / "normalized_score.pdf"
+    try:
+        build_normalized_pdf_from_images(prep_paths, normalized_pdf, dpi=300, job_id=job_id)
+    except SheetImageValidationError as exc:
+        raise OMRError("IMAGE_TO_PDF_FAILED", exc.message) from exc
+
+    if cancel_check:
+        cancel_check()
+
+    # 4. Run OMR on normalized PDF (Audiveris primary, per-page homr fallback/mode)
+    if use_audiveris:
+        if progress_callback:
+            progress_callback(
+                42,
+                "Recognizing Sheet Music (Audiveris)",
+                f"Running OMR recognition on {total_pages} normalized sheet music page(s).",
+            )
+        try:
+            aud_xml, aud_warn = run_audiveris_on_pdf(normalized_pdf, work_dir / "audiveris")
+            omr_warnings.extend(aud_warn)
+            aud_root = _parse_partwise_root(aud_xml)
+            if len(aud_root.findall(".//part/measure/note/pitch")) == 0:
+                raise OMRError(
+                    "AUDIVERIS_RECOGNITION_FAILED",
+                    "Audiveris produced MusicXML without recognizable pitched notes from the normalized score.",
+                )
+            return _finalize_omr_result(
+                aud_xml,
+                title=title,
+                page_count=total_pages,
+                omr_warnings=omr_warnings,
+                satb_mode=satb_mode,
+                pdf_path=normalized_pdf,
+            )
+        except OMRError as exc:
+            if omr_engine == "auto" and homr_available:
+                logger.warning(
+                    "Audiveris failed on normalized image PDF (job_id=%s): %s; falling back to per-page homr.",
+                    job_id or "-",
+                    exc.message,
+                )
+                omr_warnings.append(f"Used homr fallback after Audiveris error: {exc.message}")
+            else:
+                raise OMRError(
+                    "AUDIVERIS_RECOGNITION_FAILED",
+                    f"Audiveris could not recognize sheet music from normalized PDF: {exc.message}",
+                ) from exc
+
+    # Per-page homr recognition when Audiveris is absent or auto-fallback triggered
+    page_xmls: list[str] = []
+    for idx, (prep_path, label) in enumerate(zip(prep_paths, labels, strict=True), start=1):
         if cancel_check:
             cancel_check()
-
         if progress_callback:
-            pct = 38 + int(32 * (idx - 1) / max(1, total_pages))
+            pct = 45 + int(25 * (idx - 1) / max(1, total_pages))
             progress_callback(
                 pct,
                 f"Recognizing Page {idx}/{total_pages}",
                 f"Running OMR on Page {idx} of {total_pages} ({label}).",
             )
-
-        # 3. Recognize page in user-selected order
-        page_xml: str | None = None
-        last_err: OMRError | None = None
-
-        if use_audiveris:
-            try:
-                page_xml, aud_warn = run_audiveris_on_file(prep_path, work_dir / f"audiveris_p{idx:03d}")
-                omr_warnings.extend(aud_warn)
-            except OMRError as exc:
-                last_err = exc
-                if omr_engine == "auto" and homr_available:
-                    logger.warning(
-                        "Audiveris failed on Page %s (%s): %s; falling back to homr.",
-                        idx,
-                        label,
-                        exc.message,
-                    )
-                    omr_warnings.append(f"Page {idx} ({label}) used homr fallback after Audiveris error.")
-                else:
-                    raise OMRError(
-                        "OMR_PAGE_FAILED",
-                        f"Could not recognize sheet music on Page {idx} ({label}): {exc.message}",
-                    ) from exc
-
-        if page_xml is None and (not use_audiveris or (omr_engine == "auto" and homr_available)):
-            try:
-                page_xml, homr_warn = run_homr_on_images([prep_path])
-                omr_warnings.extend(homr_warn)
-            except OMRError as exc:
-                raise OMRError(
-                    "OMR_PAGE_FAILED",
-                    f"Could not recognize sheet music on Page {idx} ({label}): {exc.message}",
-                ) from exc
-
-        if not page_xml:
-            detail = last_err.message if last_err else "No MusicXML generated."
+        try:
+            page_xml, homr_warn = run_homr_on_images([prep_path])
+            omr_warnings.extend(homr_warn)
+        except OMRError as exc:
             raise OMRError(
                 "OMR_PAGE_FAILED",
-                f"Could not recognize sheet music on Page {idx} ({label}): {detail}",
-            )
+                f"Could not recognize sheet music on Page {idx} ({label}): {exc.message}",
+            ) from exc
 
-        # Confirm page contains actual notation before assembling
         try:
             page_root = _parse_partwise_root(page_xml)
         except Exception as exc:
@@ -2383,7 +2460,6 @@ def process_satb_images(
                 "OMR_PAGE_FAILED",
                 f"No musical notes could be recognized on Page {idx} ({label}). Please ensure the image is a clear, readable sheet music score.",
             )
-
         page_xmls.append(page_xml)
 
     if cancel_check:
@@ -2398,5 +2474,5 @@ def process_satb_images(
         page_count=total_pages,
         omr_warnings=omr_warnings,
         satb_mode=satb_mode,
-        pdf_path=None,
+        pdf_path=normalized_pdf,
     )

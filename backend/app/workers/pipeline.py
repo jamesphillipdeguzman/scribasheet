@@ -26,7 +26,11 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
-from app.notation.image_preprocessing import is_supported_sheet_image_filename
+from app.notation.image_preprocessing import (
+    detect_score_input_kind,
+    is_supported_sheet_image_filename,
+    is_supported_sheet_image_mime,
+)
 from app.notation.melody import is_lead_melody_mode, normalize_transcription_mode
 from app.notation.omr import (
     OMRError,
@@ -137,20 +141,42 @@ def run_transcription_pipeline(job_id: str) -> None:
 
         local_source_path = storage_service.get_local_file_path(asset.storage_path)
         lower_source_name = (asset.original_filename or local_source_path.name).lower()
+        source_bytes = local_source_path.read_bytes() if local_source_path.exists() else b""
+        input_kind, _ = detect_score_input_kind(source_bytes, asset.original_filename, asset.mime_type)
         ordered_page_ids = list(settings.source_asset_ids or [])
-        is_image_score = is_supported_sheet_image_filename(lower_source_name) or bool(ordered_page_ids)
+        is_direct_xml = input_kind == "musicxml" or (
+            input_kind == "unsupported" and lower_source_name.endswith((".mxl", ".musicxml"))
+        )
+        is_image_score = input_kind == "image" or (
+            input_kind not in ("pdf", "musicxml")
+            and (
+                is_supported_sheet_image_filename(lower_source_name)
+                or is_supported_sheet_image_mime(asset.mime_type)
+                or bool(ordered_page_ids)
+            )
+        )
+        is_pdf_score = input_kind == "pdf" or (
+            input_kind == "unsupported"
+            and (lower_source_name.endswith(".pdf") or str(asset.mime_type or "").lower() == "application/pdf")
+        )
         is_score_import = (
             settings.mode == "satb_pdf"
-            or lower_source_name.endswith((".pdf", ".mxl", ".musicxml"))
+            or is_direct_xml
             or is_image_score
+            or is_pdf_score
         )
 
         if is_score_import:
+            if not is_direct_xml and not is_image_score and not is_pdf_score:
+                raise MediaValidationError(
+                    "UNSUPPORTED_INPUT_FORMAT",
+                    f"Unsupported score format for '{asset.original_filename}'. Supported: PDF, JPG/JPEG, PNG, WebP, MXL/MusicXML.",
+                )
             with tempfile.TemporaryDirectory(prefix="scriba_omr_") as tmpdir:
                 tmp_path = Path(tmpdir)
                 satb_mode = getattr(settings, "satb_mode", "auto_satb") or "auto_satb"
                 score_title = resolve_project_score_title(project.title)
-                if lower_source_name.endswith((".mxl", ".musicxml")):
+                if is_direct_xml:
                     _update_job(
                         db,
                         job,
@@ -195,6 +221,7 @@ def run_transcription_pipeline(job_id: str) -> None:
                         page_filenames=page_names,
                         progress_callback=_on_page_progress,
                         cancel_check=_check_not_cancelled,
+                        job_id=job.id,
                     )
                 else:
                     _update_job(
@@ -210,6 +237,7 @@ def run_transcription_pipeline(job_id: str) -> None:
                         title=score_title,
                         work_dir=tmp_path / "omr",
                         satb_mode=satb_mode,
+                        job_id=job.id,
                     )
 
                 _update_job(
@@ -226,32 +254,64 @@ def run_transcription_pipeline(job_id: str) -> None:
 
                 midi_key = storage_service.build_key(job.user_id, project.id, "midi", "transcription.mid")
                 storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
-                midi_asset = MediaAsset(
-                    project_id=project.id,
-                    user_id=job.user_id,
-                    asset_type="midi",
-                    storage_path=midi_key,
-                    original_filename=f"{project.title}.mid",
-                    mime_type="audio/midi",
-                    size_bytes=len(midi_bytes),
-                    duration_seconds=score_data.duration_seconds,
+                existing_midi_assets = (
+                    db.query(MediaAsset)
+                    .filter(MediaAsset.project_id == project.id, MediaAsset.asset_type == "midi")
+                    .order_by(MediaAsset.created_at.desc())
+                    .all()
                 )
-                db.add(midi_asset)
+                if existing_midi_assets:
+                    midi_asset = existing_midi_assets[0]
+                    midi_asset.storage_path = midi_key
+                    midi_asset.original_filename = f"{project.title}.mid"
+                    midi_asset.mime_type = "audio/midi"
+                    midi_asset.size_bytes = len(midi_bytes)
+                    midi_asset.duration_seconds = score_data.duration_seconds
+                    for extra_m in existing_midi_assets[1:]:
+                        db.delete(extra_m)
+                else:
+                    midi_asset = MediaAsset(
+                        project_id=project.id,
+                        user_id=job.user_id,
+                        asset_type="midi",
+                        storage_path=midi_key,
+                        original_filename=f"{project.title}.mid",
+                        mime_type="audio/midi",
+                        size_bytes=len(midi_bytes),
+                        duration_seconds=score_data.duration_seconds,
+                    )
+                    db.add(midi_asset)
 
                 xml_bytes = musicxml_str.encode("utf-8")
                 xml_key = storage_service.build_key(job.user_id, project.id, "musicxml", "score.musicxml")
                 storage_service.save_bytes(xml_key, xml_bytes, content_type="application/vnd.recordare.musicxml+xml")
-                xml_asset = MediaAsset(
-                    project_id=project.id,
-                    user_id=job.user_id,
-                    asset_type="musicxml",
-                    storage_path=xml_key,
-                    original_filename=f"{project.title}.musicxml",
-                    mime_type="application/vnd.recordare.musicxml+xml",
-                    size_bytes=len(xml_bytes),
-                    duration_seconds=score_data.duration_seconds,
+                existing_xml_assets = (
+                    db.query(MediaAsset)
+                    .filter(MediaAsset.project_id == project.id, MediaAsset.asset_type == "musicxml")
+                    .order_by(MediaAsset.created_at.desc())
+                    .all()
                 )
-                db.add(xml_asset)
+                if existing_xml_assets:
+                    xml_asset = existing_xml_assets[0]
+                    xml_asset.storage_path = xml_key
+                    xml_asset.original_filename = f"{project.title}.musicxml"
+                    xml_asset.mime_type = "application/vnd.recordare.musicxml+xml"
+                    xml_asset.size_bytes = len(xml_bytes)
+                    xml_asset.duration_seconds = score_data.duration_seconds
+                    for extra_x in existing_xml_assets[1:]:
+                        db.delete(extra_x)
+                else:
+                    xml_asset = MediaAsset(
+                        project_id=project.id,
+                        user_id=job.user_id,
+                        asset_type="musicxml",
+                        storage_path=xml_key,
+                        original_filename=f"{project.title}.musicxml",
+                        mime_type="application/vnd.recordare.musicxml+xml",
+                        size_bytes=len(xml_bytes),
+                        duration_seconds=score_data.duration_seconds,
+                    )
+                    db.add(xml_asset)
                 db.flush()
 
                 score_payload = score_data.model_dump()

@@ -20,9 +20,12 @@ from PIL import Image
 from pypdf import PdfWriter
 
 from app.core.config import get_settings
+from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob
 from app.notation.generator import render_score_pdf, score_data_to_musicxml
 from app.notation.image_preprocessing import (
     SheetImageValidationError,
+    build_normalized_pdf_from_images,
+    detect_score_input_kind,
     preprocess_sheet_image_for_omr,
     validate_sheet_image_bytes,
 )
@@ -32,6 +35,7 @@ from app.notation.omr import (
     find_audiveris_executable,
     find_homr_executable,
     process_satb_images,
+    process_satb_pdf,
 )
 from app.schemas.score import ScoreData, ScoreNote, ScoreTrack
 from app.worker_agent import RealTranscriptionHandler
@@ -569,6 +573,383 @@ def test_multipage_job_claim_order_persistence_export_and_failure_cleanup(client
         get_settings.cache_clear()
 
 
+def test_content_signature_detection_pdf_guard_and_normalized_pdf(tmp_path) -> None:
+    page_pngs = _render_musicxml_to_page_pngs(_build_real_musicxml_score(measure_count=2), tmp_path / "sig_src", dpi=240)
+    src_png = page_pngs[0]
+    with Image.open(src_png) as im:
+        jpg_buf = io.BytesIO()
+        im.convert("RGB").save(jpg_buf, format="JPEG")
+        webp_buf = io.BytesIO()
+        im.convert("RGB").save(webp_buf, format="WEBP")
+
+    png_bytes = src_png.read_bytes()
+    jpg_bytes = jpg_buf.getvalue()
+    webp_bytes = webp_buf.getvalue()
+    pdf_bytes = _make_blank_pdf_bytes()
+
+    assert detect_score_input_kind(pdf_bytes, "wrong.jpg", "image/jpeg") == ("pdf", "pdf")
+    assert detect_score_input_kind(jpg_bytes, "misleading.pdf", "application/pdf") == ("image", "jpeg")
+    assert detect_score_input_kind(png_bytes, "no_ext", None) == ("image", "png")
+    assert detect_score_input_kind(webp_bytes, "page.webp", "image/webp") == ("image", "webp")
+    assert detect_score_input_kind(b"not valid music bytes", "bad.jpg", "image/jpeg") == ("unsupported", "unknown")
+
+    # Misnamed JPEG saved with .pdf extension never hits validate_pdf_bytes ("File is not a valid PDF document.")
+    misnamed_pdf = tmp_path / "go-tell-it-on-a-mountain.pdf"
+    misnamed_pdf.write_bytes(jpg_bytes)
+    sample_xml = _build_real_musicxml_score(measure_count=2)
+
+    seen_audiveris_inputs: list[tuple[Path, int, bytes]] = []
+
+    def _fake_audiveris(pdf_in: Path, out_dir: Path, *, timeout: int = 300):
+        raw = pdf_in.read_bytes()
+        doc = pymupdf.open(str(pdf_in))
+        try:
+            seen_audiveris_inputs.append((pdf_in, len(doc), raw[:5]))
+        finally:
+            doc.close()
+        return sample_xml, []
+
+    with (
+        patch("app.notation.omr.find_audiveris_executable", return_value=Path("Audiveris.exe")),
+        patch("app.notation.omr.run_audiveris_on_pdf", side_effect=_fake_audiveris),
+    ):
+        res = process_satb_pdf(misnamed_pdf, title="Guarded Score", work_dir=tmp_path / "guard_work")
+
+    assert res.page_count == 1
+    assert len(res.score_data.notes) == 8
+    assert len(seen_audiveris_inputs) == 1
+    assert seen_audiveris_inputs[0][0].name == "normalized_score.pdf"
+    assert seen_audiveris_inputs[0][1] == 1
+    assert seen_audiveris_inputs[0][2] == b"%PDF-"
+
+    # Multi-page image-to-PDF normalization preserves exact page count, order, and ~300 DPI sizing
+    norm_pdf = tmp_path / "multi_norm.pdf"
+    p2_jpg = tmp_path / "p2.jpg"
+    p2_jpg.write_bytes(jpg_bytes)
+    build_normalized_pdf_from_images([src_png, p2_jpg], norm_pdf, dpi=300, job_id="job-norm-1")
+    doc_check = pymupdf.open(str(norm_pdf))
+    try:
+        assert len(doc_check) == 2
+        with Image.open(src_png) as im0:
+            expected_w = im0.width * 72.0 / 300.0
+            assert abs(doc_check[0].rect.width - expected_w) < 1.0
+    finally:
+        doc_check.close()
+
+
+def test_worker_page_image_urls_media_files_and_error_stages(tmp_path) -> None:
+    from app.transcription.basic_pitch_provider import TranscriptionInferenceError
+
+    page_pngs = _render_musicxml_to_page_pngs(_build_real_musicxml_score(measure_count=2), tmp_path / "w_src", dpi=240)
+    with Image.open(page_pngs[0]) as im:
+        jpg_buf = io.BytesIO()
+        im.convert("RGB").save(jpg_buf, format="JPEG")
+        webp_buf = io.BytesIO()
+        im.convert("RGB").save(webp_buf, format="WEBP")
+
+    url_map: dict[str, bytes] = {
+        "http://mock-r2/p1": jpg_buf.getvalue(),
+        "http://mock-r2/p2": webp_buf.getvalue(),
+        "http://mock-r2/bad_text.jpg": b"<html>not an image</html>",
+        "http://mock-r2/corrupt.png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 32,
+    }
+
+    class _StreamResp:
+        def __init__(self, url: str) -> None:
+            self._url = url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def raise_for_status(self):
+            if self._url not in url_map:
+                raise RuntimeError("404 Missing Page")
+
+        def iter_bytes(self, chunk_size: int = 65536):
+            yield url_map[self._url]
+
+    class _FakeClient:
+        def stream(self, _method: str, url: str):
+            return _StreamResp(url)
+
+    sample_xml = _build_real_musicxml_score(measure_count=2)
+    seen_pdf_pages: list[int] = []
+
+    def _fake_audiveris(pdf_in: Path, out_dir: Path, *, timeout: int = 300):
+        doc = pymupdf.open(str(pdf_in))
+        try:
+            seen_pdf_pages.append(len(doc))
+        finally:
+            doc.close()
+        return sample_xml, []
+
+    handler = RealTranscriptionHandler(api_base_url="http://testserver/api/v1", http_client=_FakeClient())  # type: ignore[arg-type]
+
+    # 1. Images supplied via page_image_urls (even without filename extensions on URLs)
+    job_urls = {
+        "id": "job-page-urls-1",
+        "project_id": "proj-1",
+        "project_title": "Go Tell It URLs",
+        "engine": "basic_pitch",
+        "settings": {"mode": "satb_pdf", "instrument": "vocals", "satb_mode": "keep_original"},
+        "page_image_urls": ["http://mock-r2/p1", "http://mock-r2/p2"],
+        "source_filename": None,
+        "artifact_upload_urls": {},
+    }
+    with (
+        patch("app.notation.omr.find_audiveris_executable", return_value=Path("Audiveris.exe")),
+        patch("app.notation.omr.run_audiveris_on_pdf", side_effect=_fake_audiveris),
+    ):
+        res_urls = handler.handle(job_urls, lambda *_args: None)
+    assert res_urls.metadata_json["input_type"] == "images"
+    assert res_urls.metadata_json["page_count"] == 2
+    assert seen_pdf_pages[-1] == 2
+
+    # 2. Images supplied via media_files
+    job_media = {
+        "id": "job-media-files-1",
+        "project_id": "proj-1",
+        "project_title": "Go Tell It MediaFiles",
+        "engine": "basic_pitch",
+        "settings": {"mode": "satb_pdf", "instrument": "vocals", "satb_mode": "keep_original"},
+        "media_files": [
+            {"download_url": "http://mock-r2/p1", "filename": "page_1.jpeg", "mime_type": "image/jpeg"},
+            {"download_url": "http://mock-r2/p2", "filename": "page_2.webp", "mime_type": "image/webp"},
+        ],
+        "artifact_upload_urls": {},
+    }
+    with (
+        patch("app.notation.omr.find_audiveris_executable", return_value=Path("Audiveris.exe")),
+        patch("app.notation.omr.run_audiveris_on_pdf", side_effect=_fake_audiveris),
+    ):
+        res_media = handler.handle(job_media, lambda *_args: None)
+    assert res_media.metadata_json["input_type"] == "images"
+    assert res_media.metadata_json["page_count"] == 2
+
+    # 3. Missing page image download raises stage-specific IMAGE_DOWNLOAD_FAILED
+    bad_dl_job = {
+        **job_urls,
+        "id": "job-missing-page",
+        "page_image_urls": ["http://mock-r2/p1", "http://mock-r2/missing_page"],
+    }
+    with pytest.raises(TranscriptionInferenceError) as exc_dl:
+        handler.handle(bad_dl_job, lambda *_args: None)
+    assert exc_dl.value.code == "IMAGE_DOWNLOAD_FAILED"
+    assert "Page 2" in exc_dl.value.message
+
+    # 4. Text file with misleading .jpg extension raises INVALID_IMAGE (never INVALID_PDF)
+    bad_ext_job = {
+        "id": "job-fake-jpg",
+        "project_id": "proj-1",
+        "settings": {"mode": "satb_pdf", "instrument": "vocals"},
+        "source_download_url": "http://mock-r2/bad_text.jpg",
+        "source_filename": "fake.jpg",
+        "source_mime_type": "image/jpeg",
+        "artifact_upload_urls": {},
+    }
+    with pytest.raises(TranscriptionInferenceError) as exc_fake:
+        handler.handle(bad_ext_job, lambda *_args: None)
+    assert exc_fake.value.code == "INVALID_IMAGE"
+
+    # 5. Corrupted PNG page raises INVALID_IMAGE (identifying Page 2)
+    corrupt_page_job = {
+        **job_urls,
+        "id": "job-corrupt-page",
+        "media_files": [
+            {"download_url": "http://mock-r2/p1", "filename": "ok.jpg", "mime_type": "image/jpeg"},
+            {"download_url": "http://mock-r2/corrupt.png", "filename": "corrupt.png", "mime_type": "image/png"},
+        ],
+        "page_image_urls": [],
+    }
+    with pytest.raises(TranscriptionInferenceError) as exc_corrupt:
+        handler.handle(corrupt_page_job, lambda *_args: None)
+    assert exc_corrupt.value.code == "INVALID_IMAGE"
+    assert "Page 2" in exc_corrupt.value.message
+
+
+def test_retry_failed_jpg_job_succeeds_and_avoids_duplicate_project_or_attachments(
+    client, db_session, tmp_path, monkeypatch
+) -> None:
+    """Reproduce failed 'Go tell it on a mountain from jpg' job, retry via Desktop Worker, and prevent duplicates."""
+    monkeypatch.setenv("JOB_EXECUTION_MODE", "remote_worker")
+    monkeypatch.setenv("WORKER_API_TOKEN", "test-retry-jpg-worker-token")
+    get_settings.cache_clear()
+    try:
+        headers, reg = _auth_headers(client, f"retry_jpg_{uuid.uuid4().hex[:8]}@example.com")
+        user_id = reg["user"]["id"]
+        settings = get_settings()
+        worker_headers = {"X-Worker-Token": settings.WORKER_API_TOKEN}
+
+        proj_res = client.post(
+            "/api/v1/projects",
+            headers=headers,
+            json={
+                "title": "Go tell it on a mountain from jpg",
+                "instrument": "vocals",
+                "transcription_mode": "satb_pdf",
+            },
+        )
+        assert proj_res.status_code == 201, proj_res.text
+        proj_id = proj_res.json()["id"]
+
+        page_pngs = _render_musicxml_to_page_pngs(_build_real_musicxml_score(measure_count=2), tmp_path / "mountain")
+        jpg_buf = io.BytesIO()
+        with Image.open(page_pngs[0]) as im:
+            im.convert("RGB").save(jpg_buf, format="JPEG", quality=94)
+        raw_jpg_bytes = jpg_buf.getvalue()
+
+        up_res = client.post(
+            "/api/v1/uploads",
+            headers=headers,
+            data={"project_id": proj_id},
+            files={"file": ("go-tell-it-on-a-mountain.jpg", raw_jpg_bytes, "image/jpeg")},
+        )
+        assert up_res.status_code == 201, up_res.text
+        orig_asset_id = up_res.json()["id"]
+
+        # Simulate the historical failed JPG job recorded before the worker fix (no source_asset_ids in settings)
+        failed_job = TranscriptionJob(
+            project_id=proj_id,
+            user_id=user_id,
+            source_asset_id=orig_asset_id,
+            status="failed",
+            progress=20,
+            current_stage="Failed",
+            engine="basic_pitch",
+            error_code="INVALID_PDF",
+            error_message="File is not a valid PDF document.",
+            settings_json={
+                "mode": "satb_pdf",
+                "instrument": "vocals",
+                "satb_mode": "keep_original",
+            },
+        )
+        db_session.add(failed_job)
+        db_session.commit()
+        db_session.refresh(failed_job)
+
+        class _ApiStreamResp:
+            def __init__(self, content: bytes) -> None:
+                self._content = content
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            def iter_bytes(self, chunk_size: int = 65536):
+                yield self._content
+
+        class _TestClientBridge:
+            def stream(self, _method: str, url: str):
+                path = url if url.startswith("/") else "/" + url.split("://", 1)[1].split("/", 1)[1]
+                r = client.get(path)
+                assert r.status_code == 200, f"Download failed ({r.status_code}): {path}"
+                return _ApiStreamResp(r.content)
+
+        omr_xml = _build_real_musicxml_score(measure_count=2)
+
+        def _run_retry_round(target_job_id: str) -> None:
+            retry_res = client.post(f"/api/v1/transcriptions/{target_job_id}/retry", headers=headers)
+            assert retry_res.status_code == 202, retry_res.text
+            retry_job = retry_res.json()
+            assert retry_job["project_id"] == proj_id
+            assert retry_job["settings_json"]["source_asset_ids"] == [orig_asset_id]
+
+            claim_res = client.post(
+                "/api/v1/worker/jobs/claim",
+                headers=worker_headers,
+                json={"worker_id": "win-test-retry"},
+            )
+            assert claim_res.status_code == 200
+            claimed = claim_res.json()["job"]
+            assert claimed is not None and claimed["id"] == retry_job["id"]
+            assert claimed["source_filename"] == "go-tell-it-on-a-mountain.jpg"
+            assert claimed["source_mime_type"] == "image/jpeg"
+            assert len(claimed["source_pages"]) == 1
+            assert len(claimed["page_image_urls"]) == 1
+            assert len(claimed["media_files"]) == 1
+
+            handler = RealTranscriptionHandler(
+                api_base_url="http://testserver/api/v1",
+                http_client=_TestClientBridge(),  # type: ignore[arg-type]
+            )
+            with (
+                patch("app.notation.omr.find_audiveris_executable", return_value=Path("Audiveris.exe")),
+                patch("app.notation.omr.run_audiveris_on_pdf", return_value=(omr_xml, [])),
+            ):
+                result = handler.handle(claimed, lambda *_args: None)
+
+            assert result.metadata_json["input_type"] == "images"
+            comp_res = client.post(
+                f"/api/v1/worker/jobs/{retry_job['id']}/complete",
+                headers=worker_headers,
+                json={
+                    "worker_id": "win-test-retry",
+                    "midi_base64": result.midi_base64,
+                    "musicxml_content": result.musicxml_content,
+                    "score_json": result.score_json,
+                    "duration_seconds": result.duration_seconds,
+                    "metadata_json": result.metadata_json,
+                },
+            )
+            assert comp_res.status_code == 200, comp_res.text
+            return retry_job["id"]
+
+        first_retry_id = _run_retry_round(failed_job.id)
+        second_retry_id = _run_retry_round(failed_job.id)
+        assert second_retry_id != first_retry_id
+
+        # Project, score, WAV audio export, and untouched original JPG verified without duplicates
+        proj_after = client.get(f"/api/v1/projects/{proj_id}", headers=headers)
+        assert proj_after.status_code == 200
+        assert proj_after.json()["status"] == "ready"
+
+        score_after = client.get(f"/api/v1/projects/{proj_id}/score", headers=headers)
+        assert score_after.status_code == 200
+        assert "<score-partwise" in score_after.json()["musicxml"]
+        assert len(score_after.json()["score_json"]["notes"]) == 8
+
+        wav_exp = client.post(f"/api/v1/projects/{proj_id}/exports", headers=headers, json={"format": "wav"})
+        assert wav_exp.status_code == 201, wav_exp.text
+        wav_dl = client.get(wav_exp.json()["download_url"], headers=headers)
+        assert wav_dl.status_code == 200 and wav_dl.content[:4] == b"RIFF"
+
+        orig_dl = client.get(f"/api/v1/uploads/{orig_asset_id}/download", headers=headers)
+        assert orig_dl.status_code == 200 and orig_dl.content == raw_jpg_bytes
+
+        assert db_session.query(Project).filter(Project.user_id == user_id).count() == 1
+        assert db_session.query(ProjectScore).filter(ProjectScore.project_id == proj_id).count() == 1
+        assert (
+            db_session.query(MediaAsset)
+            .filter(MediaAsset.project_id == proj_id, MediaAsset.asset_type == "original")
+            .count()
+            == 1
+        )
+        assert (
+            db_session.query(MediaAsset)
+            .filter(MediaAsset.project_id == proj_id, MediaAsset.asset_type == "musicxml")
+            .count()
+            == 1
+        )
+        assert (
+            db_session.query(MediaAsset)
+            .filter(MediaAsset.project_id == proj_id, MediaAsset.asset_type == "midi")
+            .count()
+            == 1
+        )
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+
+
 def test_real_omr_recognizes_actual_sheet_music_images_jpg_png_webp_and_multipage(tmp_path) -> None:
     """Real OMR integration test using installed Audiveris / homr on actual engraved MuseScore sheet music."""
     if find_audiveris_executable() is None and find_homr_executable() is None:
@@ -579,13 +960,15 @@ def test_real_omr_recognizes_actual_sheet_music_images_jpg_png_webp_and_multipag
     p1_pngs = _render_musicxml_to_page_pngs(one_page_xml, tmp_path / "real_1p", dpi=250)
     src_png = p1_pngs[0]
 
-    # Convert same engraved sheet music to JPG, WebP, and rotated/shadowed JPG photo
+    # Convert same engraved sheet music to JPG, JPEG, WebP, and rotated/shadowed JPG photo
     src_jpg = tmp_path / "real_p1.jpg"
+    src_jpeg = tmp_path / "real_p1.jpeg"
     src_webp = tmp_path / "real_p1.webp"
     src_photo_jpg = tmp_path / "real_photo_skew.jpg"
     with Image.open(src_png) as im:
         rgb = im.convert("RGB")
         rgb.save(src_jpg, format="JPEG", quality=95)
+        rgb.save(src_jpeg, format="JPEG", quality=95)
         rgb.save(src_webp, format="WEBP", quality=95)
 
         gray = np.asarray(im.convert("L"), dtype=np.float32)
@@ -596,15 +979,23 @@ def test_real_omr_recognizes_actual_sheet_music_images_jpg_png_webp_and_multipag
         lit = np.clip(rot_arr * (1.0 - 0.25 * (xx / max(1, w))), 0, 255).astype(np.uint8)
         Image.fromarray(lit, mode="L").save(src_photo_jpg, format="JPEG", quality=92)
 
-    # Single-page JPG & WebP through full process_satb_images pipeline
-    for label, img_file in [("clean_jpg", src_jpg), ("clean_webp", src_webp), ("skew_photo_jpg", src_photo_jpg)]:
+    # Single-page JPG, JPEG, PNG, & WebP through full process_satb_images pipeline (with 300 DPI PDF normalization)
+    for label, img_file in [
+        ("clean_jpg", src_jpg),
+        ("clean_jpeg", src_jpeg),
+        ("clean_png", src_png),
+        ("clean_webp", src_webp),
+        ("skew_photo_jpg", src_photo_jpg),
+    ]:
+        work_sub = tmp_path / f"work_{label}"
         omr_res = process_satb_images(
             [img_file],
             title=f"Real OMR {label}",
-            work_dir=tmp_path / f"work_{label}",
+            work_dir=work_sub,
             satb_mode="keep_original",
             omr_engine="auto",
         )
+        assert (work_sub / "normalized_score.pdf").exists()
         assert omr_res.page_count == 1
         assert len(omr_res.score_data.notes) >= 4, f"{label} recognized too few notes: {len(omr_res.score_data.notes)}"
         assert "<score-partwise" in omr_res.musicxml
@@ -613,13 +1004,19 @@ def test_real_omr_recognizes_actual_sheet_music_images_jpg_png_webp_and_multipag
     # Multi-page (2 PNG pages) sequentially assembled into one unified MusicXML score
     two_page_xml = _build_real_musicxml_score(measure_count=4, key_fifths=0, time_sig="4/4")
     p2_pngs = _render_musicxml_to_page_pngs(two_page_xml, tmp_path / "real_p2", dpi=250)
+    work_2p = tmp_path / "work_2p"
     multi_res = process_satb_images(
         [src_png, p2_pngs[0]],
         title="Real Two Page Score",
-        work_dir=tmp_path / "work_2p",
+        work_dir=work_2p,
         satb_mode="keep_original",
         omr_engine="auto",
     )
+    doc_2p = pymupdf.open(str(work_2p / "normalized_score.pdf"))
+    try:
+        assert len(doc_2p) == 2
+    finally:
+        doc_2p.close()
     assert multi_res.page_count == 2
     assert len(multi_res.score_data.notes) >= 8
     root_multi = ET.fromstring(multi_res.musicxml)

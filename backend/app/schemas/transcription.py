@@ -32,6 +32,8 @@ class TranscriptionSettings(BaseModel):
     language: str | None = Field(default=None)
     satb_mode: Literal["auto_satb", "keep_original"] = Field(default="auto_satb")
     source_asset_ids: list[str] | None = Field(default=None)
+    page_image_urls: list[str] | None = Field(default=None)
+    media_files: list[dict[str, Any]] | None = Field(default=None)
     force_overwrite: bool = Field(default=False)
 
 

@@ -24,6 +24,10 @@ from app.models import (
     WorkerNode,
 )
 from app.notation.generator import apply_scribasheet_musicxml_branding, resolve_project_score_title
+from app.notation.image_preprocessing import (
+    is_supported_sheet_image_filename,
+    is_supported_sheet_image_mime,
+)
 from app.schemas.common import serialize_utc_z
 from app.schemas.score import ScoreData
 from app.storage.service import storage_service
@@ -428,12 +432,42 @@ def claim_next_job(
     source_download_url: str | None = None
     if source_asset:
         source_download_url = _signed_url_for_asset(source_asset)
+        if not source_pages and (
+            is_supported_sheet_image_filename(source_asset.original_filename)
+            or is_supported_sheet_image_mime(source_asset.mime_type)
+        ):
+            source_pages = [
+                {
+                    "asset_id": source_asset.id,
+                    "page_index": 1,
+                    "filename": source_asset.original_filename,
+                    "mime_type": source_asset.mime_type,
+                    "download_url": source_download_url,
+                }
+            ]
     elif job_settings.get("source_storage_key"):
         params = storage_service.create_signed_download_params(str(job_settings["source_storage_key"]), job.user_id)
         if "url" in params:
             source_download_url = str(params["url"])
     elif job_settings.get("external_media_url"):
         source_download_url = str(job_settings["external_media_url"])
+
+    explicit_page_urls = job_settings.get("page_image_urls")
+    if isinstance(explicit_page_urls, list) and explicit_page_urls:
+        page_image_urls = [str(u) for u in explicit_page_urls if u]
+    else:
+        page_image_urls = [
+            str(p["download_url"])
+            for p in source_pages
+            if p.get("download_url")
+            and (
+                is_supported_sheet_image_filename(p.get("filename"))
+                or is_supported_sheet_image_mime(p.get("mime_type"))
+            )
+        ]
+
+    explicit_media_files = job_settings.get("media_files")
+    media_files = explicit_media_files if isinstance(explicit_media_files, list) and explicit_media_files else source_pages
 
     artifact_targets: dict[str, dict[str, str | int]] = {}
     if storage_service.is_object_storage:
@@ -455,7 +489,10 @@ def claim_next_job(
             "lease_expires_at": serialize_utc_z(job.lease_expires_at) if job.lease_expires_at else None,
             "source_download_url": source_download_url,
             "source_filename": source_asset.original_filename if source_asset else None,
+            "source_mime_type": source_asset.mime_type if source_asset else None,
             "source_pages": source_pages,
+            "page_image_urls": page_image_urls,
+            "media_files": media_files,
             "artifact_upload_urls": artifact_targets,
         }
     }
@@ -617,41 +654,68 @@ def complete_job(
         except FileNotFoundError:
             pass
 
+    def _upsert_derived_asset(
+        *,
+        asset_type: str,
+        storage_path: str,
+        filename: str,
+        mime_type: str,
+        size_bytes: int,
+    ) -> str:
+        existing_rows = (
+            db.query(MediaAsset)
+            .filter(MediaAsset.project_id == job.project_id, MediaAsset.asset_type == asset_type)
+            .order_by(MediaAsset.created_at.desc())
+            .all()
+        )
+        if existing_rows:
+            primary = existing_rows[0]
+            primary.storage_path = storage_path
+            primary.original_filename = filename
+            primary.mime_type = mime_type
+            primary.size_bytes = size_bytes
+            primary.duration_seconds = payload.duration_seconds
+            for extra in existing_rows[1:]:
+                db.delete(extra)
+            db.flush()
+            return primary.id
+        created = MediaAsset(
+            project_id=job.project_id,
+            user_id=job.user_id,
+            asset_type=asset_type,
+            storage_path=storage_path,
+            original_filename=filename,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            duration_seconds=payload.duration_seconds,
+        )
+        db.add(created)
+        db.flush()
+        return created.id
+
     midi_asset_id: str | None = None
     if midi_key:
         if midi_size_bytes == 0:
             midi_size_bytes = storage_service.get_object_size(midi_key) or 0
-        midi_asset = MediaAsset(
-            project_id=job.project_id,
-            user_id=job.user_id,
+        midi_asset_id = _upsert_derived_asset(
             asset_type="midi",
             storage_path=midi_key,
-            original_filename=f"{resolved_score_title}.mid",
+            filename=f"{resolved_score_title}.mid",
             mime_type="audio/midi",
             size_bytes=midi_size_bytes,
-            duration_seconds=payload.duration_seconds,
         )
-        db.add(midi_asset)
-        db.flush()
-        midi_asset_id = midi_asset.id
 
     xml_asset_id: str | None = None
     if xml_key:
         if xml_size_bytes == 0:
             xml_size_bytes = storage_service.get_object_size(xml_key) or 0
-        xml_asset = MediaAsset(
-            project_id=job.project_id,
-            user_id=job.user_id,
+        xml_asset_id = _upsert_derived_asset(
             asset_type="musicxml",
             storage_path=xml_key,
-            original_filename=f"{resolved_score_title}.musicxml",
+            filename=f"{resolved_score_title}.musicxml",
             mime_type="application/vnd.recordare.musicxml+xml",
             size_bytes=xml_size_bytes,
-            duration_seconds=payload.duration_seconds,
         )
-        db.add(xml_asset)
-        db.flush()
-        xml_asset_id = xml_asset.id
 
     if is_lyrics_only:
         raw_lyrics = (payload.metadata_json or {}).get("lyrics")
