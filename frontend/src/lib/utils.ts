@@ -13,10 +13,21 @@ export function formatDuration(seconds: number | null | undefined): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+export function isScoreImageAsset(
+  asset?: { original_filename?: string | null; mime_type?: string | null } | null,
+): boolean {
+  if (!asset) return false;
+  const name = (asset.original_filename || "").toLowerCase();
+  if (/\.(jpg|jpeg|png|webp)$/i.test(name)) return true;
+  const mime = (asset.mime_type || "").toLowerCase();
+  return mime === "image/jpeg" || mime === "image/jpg" || mime === "image/png" || mime === "image/webp";
+}
+
 export function isScoreMediaAsset(
   asset?: { original_filename?: string | null; mime_type?: string | null } | null,
 ): boolean {
   if (!asset) return false;
+  if (isScoreImageAsset(asset)) return true;
   const mime = (asset.mime_type || "").toLowerCase();
   if (mime.includes("pdf") || mime.includes("musicxml")) return true;
   const name = (asset.original_filename || "").toLowerCase();
@@ -42,6 +53,7 @@ export const GENERIC_PROJECT_TITLE_PLACEHOLDERS = new Set([
   "untitled",
   "untitled project",
   "untitled score",
+  "untitled transcription",
   "new transcription",
   "scribasheet",
   "scribasheet transcription",
@@ -49,10 +61,25 @@ export const GENERIC_PROJECT_TITLE_PLACEHOLDERS = new Set([
 ]);
 
 const SCORE_OR_MEDIA_EXT_RE =
-  /\.(?:pdf|mxl|musicxml|xml|mid|midi|mp3|wav|webm|ogg|m4a|flac|aac)$/i;
+  /\.(?:pdf|mxl|musicxml|xml|jpg|jpeg|png|webp|mid|midi|mp3|wav|webm|ogg|m4a|flac|aac)$/i;
 
 const RECORDING_FILENAME_TITLE_RE =
   /^(?:tab[-_\s]?audio|mic[-_\s]?recording|recording)[-_\s]*\d+(?:[-_\s]*trimmed)?$/i;
+
+export function deriveProjectTitleFromFilename(filename?: string | null): string {
+  const base = (filename || "")
+    .trim()
+    .split(/[\\/]/)
+    .pop()
+    ?.replace(SCORE_OR_MEDIA_EXT_RE, "")
+    .replace(/[_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim() || "";
+  if (!base || GENERIC_PROJECT_TITLE_PLACEHOLDERS.has(base.toLowerCase())) {
+    return "Untitled Score";
+  }
+  return base.slice(0, 120);
+}
 
 export function isPlaceholderProjectTitle(title?: string | null): boolean {
   const cleaned = (title || "").trim().replace(SCORE_OR_MEDIA_EXT_RE, "").trim().toLowerCase();

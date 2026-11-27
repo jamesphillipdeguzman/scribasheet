@@ -17,12 +17,18 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from copy import deepcopy
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pypdf import PdfReader
 
+from app.notation.image_preprocessing import (
+    SheetImageValidationError,
+    preprocess_sheet_image_for_omr,
+    validate_sheet_image_bytes,
+)
 from app.schemas.score import ScoreData, ScoreNote, ScoreTrack
 
 if TYPE_CHECKING:
@@ -190,8 +196,8 @@ def find_audiveris_executable() -> Path | None:
     return win_default if win_default.exists() else None
 
 
-def run_audiveris_on_pdf(pdf_path: Path, out_dir: Path, *, timeout: int = 300) -> tuple[str, list[str]]:
-    """Run Audiveris CLI batch OMR on a PDF and return MusicXML string + warnings."""
+def run_audiveris_on_file(input_path: Path, out_dir: Path, *, timeout: int = 300) -> tuple[str, list[str]]:
+    """Run Audiveris CLI batch OMR on a PDF or image file and return MusicXML string + warnings."""
     import music21
 
     aud_bin = find_audiveris_executable()
@@ -199,7 +205,7 @@ def run_audiveris_on_pdf(pdf_path: Path, out_dir: Path, *, timeout: int = 300) -
         raise OMRError("OMR_DEPENDENCY_MISSING", "Audiveris CLI is not installed.")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [str(aud_bin), "-batch", "-export", "-output", str(out_dir), str(pdf_path)]
+    cmd = [str(aud_bin), "-batch", "-export", "-output", str(out_dir), str(input_path)]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
@@ -220,49 +226,246 @@ def run_audiveris_on_pdf(pdf_path: Path, out_dir: Path, *, timeout: int = 300) -
     return xml_str, []
 
 
-def _merge_multipage_scores(page_xml_paths: list[Path]) -> tuple[music21.stream.Score, list[str]]:
-    """Merge recognized page MusicXML files sequentially by part index."""
+def run_audiveris_on_pdf(pdf_path: Path, out_dir: Path, *, timeout: int = 300) -> tuple[str, list[str]]:
+    """Run Audiveris CLI batch OMR on a PDF and return MusicXML string + warnings."""
+    return run_audiveris_on_file(pdf_path, out_dir, timeout=timeout)
+
+
+def _xml_sig(el: ET.Element | None) -> str:
+    if el is None:
+        return ""
+    return re.sub(r"\s+", " ", ET.tostring(el, encoding="unicode")).strip()
+
+
+def _parse_partwise_root(xml_str: str) -> ET.Element:
+    """Parse MusicXML string to a <score-partwise> ElementTree root (converting timewise via music21 if needed)."""
+    cleaned = xml_str.lstrip("\ufeff").strip()
+    root = ET.fromstring(cleaned)
+    if root.tag.endswith("score-partwise"):
+        return root
+    if root.tag.endswith("score-timewise"):
+        import music21
+
+        parsed = music21.converter.parseData(cleaned, format="musicxml")
+        converted = music21.musicxml.m21ToXml.GeneralObjectExporter(parsed).parse().decode("utf-8")
+        return ET.fromstring(converted.lstrip("\ufeff").strip())
+    raise ValueError(f"Unexpected MusicXML root element '{root.tag}'.")
+
+
+def _extract_part_musical_state(part_el: ET.Element, state: dict[str, object]) -> None:
+    """Walk all measures in a <part> and update running divisions/staves/key/time/clefs state."""
+    for m_el in part_el.findall("measure"):
+        for attrs in m_el.findall("attributes"):
+            div_txt = (attrs.findtext("divisions") or "").strip()
+            if div_txt:
+                state["divisions"] = div_txt
+            staves_txt = (attrs.findtext("staves") or "").strip()
+            if staves_txt:
+                state["staves"] = staves_txt
+            key_el = attrs.find("key")
+            if key_el is not None:
+                state["key"] = _xml_sig(key_el)
+            time_el = attrs.find("time")
+            if time_el is not None:
+                state["time"] = _xml_sig(time_el)
+            clefs = list(attrs.findall("clef"))
+            if clefs:
+                clef_map: dict[str, str] = dict(state.get("clefs") or {})  # type: ignore[arg-type]
+                for c in clefs:
+                    clef_map[c.attrib.get("number") or "1"] = _xml_sig(c)
+                state["clefs"] = clef_map
+
+
+def _build_rest_measure_matching_state(measure_num: int, state: dict[str, object]) -> ET.Element:
+    """Create a whole-measure rest matching the part's running divisions and time signature."""
+    divisions = int(float(str(state.get("divisions") or "1")))
+    beats = 4
+    beat_type = 4
+    time_sig_xml = str(state.get("time") or "")
+    if time_sig_xml:
+        try:
+            t_el = ET.fromstring(time_sig_xml)
+            beats = max(1, int((t_el.findtext("beats") or "4").strip()))
+            beat_type = max(1, int((t_el.findtext("beat-type") or "4").strip()))
+        except Exception:
+            pass
+    dur = max(1, round(divisions * beats * (4.0 / beat_type)))
+    m = ET.Element("measure", {"number": str(measure_num)})
+    note = ET.SubElement(m, "note")
+    ET.SubElement(note, "rest", {"measure": "yes"})
+    dur_el = ET.SubElement(note, "duration")
+    dur_el.text = str(dur)
+    v_el = ET.SubElement(note, "voice")
+    v_el.text = "1"
+    return m
+
+
+def assemble_multipage_musicxml(
+    page_xml_strings: list[str],
+    *,
+    page_labels: list[str] | None = None,
+) -> tuple[str, list[str]]:
+    """Sequentially assemble recognized per-page MusicXML strings into one coherent score."""
     import music21
 
+    if not page_xml_strings:
+        raise OMRError("OMR_EMPTY_OUTPUT", "No recognized page MusicXML files were provided for assembly.")
+
     warnings: list[str] = []
-    if len(page_xml_paths) == 1:
-        return music21.converter.parse(str(page_xml_paths[0])), warnings
+    labels = page_labels or [f"Page {i}" for i in range(1, len(page_xml_strings) + 1)]
 
-    merged = music21.stream.Score()
-    part_streams: list[music21.stream.Part] = []
+    if len(page_xml_strings) == 1:
+        root = _parse_partwise_root(page_xml_strings[0])
+        has_notes = any(root.findall(".//part/measure/note/pitch"))
+        if not has_notes:
+            raise OMRError(
+                "OMR_PAGE_FAILED",
+                f"No musical notation (pitched notes) was recognized on Page 1 ({labels[0]}).",
+            )
+        xml_out = ET.tostring(root, encoding="unicode", xml_declaration=True)
+        music21.converter.parseData(xml_out, format="musicxml")
+        return xml_out, warnings
 
-    for page_idx, xml_path in enumerate(page_xml_paths, start=1):
+    base_root: ET.Element | None = None
+    base_parts: list[ET.Element] = []
+    part_states: list[dict[str, object]] = []
+    last_measure_num = 0
+
+    for idx, raw_xml in enumerate(page_xml_strings, start=1):
+        label = labels[idx - 1] if idx - 1 < len(labels) else f"Page {idx}"
         try:
-            page_score = music21.converter.parse(str(xml_path))
+            page_root = _parse_partwise_root(raw_xml)
         except Exception as exc:
-            warnings.append(f"Page {page_idx} MusicXML parse failed: {exc}")
-            continue
-        if not page_score.parts:
-            warnings.append(f"Page {page_idx} yielded no recognized staves.")
-            continue
-        if not part_streams:
-            for p in page_score.parts:
-                new_p = music21.stream.Part()
-                new_p.partName = p.partName
-                for m in p.getElementsByClass(music21.stream.Measure):
-                    new_p.append(m)
-                part_streams.append(new_p)
-        else:
-            if len(page_score.parts) != len(part_streams):
-                warnings.append(
-                    f"Page {page_idx} has {len(page_score.parts)} staves (expected {len(part_streams)})."
-                )
-            for p_idx, target_p in enumerate(part_streams):
-                if p_idx >= len(page_score.parts):
-                    break
-                base_num = len(list(target_p.getElementsByClass(music21.stream.Measure)))
-                for m_offset, m in enumerate(page_score.parts[p_idx].getElementsByClass(music21.stream.Measure), start=1):
-                    m.number = base_num + m_offset
-                    target_p.append(m)
+            raise OMRError(
+                "OMR_PAGE_FAILED",
+                f"Page {idx} ({label}) produced invalid MusicXML: {exc}",
+            ) from exc
 
-    for p in part_streams:
-        merged.insert(0, p)
-    return merged, warnings
+        page_parts = list(page_root.findall("part"))
+        if not page_parts or not any(p.findall("./measure") for p in page_parts):
+            raise OMRError(
+                "OMR_PAGE_FAILED",
+                f"Page {idx} ({label}) yielded no recognized staves or measures.",
+            )
+
+        if base_root is None:
+            base_root = deepcopy(page_root)
+            base_parts = list(base_root.findall("part"))
+            for bp in base_parts:
+                st: dict[str, object] = {"divisions": "1", "staves": "1", "key": "", "time": "", "clefs": {}}
+                _extract_part_musical_state(bp, st)
+                part_states.append(st)
+            first_measures = base_parts[0].findall("measure")
+            for m in first_measures:
+                try:
+                    num = int(m.attrib.get("number") or "0")
+                except ValueError:
+                    num = last_measure_num + 1
+                last_measure_num = max(last_measure_num, num)
+            if last_measure_num == 0:
+                last_measure_num = len(first_measures)
+            continue
+
+        if len(page_parts) != len(base_parts):
+            warnings.append(
+                f"Page {idx} ({label}) has {len(page_parts)} staves (expected {len(base_parts)}); aligning parts cleanly."
+            )
+
+        page_measure_count = max(len(p.findall("measure")) for p in page_parts)
+        for p_idx, base_part in enumerate(base_parts):
+            st = part_states[p_idx]
+            if p_idx >= len(page_parts):
+                for m_offset in range(1, page_measure_count + 1):
+                    base_part.append(_build_rest_measure_matching_state(last_measure_num + m_offset, st))
+                continue
+
+            src_measures = list(page_parts[p_idx].findall("measure"))
+            for m_idx, src_m in enumerate(src_measures):
+                m_copy = deepcopy(src_m)
+                next_num = last_measure_num + m_idx + 1
+                m_copy.set("number", str(next_num))
+                m_copy.attrib.pop("implicit", None)
+
+                # Inspect <attributes>: strip redundant repeated key/time/clef/divisions on page break
+                # while keeping genuine mid-piece changes intact.
+                for attrs in list(m_copy.findall("attributes")):
+                    div_el = attrs.find("divisions")
+                    if div_el is not None:
+                        div_val = (div_el.text or "").strip()
+                        if div_val and div_val == st.get("divisions") and m_idx == 0:
+                            attrs.remove(div_el)
+                        elif div_val:
+                            st["divisions"] = div_val
+
+                    staves_el = attrs.find("staves")
+                    if staves_el is not None:
+                        st_val = (staves_el.text or "").strip()
+                        if st_val and st_val == st.get("staves") and m_idx == 0:
+                            attrs.remove(staves_el)
+                        elif st_val:
+                            st["staves"] = st_val
+
+                    key_el = attrs.find("key")
+                    if key_el is not None:
+                        k_sig = _xml_sig(key_el)
+                        if m_idx == 0 and k_sig == st.get("key"):
+                            attrs.remove(key_el)
+                        else:
+                            st["key"] = k_sig
+
+                    time_el = attrs.find("time")
+                    if time_el is not None:
+                        t_sig = _xml_sig(time_el)
+                        if m_idx == 0 and t_sig == st.get("time"):
+                            attrs.remove(time_el)
+                        else:
+                            st["time"] = t_sig
+
+                    clef_map: dict[str, str] = dict(st.get("clefs") or {})  # type: ignore[arg-type]
+                    for clef_el in list(attrs.findall("clef")):
+                        c_num = clef_el.attrib.get("number") or "1"
+                        c_sig = _xml_sig(clef_el)
+                        if m_idx == 0 and clef_map.get(c_num) == c_sig:
+                            attrs.remove(clef_el)
+                        else:
+                            clef_map[c_num] = c_sig
+                    st["clefs"] = clef_map
+
+                    if len(attrs) == 0:
+                        m_copy.remove(attrs)
+
+                if m_idx == 0:
+                    for old_print in list(m_copy.findall("print")):
+                        m_copy.remove(old_print)
+                    m_copy.insert(0, ET.Element("print", {"new-page": "yes"}))
+
+                base_part.append(m_copy)
+
+            # Pad trailing bar if one part on page had fewer measures
+            for m_offset in range(len(src_measures), page_measure_count):
+                base_part.append(_build_rest_measure_matching_state(last_measure_num + m_offset + 1, st))
+
+        last_measure_num += page_measure_count
+
+    assert base_root is not None
+    xml_out = ET.tostring(base_root, encoding="unicode", xml_declaration=True)
+    music21.converter.parseData(xml_out, format="musicxml")
+    return xml_out, warnings
+
+
+def _merge_multipage_scores(page_xml_paths: list[Path]) -> tuple[music21.stream.Score, list[str]]:
+    """Merge recognized page MusicXML files sequentially using coherent MusicXML assembly."""
+    import music21
+
+    if len(page_xml_paths) == 1:
+        return music21.converter.parse(str(page_xml_paths[0])), []
+
+    page_strings = [p.read_text(encoding="utf-8-sig", errors="replace") for p in page_xml_paths]
+    assembled_xml, warnings = assemble_multipage_musicxml(
+        page_strings,
+        page_labels=[p.name for p in page_xml_paths],
+    )
+    return music21.converter.parseData(assembled_xml, format="musicxml"), warnings
 
 
 def run_homr_on_images(image_paths: list[Path], *, timeout_per_page: int = 180) -> tuple[str, list[str]]:
@@ -290,6 +493,11 @@ def run_homr_on_images(image_paths: list[Path], *, timeout_per_page: int = 180) 
         expected_xml = img_path.with_suffix(".musicxml")
         if res.returncode != 0 or not expected_xml.exists():
             err_tail = (res.stderr or res.stdout or "").strip()[-400:]
+            if len(image_paths) == 1:
+                raise OMRError(
+                    "OMR_PAGE_FAILED",
+                    f"OMR could not recognize sheet music on Page {idx}: {err_tail or 'no output generated'}",
+                )
             warnings.append(f"Page {idx} OMR failed (rc={res.returncode}): {err_tail}")
             continue
         xml_outputs.append(expected_xml)
@@ -297,7 +505,7 @@ def run_homr_on_images(image_paths: list[Path], *, timeout_per_page: int = 180) 
     if not xml_outputs:
         raise OMRError(
             "OMR_RECOGNITION_FAILED",
-            "OMR could not recognize musical notation from any page of the uploaded PDF.",
+            "OMR could not recognize musical notation from any page of the uploaded score.",
         )
 
     merged_score, merge_warnings = _merge_multipage_scores(xml_outputs)
@@ -2001,4 +2209,194 @@ def process_satb_pdf(
         assignments=assignments,
         warnings=warnings,
         needs_review=needs_review,
+    )
+
+
+def _finalize_omr_result(
+    xml_str: str,
+    *,
+    title: str,
+    page_count: int,
+    omr_warnings: list[str],
+    satb_mode: str = "auto_satb",
+    pdf_path: Path | None = None,
+) -> OMRRecognitionResult:
+    """Run canonical ScribaSheet OMR cleanup, SATB/staff separation, ScoreData build, and branding."""
+    import music21
+
+    score_data, assignments, warnings, needs_review = musicxml_to_satb_score_data(
+        xml_str,
+        title=title,
+        extra_warnings=omr_warnings,
+        satb_mode=satb_mode,
+        pdf_path=pdf_path,
+    )
+    cleaned_xml, _ = sanitize_omr_musicxml(xml_str, pdf_path=pdf_path)
+    if satb_mode == "auto_satb" and len(score_data.tracks) > 0:
+        parsed_clean = music21.converter.parseData(cleaned_xml, format="musicxml")
+        raw_streams = _extract_part_streams(parsed_clean, satb_mode=satb_mode)
+        out_xml = _build_separated_satb_musicxml(parsed_clean, assignments, raw_streams, title=title)
+    else:
+        from app.notation.generator import apply_scribasheet_musicxml_branding
+
+        out_xml = apply_scribasheet_musicxml_branding(cleaned_xml, title=title)
+
+    return OMRRecognitionResult(
+        musicxml=out_xml,
+        score_data=score_data,
+        page_count=page_count,
+        assignments=assignments,
+        warnings=warnings,
+        needs_review=needs_review,
+    )
+
+
+def process_satb_images(
+    image_paths: list[Path],
+    *,
+    title: str = "Sheet Music Score",
+    work_dir: Path,
+    satb_mode: str = "auto_satb",
+    omr_engine: str = "auto",
+    page_filenames: list[str] | None = None,
+    progress_callback: Callable[[int, str, str], None] | None = None,
+    cancel_check: Callable[[], None] | None = None,
+) -> OMRRecognitionResult:
+    """Validate, conditionally preprocess, recognize (per-page), and assemble sheet music images into ScoreData + MusicXML."""
+    if not image_paths:
+        raise OMRError("EMPTY_IMAGE", "No sheet music image files were provided.")
+
+    total_pages = len(image_paths)
+    labels = [
+        (page_filenames[idx - 1] if page_filenames and idx - 1 < len(page_filenames) else p.name)
+        for idx, p in enumerate(image_paths, start=1)
+    ]
+
+    use_audiveris = omr_engine == "audiveris" or (
+        omr_engine == "auto" and find_audiveris_executable() is not None
+    )
+    homr_available = find_homr_executable() is not None
+    if not use_audiveris and not homr_available:
+        raise OMRError(
+            "OMR_DEPENDENCY_MISSING",
+            "No OMR engine is installed (Audiveris or homr). Configure Audiveris or backend/.venv_omr.",
+        )
+
+    prep_dir = work_dir / "preprocessed"
+    prep_dir.mkdir(parents=True, exist_ok=True)
+
+    page_xmls: list[str] = []
+    omr_warnings: list[str] = []
+
+    for idx, (src_path, label) in enumerate(zip(image_paths, labels, strict=True), start=1):
+        if cancel_check:
+            cancel_check()
+
+        # 1. Validate content strictly without mutating original image
+        try:
+            raw_bytes = src_path.read_bytes()
+            validate_sheet_image_bytes(raw_bytes, label)
+        except SheetImageValidationError as exc:
+            raise OMRError(exc.code, f"Page {idx} ({label}): {exc.message}") from exc
+
+        if progress_callback:
+            pct = 20 + int(15 * (idx - 1) / max(1, total_pages))
+            progress_callback(
+                pct,
+                f"Preprocessing Page {idx}/{total_pages}",
+                f"Checking and preparing sheet music image '{label}'.",
+            )
+
+        # 2. Conditional OMR preprocessing into work_dir (preserves original file untouched)
+        prep_path = prep_dir / f"page_{idx:03d}.png"
+        try:
+            preprocess_sheet_image_for_omr(src_path, prep_path)
+        except Exception as exc:
+            raise OMRError(
+                "PREPROCESS_FAILED",
+                f"Failed to preprocess Page {idx} ({label}) for OMR: {exc}",
+            ) from exc
+
+        if cancel_check:
+            cancel_check()
+
+        if progress_callback:
+            pct = 38 + int(32 * (idx - 1) / max(1, total_pages))
+            progress_callback(
+                pct,
+                f"Recognizing Page {idx}/{total_pages}",
+                f"Running OMR on Page {idx} of {total_pages} ({label}).",
+            )
+
+        # 3. Recognize page in user-selected order
+        page_xml: str | None = None
+        last_err: OMRError | None = None
+
+        if use_audiveris:
+            try:
+                page_xml, aud_warn = run_audiveris_on_file(prep_path, work_dir / f"audiveris_p{idx:03d}")
+                omr_warnings.extend(aud_warn)
+            except OMRError as exc:
+                last_err = exc
+                if omr_engine == "auto" and homr_available:
+                    logger.warning(
+                        "Audiveris failed on Page %s (%s): %s; falling back to homr.",
+                        idx,
+                        label,
+                        exc.message,
+                    )
+                    omr_warnings.append(f"Page {idx} ({label}) used homr fallback after Audiveris error.")
+                else:
+                    raise OMRError(
+                        "OMR_PAGE_FAILED",
+                        f"Could not recognize sheet music on Page {idx} ({label}): {exc.message}",
+                    ) from exc
+
+        if page_xml is None and (not use_audiveris or (omr_engine == "auto" and homr_available)):
+            try:
+                page_xml, homr_warn = run_homr_on_images([prep_path])
+                omr_warnings.extend(homr_warn)
+            except OMRError as exc:
+                raise OMRError(
+                    "OMR_PAGE_FAILED",
+                    f"Could not recognize sheet music on Page {idx} ({label}): {exc.message}",
+                ) from exc
+
+        if not page_xml:
+            detail = last_err.message if last_err else "No MusicXML generated."
+            raise OMRError(
+                "OMR_PAGE_FAILED",
+                f"Could not recognize sheet music on Page {idx} ({label}): {detail}",
+            )
+
+        # Confirm page contains actual notation before assembling
+        try:
+            page_root = _parse_partwise_root(page_xml)
+        except Exception as exc:
+            raise OMRError(
+                "OMR_PAGE_FAILED",
+                f"Page {idx} ({label}) produced invalid MusicXML: {exc}",
+            ) from exc
+
+        if len(page_root.findall(".//part/measure/note/pitch")) == 0:
+            raise OMRError(
+                "OMR_PAGE_FAILED",
+                f"No musical notes could be recognized on Page {idx} ({label}). Please ensure the image is a clear, readable sheet music score.",
+            )
+
+        page_xmls.append(page_xml)
+
+    if cancel_check:
+        cancel_check()
+
+    assembled_xml, asm_warnings = assemble_multipage_musicxml(page_xmls, page_labels=labels)
+    omr_warnings.extend(asm_warnings)
+
+    return _finalize_omr_result(
+        assembled_xml,
+        title=title,
+        page_count=total_pages,
+        omr_warnings=omr_warnings,
+        satb_mode=satb_mode,
+        pdf_path=None,
     )

@@ -31,11 +31,13 @@ class TranscriptionSettings(BaseModel):
     whisper_model: str = Field(default="auto")
     language: str | None = Field(default=None)
     satb_mode: Literal["auto_satb", "keep_original"] = Field(default="auto_satb")
+    source_asset_ids: list[str] | None = Field(default=None)
     force_overwrite: bool = Field(default=False)
 
 
 class TranscriptionCreateRequest(BaseModel):
     source_asset_id: str | None = None
+    source_asset_ids: list[str] | None = None
     settings: TranscriptionSettings = Field(default_factory=TranscriptionSettings)
 
 

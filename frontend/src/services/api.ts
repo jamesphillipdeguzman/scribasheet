@@ -498,10 +498,19 @@ export const api = {
     api.downloadExportBlob(`${API_BASE_URL}/uploads/${assetId}/download`, filename),
 
   // Transcription Jobs
-  startTranscription: (projectId: string, sourceAssetId: string | null, settings: TranscriptionSettings) =>
+  startTranscription: (
+    projectId: string,
+    sourceAssetId: string | null,
+    settings: TranscriptionSettings,
+    sourceAssetIds?: string[] | null,
+  ) =>
     request<TranscriptionJob>(`/projects/${projectId}/transcriptions`, {
       method: "POST",
-      body: JSON.stringify({ source_asset_id: sourceAssetId, settings }),
+      body: JSON.stringify({
+        source_asset_id: sourceAssetId,
+        ...(sourceAssetIds && sourceAssetIds.length > 0 ? { source_asset_ids: sourceAssetIds } : {}),
+        settings,
+      }),
     }),
   listTranscriptions: (projectId: string) =>
     request<TranscriptionJob[]>(`/projects/${projectId}/transcriptions`),

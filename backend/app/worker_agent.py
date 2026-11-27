@@ -52,12 +52,18 @@ from app.notation.generator import (
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
+from app.notation.image_preprocessing import is_supported_sheet_image_filename
 from app.notation.melody import (
     extract_lead_melody,
     is_lead_melody_mode,
     normalize_transcription_mode,
 )
-from app.notation.omr import OMRError, process_satb_musicxml, process_satb_pdf
+from app.notation.omr import (
+    OMRError,
+    process_satb_images,
+    process_satb_musicxml,
+    process_satb_pdf,
+)
 from app.notation.piano_playability import apply_piano_playability, normalize_playability_smoothing
 from app.notation.timing_map import build_timing_map
 from app.schemas.score import ScoreNote
@@ -303,20 +309,35 @@ class RealTranscriptionHandler:
             if not local_source.exists() or local_source.stat().st_size == 0:
                 raise TranscriptionInferenceError("EMPTY_AUDIO_FILE", "Downloaded source file is empty.")
 
-            # Reverse Transcription: SATB Sheet Music (MXL/MusicXML direct or PDF -> OMR) -> SATB ScoreData + MIDI
+            # Reverse Transcription: Sheet Music (MXL/MusicXML, PDF, or JPG/PNG/WebP Images) -> ScoreData + MIDI
             lower_name = safe_name.lower()
-            is_score_import = settings.mode == "satb_pdf" or lower_name.endswith((".pdf", ".mxl", ".musicxml"))
+            source_pages = job.get("source_pages") or []
+            is_image_score = is_supported_sheet_image_filename(safe_name) or (
+                bool(source_pages)
+                and any(is_supported_sheet_image_filename(p.get("filename")) for p in source_pages)
+            )
+            is_score_import = (
+                settings.mode == "satb_pdf"
+                or lower_name.endswith((".pdf", ".mxl", ".musicxml"))
+                or is_image_score
+            )
             if is_score_import:
                 self._check_cancelled(job_id, cancel_event)
                 is_direct_xml = lower_name.endswith((".mxl", ".musicxml"))
                 satb_mode = getattr(settings, "satb_mode", "auto_satb") or "auto_satb"
                 report_progress(
                     "transcribing",
-                    25,
-                    "Parsing MusicXML Score" if is_direct_xml else "Validating PDF Score",
+                    20,
+                    "Parsing MusicXML Score"
+                    if is_direct_xml
+                    else ("Validating Sheet Music Images" if is_image_score else "Validating PDF Score"),
                     "Reading MusicXML/MXL score directly."
                     if is_direct_xml
-                    else "Inspecting sheet music PDF pages.",
+                    else (
+                        "Preparing uploaded sheet music images for OMR."
+                        if is_image_score
+                        else "Inspecting sheet music PDF pages."
+                    ),
                 )
                 try:
                     score_title = resolve_project_score_title(job.get("project_title"))
@@ -325,6 +346,44 @@ class RealTranscriptionHandler:
                             local_source,
                             title=score_title,
                             satb_mode=satb_mode,
+                        )
+                    elif is_image_score:
+                        image_inputs: list[Path] = []
+                        image_labels: list[str] = []
+                        if source_pages:
+                            pages_in_dir = tmp_path / "pages_in"
+                            pages_in_dir.mkdir(parents=True, exist_ok=True)
+                            for p_idx, p_meta in enumerate(source_pages, start=1):
+                                self._check_cancelled(job_id, cancel_event)
+                                raw_p_name = sanitize_filename(p_meta.get("filename") or f"page_{p_idx:03d}.png")
+                                p_ext = Path(raw_p_name).suffix.lower() or ".png"
+                                p_local = pages_in_dir / f"page_{p_idx:03d}{p_ext}"
+                                p_url = p_meta.get("download_url")
+                                if p_idx == 1 and (not p_url or p_url == source_url):
+                                    p_local.write_bytes(local_source.read_bytes())
+                                elif p_url:
+                                    dl_page_url = self._resolve_download_url(str(p_url))
+                                    with self._client.stream("GET", dl_page_url) as p_resp:
+                                        p_resp.raise_for_status()
+                                        with p_local.open("wb") as pf:
+                                            for chunk in p_resp.iter_bytes(chunk_size=65536):
+                                                self._check_cancelled(job_id, cancel_event)
+                                                if chunk:
+                                                    pf.write(chunk)
+                                image_inputs.append(p_local)
+                                image_labels.append(raw_p_name)
+                        else:
+                            image_inputs = [local_source]
+                            image_labels = [safe_name]
+
+                        omr_res = process_satb_images(
+                            image_inputs,
+                            title=score_title,
+                            work_dir=tmp_path / "omr",
+                            satb_mode=satb_mode,
+                            page_filenames=image_labels,
+                            progress_callback=lambda pct, stg, msg: report_progress("transcribing", pct, stg, msg),
+                            cancel_check=lambda: self._check_cancelled(job_id, cancel_event),
                         )
                     else:
                         omr_res = process_satb_pdf(

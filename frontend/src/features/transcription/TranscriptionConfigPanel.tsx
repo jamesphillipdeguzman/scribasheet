@@ -287,7 +287,7 @@ export function TranscriptionConfigPanel({
             <option value="keep_original">Keep Original Staves</option>
           </select>
           <p className="text-[11px] text-[#71717A]">
-            MXL/MusicXML files parse directly without OMR; PDF files run OMR. Audio-only options like Demucs are hidden for score files.
+            MXL/MusicXML files parse directly without OMR; PDF and sheet music images (JPG, PNG, WebP) run OMR. Audio-only options like Demucs are hidden for score files.
           </p>
         </div>
       ) : (

@@ -180,7 +180,7 @@ export function DashboardPage() {
                 setNewInstrument("piano");
                 setShowCreateModal(true);
               }}
-              title="Upload a PDF score and turn it into playable SATB practice tracks."
+              title="Upload a PDF or sheet music photos (JPG, PNG, WebP) and turn them into playable scores & audio."
               className="w-full sm:w-auto min-h-[44px]"
             >
               <Music2 className="h-4 w-4" />

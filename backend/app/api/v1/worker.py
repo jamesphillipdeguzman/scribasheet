@@ -389,16 +389,45 @@ def claim_next_job(
             .first()
         )
 
+    def _signed_url_for_asset(a: MediaAsset) -> str:
+        params = storage_service.create_signed_download_params(a.storage_path, job.user_id)
+        if "url" in params:
+            return str(params["url"])
+        return (
+            f"{settings.API_V1_PREFIX}/uploads/{a.id}/stream"
+            f"?sig={params['sig']}&exp={params['exp']}"
+        )
+
+    source_pages: list[dict[str, Any]] = []
+    raw_page_ids = job_settings.get("source_asset_ids")
+    if isinstance(raw_page_ids, list) and len(raw_page_ids) > 0:
+        page_rows = (
+            db.query(MediaAsset)
+            .filter(
+                MediaAsset.id.in_(raw_page_ids),
+                MediaAsset.project_id == job.project_id,
+                MediaAsset.user_id == job.user_id,
+            )
+            .all()
+        )
+        rows_by_id = {r.id: r for r in page_rows}
+        ordered_rows = [rows_by_id[aid] for aid in raw_page_ids if aid in rows_by_id]
+        if ordered_rows:
+            source_asset = ordered_rows[0]
+            source_pages = [
+                {
+                    "asset_id": r.id,
+                    "page_index": idx,
+                    "filename": r.original_filename,
+                    "mime_type": r.mime_type,
+                    "download_url": _signed_url_for_asset(r),
+                }
+                for idx, r in enumerate(ordered_rows, start=1)
+            ]
+
     source_download_url: str | None = None
     if source_asset:
-        params = storage_service.create_signed_download_params(source_asset.storage_path, job.user_id)
-        if "url" in params:
-            source_download_url = str(params["url"])
-        else:
-            source_download_url = (
-                f"{settings.API_V1_PREFIX}/uploads/{source_asset.id}/stream"
-                f"?sig={params['sig']}&exp={params['exp']}"
-            )
+        source_download_url = _signed_url_for_asset(source_asset)
     elif job_settings.get("source_storage_key"):
         params = storage_service.create_signed_download_params(str(job_settings["source_storage_key"]), job.user_id)
         if "url" in params:
@@ -426,6 +455,7 @@ def claim_next_job(
             "lease_expires_at": serialize_utc_z(job.lease_expires_at) if job.lease_expires_at else None,
             "source_download_url": source_download_url,
             "source_filename": source_asset.original_filename if source_asset else None,
+            "source_pages": source_pages,
             "artifact_upload_urls": artifact_targets,
         }
     }

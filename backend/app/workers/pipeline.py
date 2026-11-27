@@ -22,10 +22,18 @@ from app.models import (
     UsageRecord,
 )
 from app.notation.generator import (
+    resolve_project_score_title,
     score_data_to_midi_bytes,
     score_data_to_musicxml,
 )
+from app.notation.image_preprocessing import is_supported_sheet_image_filename
 from app.notation.melody import is_lead_melody_mode, normalize_transcription_mode
+from app.notation.omr import (
+    OMRError,
+    process_satb_images,
+    process_satb_musicxml,
+    process_satb_pdf,
+)
 from app.schemas.transcription import TranscriptionSettings
 from app.storage.service import storage_service
 from app.transcription.basic_pitch_provider import TranscriptionInferenceError
@@ -128,6 +136,189 @@ def run_transcription_pipeline(job_id: str) -> None:
             raise MediaValidationError("NO_SOURCE_MEDIA", "No uploaded audio or video file found for this project.")
 
         local_source_path = storage_service.get_local_file_path(asset.storage_path)
+        lower_source_name = (asset.original_filename or local_source_path.name).lower()
+        ordered_page_ids = list(settings.source_asset_ids or [])
+        is_image_score = is_supported_sheet_image_filename(lower_source_name) or bool(ordered_page_ids)
+        is_score_import = (
+            settings.mode == "satb_pdf"
+            or lower_source_name.endswith((".pdf", ".mxl", ".musicxml"))
+            or is_image_score
+        )
+
+        if is_score_import:
+            with tempfile.TemporaryDirectory(prefix="scriba_omr_") as tmpdir:
+                tmp_path = Path(tmpdir)
+                satb_mode = getattr(settings, "satb_mode", "auto_satb") or "auto_satb"
+                score_title = resolve_project_score_title(project.title)
+                if lower_source_name.endswith((".mxl", ".musicxml")):
+                    _update_job(
+                        db,
+                        job,
+                        status="transcribing",
+                        progress=35,
+                        stage="Parsing MusicXML Score",
+                        log_line="Reading MusicXML/MXL score directly.",
+                    )
+                    omr_res = process_satb_musicxml(local_source_path, title=score_title, satb_mode=satb_mode)
+                elif is_image_score:
+                    page_paths: list[Path] = []
+                    page_names: list[str] = []
+                    if ordered_page_ids:
+                        rows = (
+                            db.query(MediaAsset)
+                            .filter(MediaAsset.id.in_(ordered_page_ids), MediaAsset.project_id == project.id)
+                            .all()
+                        )
+                        by_id = {r.id: r for r in rows}
+                        for aid in ordered_page_ids:
+                            row = by_id.get(aid)
+                            if row:
+                                page_paths.append(storage_service.get_local_file_path(row.storage_path))
+                                page_names.append(row.original_filename)
+                    if not page_paths:
+                        page_paths = [local_source_path]
+                        page_names = [asset.original_filename]
+
+                    def _on_page_progress(pct: int, stg: str, msg: str) -> None:
+                        _update_job(db, job, status="transcribing", progress=pct, stage=stg, log_line=msg)
+
+                    def _check_not_cancelled() -> None:
+                        db.refresh(job)
+                        if job.status == "cancelled":
+                            raise JobCancelledError("Job was cancelled by user.")
+
+                    omr_res = process_satb_images(
+                        page_paths,
+                        title=score_title,
+                        work_dir=tmp_path / "omr",
+                        satb_mode=satb_mode,
+                        page_filenames=page_names,
+                        progress_callback=_on_page_progress,
+                        cancel_check=_check_not_cancelled,
+                    )
+                else:
+                    _update_job(
+                        db,
+                        job,
+                        status="transcribing",
+                        progress=35,
+                        stage="Recognizing PDF Score",
+                        log_line="Running OMR on sheet music PDF.",
+                    )
+                    omr_res = process_satb_pdf(
+                        local_source_path,
+                        title=score_title,
+                        work_dir=tmp_path / "omr",
+                        satb_mode=satb_mode,
+                    )
+
+                _update_job(
+                    db,
+                    job,
+                    status="finalizing",
+                    progress=90,
+                    stage="Finalizing",
+                    log_line="Saving recognized MIDI, MusicXML, and canonical project score.",
+                )
+                score_data = omr_res.score_data
+                musicxml_str = omr_res.musicxml
+                midi_bytes = score_data_to_midi_bytes(score_data)
+
+                midi_key = storage_service.build_key(job.user_id, project.id, "midi", "transcription.mid")
+                storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
+                midi_asset = MediaAsset(
+                    project_id=project.id,
+                    user_id=job.user_id,
+                    asset_type="midi",
+                    storage_path=midi_key,
+                    original_filename=f"{project.title}.mid",
+                    mime_type="audio/midi",
+                    size_bytes=len(midi_bytes),
+                    duration_seconds=score_data.duration_seconds,
+                )
+                db.add(midi_asset)
+
+                xml_bytes = musicxml_str.encode("utf-8")
+                xml_key = storage_service.build_key(job.user_id, project.id, "musicxml", "score.musicxml")
+                storage_service.save_bytes(xml_key, xml_bytes, content_type="application/vnd.recordare.musicxml+xml")
+                xml_asset = MediaAsset(
+                    project_id=project.id,
+                    user_id=job.user_id,
+                    asset_type="musicxml",
+                    storage_path=xml_key,
+                    original_filename=f"{project.title}.musicxml",
+                    mime_type="application/vnd.recordare.musicxml+xml",
+                    size_bytes=len(xml_bytes),
+                    duration_seconds=score_data.duration_seconds,
+                )
+                db.add(xml_asset)
+                db.flush()
+
+                score_payload = score_data.model_dump()
+                score_analysis = dict(score_payload.get("analysis") or {})
+                score_analysis["is_active"] = True
+                score_analysis["job_id"] = job.id
+                score_analysis.pop("superseded_by_job_id", None)
+                score_payload["analysis"] = score_analysis
+
+                existing_score = db.query(ProjectScore).filter(ProjectScore.project_id == project.id).first()
+                if existing_score:
+                    existing_score.version += 1
+                    existing_score.score_json = score_payload
+                    existing_score.musicxml_path = xml_key
+                    existing_score.midi_path = midi_key
+                else:
+                    db.add(
+                        ProjectScore(
+                            project_id=project.id,
+                            version=1,
+                            score_json=score_payload,
+                            musicxml_path=xml_key,
+                            midi_path=midi_key,
+                        )
+                    )
+
+                db.add(
+                    TranscriptionResult(
+                        job_id=job.id,
+                        midi_asset_id=midi_asset.id,
+                        musicxml_asset_id=xml_asset.id,
+                        metadata_json={
+                            "is_active": True,
+                            "job_id": job.id,
+                            "handler": "real_omr_homr",
+                            "branding_version": "scribasheet_v2",
+                            "page_count": omr_res.page_count,
+                            "note_count": len(score_data.notes),
+                            "tempo_bpm": score_data.tempo_bpm,
+                            "key_signature": score_data.key_signature,
+                            "time_signature": score_data.time_signature,
+                            "duration_seconds": score_data.duration_seconds,
+                        },
+                    )
+                )
+                db.add(
+                    UsageRecord(
+                        user_id=job.user_id,
+                        operation="score_omr_pages",
+                        quantity=float(omr_res.page_count),
+                    )
+                )
+                project.status = "ready"
+                project.instrument = settings.instrument
+                project.transcription_mode = "satb_pdf"
+                project.duration_seconds = score_data.duration_seconds
+                job.completed_at = datetime.now(UTC)
+                _update_job(
+                    db,
+                    job,
+                    status="completed",
+                    progress=100,
+                    stage="Completed",
+                    log_line="Sheet music recognition completed successfully.",
+                )
+            return
+
         meta = probe_media(local_source_path)
 
         with tempfile.TemporaryDirectory(prefix="scriba_") as tmpdir:
@@ -422,8 +613,8 @@ def run_transcription_pipeline(job_id: str) -> None:
             if project and project.status == "processing":
                 project.status = "draft"
             db.commit()
-    except MediaValidationError as exc:
-        logger.warning("Media validation failed for job %s: %s", job_id, exc.message)
+    except (MediaValidationError, OMRError) as exc:
+        logger.warning("Validation/OMR failed for job %s: %s", job_id, exc.message)
         _mark_failed(db, job_id, exc.code, exc.message)
     except Exception as exc:
         logger.exception("Transcription job %s failed unexpectedly", job_id)

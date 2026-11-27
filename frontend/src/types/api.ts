@@ -91,6 +91,7 @@ export interface TranscriptionSettings {
   audio_source_type?: "auto" | "full_song" | "solo_piano";
   demucs_model?: string;
   satb_mode?: "auto_satb" | "keep_original";
+  source_asset_ids?: string[] | null;
   show_chord_symbols?: boolean;
 }
 

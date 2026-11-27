@@ -85,8 +85,11 @@ def _resolve_source_type(
         and (analysis.get("source_type") == "midi_playground" or analysis.get("mode") == "midi_playground")
     ):
         return "midi_playground"
-    has_pdf_asset = any((a.original_filename or "").lower().endswith(".pdf") for a in media_assets)
-    if mode == "satb_pdf" or has_pdf_asset:
+    has_score_asset = any(
+        (a.original_filename or "").lower().endswith((".pdf", ".jpg", ".jpeg", ".png", ".webp"))
+        for a in media_assets
+    )
+    if mode == "satb_pdf" or has_score_asset:
         return "satb_pdf"
     if media_assets or score_json:
         return "audio_transcription"

@@ -62,7 +62,14 @@ import { WaveformPlayer } from "@/features/editor/WaveformPlayer";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { MediaUploader } from "@/features/uploads/MediaUploader";
 import { api, ApiError, WS_BASE_URL, getStoredTokens, isAuthError } from "@/services/api";
-import { isScoreMediaAsset, isVideoMediaAsset, resolveDisplayScoreTitle } from "@/lib/utils";
+import {
+  deriveProjectTitleFromFilename,
+  isPlaceholderProjectTitle,
+  isScoreImageAsset,
+  isScoreMediaAsset,
+  isVideoMediaAsset,
+  resolveDisplayScoreTitle,
+} from "@/lib/utils";
 import type { Project, ScoreData, ScoreNote, TranscriptionJob, TranscriptionSettings } from "@/types/api";
 
 type StudioTab = "notation" | "pianoroll" | "chords" | "lyrics" | "exports";
@@ -72,6 +79,7 @@ export function ProjectStudioPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [archiveImportFile, setArchiveImportFile] = useState<File | null>(null);
+  const [orderedImageAssetIds, setOrderedImageAssetIds] = useState<string[]>([]);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const autoCollapsedPlaygroundRef = useRef<string | null>(null);
@@ -350,8 +358,8 @@ export function ProjectStudioPage() {
       setMusicxml(
         res.musicxml
           ? applyScoreTitleToMusicXml(res.musicxml, syncedScore.title, {
-              deduplicateMovementTitle: false,
-            })
+            deduplicateMovementTitle: false,
+          })
           : res.musicxml,
       );
       setScoreVersion(res.version);
@@ -367,9 +375,9 @@ export function ProjectStudioPage() {
         err instanceof ApiError
           ? err.status
           : typeof err === "object" &&
-              err !== null &&
-              "status" in err &&
-              typeof (err as { status?: unknown }).status === "number"
+            err !== null &&
+            "status" in err &&
+            typeof (err as { status?: unknown }).status === "number"
             ? (err as { status: number }).status
             : null;
       if (errStatus === 404) {
@@ -799,8 +807,26 @@ export function ProjectStudioPage() {
         selectedSourceAssetId && project.media_assets.some((a) => a.id === selectedSourceAssetId)
           ? selectedSourceAssetId
           : null;
-      const sourceId = validSelected || sortedOriginals[0]?.id || null;
-      const job = await api.startTranscription(project.id, sourceId, settings);
+      const imageAssets = project.media_assets.filter((a) => a.asset_type === "original" && isScoreImageAsset(a));
+      const imageIdSet = new Set(imageAssets.map((a) => a.id));
+      const activeOrderedImages = [
+        ...orderedImageAssetIds.filter((id) => imageIdSet.has(id)),
+        ...imageAssets
+          .filter((a) => !orderedImageAssetIds.includes(a.id))
+          .sort((a, b) => Date.parse(a.created_at || "") - Date.parse(b.created_at || ""))
+          .map((a) => a.id),
+      ];
+      const useImagePages =
+        activeOrderedImages.length > 0 &&
+        (validSelected ? imageIdSet.has(validSelected) : isScoreImageAsset(sortedOriginals[0] || null));
+
+      const sourceId = useImagePages ? activeOrderedImages[0] : validSelected || sortedOriginals[0]?.id || null;
+      const effectiveSettings: TranscriptionSettings = useImagePages
+        ? { ...settings, mode: "satb_pdf", source_asset_ids: activeOrderedImages }
+        : settings;
+      const job = useImagePages
+        ? await api.startTranscription(project.id, sourceId, effectiveSettings, activeOrderedImages)
+        : await api.startTranscription(project.id, sourceId, effectiveSettings);
       if (gen !== processingGenerationRef.current) return;
       activeJobIdRef.current = job.id;
       setActiveJob(job);
@@ -817,6 +843,35 @@ export function ProjectStudioPage() {
   };
 
   const projectMediaAssets = project?.media_assets || [];
+
+  const jobImageOrderKey = (activeJob?.settings_json?.source_asset_ids || []).join(",");
+  useEffect(() => {
+    const imgs = projectMediaAssets.filter((a) => a.asset_type === "original" && isScoreImageAsset(a));
+    if (imgs.length === 0) {
+      setOrderedImageAssetIds((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
+    const byId = new Map(imgs.map((a) => [a.id, a]));
+    setOrderedImageAssetIds((prev) => {
+      const seedOrder =
+        prev.length > 0
+          ? prev
+          : Array.isArray(activeJob?.settings_json?.source_asset_ids)
+            ? activeJob.settings_json.source_asset_ids
+            : [];
+      const kept = seedOrder.filter((id) => byId.has(id));
+      const keptSet = new Set(kept);
+      const added = imgs
+        .filter((a) => !keptSet.has(a.id))
+        .sort((a, b) => Date.parse(a.created_at || "") - Date.parse(b.created_at || ""))
+        .map((a) => a.id);
+      const next = [...kept, ...added];
+      if (next.length === prev.length && next.every((v, i) => v === prev[i])) {
+        return prev;
+      }
+      return next;
+    });
+  }, [project?.media_assets, jobImageOrderKey]);
   const sortedProjectOriginals = [...projectMediaAssets]
     .filter((a) => a.asset_type === "original")
     .sort((a, b) => Date.parse(b.created_at || "") - Date.parse(a.created_at || ""));
@@ -889,7 +944,7 @@ export function ProjectStudioPage() {
 
   const isMidiPlayground = Boolean(
     project?.transcription_mode === "midi_playground" ||
-      scoreData?.analysis?.source_type === "midi_playground",
+    scoreData?.analysis?.source_type === "midi_playground",
   );
 
   useEffect(() => {
@@ -1266,6 +1321,8 @@ export function ProjectStudioPage() {
                   existingAssets={project.media_assets}
                   selectedSourceAssetId={effectiveSourceAssetId}
                   onSelectSourceAsset={setSelectedSourceAssetId}
+                  orderedImageAssetIds={orderedImageAssetIds}
+                  onReorderImageAssets={setOrderedImageAssetIds}
                   onAudioExtracted={() => queryClient.invalidateQueries({ queryKey: ["project", projectId] })}
                   onArchiveFileDrop={(file) => setArchiveImportFile(file)}
                   hasScore={Boolean(scoreData)}
@@ -1275,10 +1332,38 @@ export function ProjectStudioPage() {
                     Boolean(activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status))
                   }
                   onUploadComplete={(asset) => {
-                    setSelectedSourceAssetId(asset.id);
+                    if (isScoreImageAsset(asset)) {
+                      setOrderedImageAssetIds((prev) =>
+                        prev.includes(asset.id) ? prev : [...prev, asset.id],
+                      );
+                    }
+                    setSelectedSourceAssetId((prev) =>
+                      prev && isScoreImageAsset(asset) ? prev : asset.id,
+                    );
+                    if (
+                      isScoreMediaAsset(asset) &&
+                      sortedProjectOriginals.length === 0 &&
+                      isPlaceholderProjectTitle(effectiveProjectTitle)
+                    ) {
+                      const derived = deriveProjectTitleFromFilename(asset.original_filename);
+                      if (derived && !isPlaceholderProjectTitle(derived)) {
+                        setOptimisticTitle(derived);
+                        void api
+                          .updateProject(project.id, { title: derived })
+                          .then((updated) => {
+                            queryClient.setQueryData(["project", projectId], updated);
+                            setOptimisticTitle(null);
+                            void queryClient.invalidateQueries({ queryKey: ["projects"] });
+                          })
+                          .catch(() => {
+                            setOptimisticTitle(null);
+                          });
+                      }
+                    }
                     void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
                   }}
-                  onMediaRemoved={() => {
+                  onMediaRemoved={(removedId) => {
+                    setOrderedImageAssetIds((prev) => prev.filter((id) => id !== removedId));
                     setSelectedSourceAssetId(null);
                     void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
                   }}
@@ -1562,33 +1647,33 @@ export function ProjectStudioPage() {
                     {(customPickupMode ||
                       (scoreStructure.hasPickup &&
                         ![0.5, 1, 1.5, 2, 3].includes(Number(scoreStructure.pickupBeatsInUnit.toFixed(2))))) && (
-                      <div className="inline-flex items-center gap-1">
-                        <input
-                          type="number"
-                          min={0.25}
-                          max={12}
-                          step={0.25}
-                          aria-label="Custom pickup beats"
-                          data-testid="playground-pickup-custom-input"
-                          value={customPickupInput}
-                          onChange={(e) => setCustomPickupInput(e.target.value)}
-                          className="h-7 w-16 rounded-md border border-stone-300 bg-white px-1.5 font-mono text-xs text-stone-900 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#F5F3FF]"
-                        />
-                        <button
-                          type="button"
-                          data-testid="playground-pickup-custom-apply"
-                          onClick={() => {
-                            const val = Number.parseFloat(customPickupInput);
-                            if (Number.isFinite(val) && val > 0) {
-                              handlePickupChange(val);
-                            }
-                          }}
-                          className="h-7 rounded-md border border-violet-500 bg-violet-600 px-2 text-[11px] font-medium text-white hover:bg-violet-700"
-                        >
-                          Set
-                        </button>
-                      </div>
-                    )}
+                        <div className="inline-flex items-center gap-1">
+                          <input
+                            type="number"
+                            min={0.25}
+                            max={12}
+                            step={0.25}
+                            aria-label="Custom pickup beats"
+                            data-testid="playground-pickup-custom-input"
+                            value={customPickupInput}
+                            onChange={(e) => setCustomPickupInput(e.target.value)}
+                            className="h-7 w-16 rounded-md border border-stone-300 bg-white px-1.5 font-mono text-xs text-stone-900 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#F5F3FF]"
+                          />
+                          <button
+                            type="button"
+                            data-testid="playground-pickup-custom-apply"
+                            onClick={() => {
+                              const val = Number.parseFloat(customPickupInput);
+                              if (Number.isFinite(val) && val > 0) {
+                                handlePickupChange(val);
+                              }
+                            }}
+                            className="h-7 rounded-md border border-violet-500 bg-violet-600 px-2 text-[11px] font-medium text-white hover:bg-violet-700"
+                          >
+                            Set
+                          </button>
+                        </div>
+                      )}
                   </div>
                   <label className="inline-flex items-center gap-1 text-stone-700 dark:text-[#C4C4D4]">
                     Staff

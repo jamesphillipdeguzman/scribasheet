@@ -18,6 +18,13 @@ from app.core.config import get_settings
 from app.core.security import verify_signed_download_token
 from app.db.session import get_db
 from app.models import MediaAsset, Project, TranscriptionJob, User
+from app.notation.image_preprocessing import (
+    SUPPORTED_SHEET_IMAGE_MIMES,
+    SheetImageValidationError,
+    is_supported_sheet_image_filename,
+    is_supported_sheet_image_mime,
+    validate_sheet_image_bytes,
+)
 from app.notation.omr import OMRError, validate_pdf_bytes
 from app.schemas.project import MediaAssetResponse
 from app.storage.service import (
@@ -89,6 +96,7 @@ def presign_upload(
     lower_name = safe_name.lower()
     is_pdf = lower_name.endswith(".pdf")
     is_musicxml = lower_name.endswith((".mxl", ".musicxml"))
+    is_sheet_image = is_supported_sheet_image_filename(safe_name)
     if is_pdf:
         if payload.content_type and "pdf" not in payload.content_type.lower():
             raise HTTPException(
@@ -97,6 +105,16 @@ def presign_upload(
             )
     elif is_musicxml:
         pass
+    elif is_sheet_image:
+        clean_mime = (payload.content_type or "").split(";", 1)[0].strip().lower()
+        if clean_mime and clean_mime not in SUPPORTED_SHEET_IMAGE_MIMES | {
+            "application/octet-stream",
+            "binary/octet-stream",
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported MIME type '{payload.content_type}' for sheet music image upload.",
+            )
     else:
         try:
             validate_upload_extension_and_mime(safe_name, payload.content_type)
@@ -160,14 +178,29 @@ def confirm_presigned_upload(
             )
 
     asset_bytes = actual_size if actual_size is not None else payload.size_bytes
+    safe_confirm_name = sanitize_filename(payload.filename)
+    resolved_mime = payload.content_type
+    if is_supported_sheet_image_filename(safe_confirm_name):
+        try:
+            obj_bytes = storage_service.read_bytes(payload.storage_key)
+            img_info = validate_sheet_image_bytes(obj_bytes, safe_confirm_name, payload.content_type)
+            resolved_mime = img_info.mime_type
+        except SheetImageValidationError as exc:
+            try:
+                storage_service.delete(payload.storage_key)
+            except Exception:
+                pass
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+        except Exception:
+            pass
 
     asset = MediaAsset(
         project_id=project.id,
         user_id=current_user.id,
         asset_type="original",
         storage_path=payload.storage_key,
-        original_filename=sanitize_filename(payload.filename),
-        mime_type=payload.content_type,
+        original_filename=safe_confirm_name,
+        mime_type=resolved_mime,
         size_bytes=asset_bytes,
     )
     db.add(asset)
@@ -226,6 +259,7 @@ async def upload_media(
     lower_name = safe_name.lower()
     is_pdf = lower_name.endswith(".pdf")
     is_musicxml = lower_name.endswith((".mxl", ".musicxml"))
+    is_sheet_image = is_supported_sheet_image_filename(safe_name)
     if is_pdf:
         if file.content_type and "pdf" not in file.content_type.lower():
             raise HTTPException(
@@ -234,6 +268,16 @@ async def upload_media(
             )
     elif is_musicxml:
         pass
+    elif is_sheet_image:
+        clean_mime = (file.content_type or "").split(";", 1)[0].strip().lower()
+        if clean_mime and not is_supported_sheet_image_mime(clean_mime) and clean_mime not in {
+            "application/octet-stream",
+            "binary/octet-stream",
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported MIME type '{file.content_type}' for sheet music image upload.",
+            )
     else:
         try:
             validate_upload_extension_and_mime(safe_name, file.content_type)
@@ -272,6 +316,7 @@ async def upload_media(
         raise
 
     storage_key: str | None = None
+    stored_mime = file.content_type or ("application/pdf" if is_pdf else "application/octet-stream")
     try:
         if is_pdf:
             validate_pdf_bytes(tmp_path.read_bytes())
@@ -285,6 +330,12 @@ async def upload_media(
                 validate_musicxml_bytes(tmp_path.read_bytes(), safe_name)
             except OMRError as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message) from exc
+            duration_sec = None
+            sample_rate = None
+            channels = None
+        elif is_sheet_image:
+            img_info = validate_sheet_image_bytes(tmp_path.read_bytes(), safe_name, file.content_type)
+            stored_mime = img_info.mime_type
             duration_sec = None
             sample_rate = None
             channels = None
@@ -304,9 +355,9 @@ async def upload_media(
             storage_service.save_stream(
                 storage_key,
                 f,
-                content_type=file.content_type or ("application/pdf" if is_pdf else "application/octet-stream"),
+                content_type=stored_mime,
             )
-    except (MediaValidationError, OMRError) as exc:
+    except (MediaValidationError, OMRError, SheetImageValidationError) as exc:
         detail_msg = exc.message if hasattr(exc, "message") else str(exc)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail_msg)
     finally:
@@ -319,7 +370,7 @@ async def upload_media(
         asset_type="original",
         storage_path=storage_key,
         original_filename=safe_name,
-        mime_type=file.content_type or ("application/pdf" if is_pdf else "application/octet-stream"),
+        mime_type=stored_mime,
         size_bytes=total_bytes,
         duration_seconds=duration_sec,
         sample_rate=sample_rate,

@@ -1,15 +1,19 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
+  ArrowDown,
+  ArrowUp,
   CheckCircle2,
   Download,
   FileAudio,
+  FileImage,
   FileText,
   FileVideo,
   Link2,
   Loader2,
   Mic,
   Monitor,
+  Plus,
   Scissors,
   Square,
   Upload,
@@ -28,6 +32,7 @@ import {
   buildRecordedAudioFilename,
   formatBytes,
   formatDuration,
+  isScoreImageAsset,
   isScoreMediaAsset,
   isVideoMediaAsset,
   sanitizeDownloadTitle,
@@ -47,7 +52,8 @@ const ACCEPTED_AUDIO_EXTENSIONS = [
   ".webm",
   ".mkv",
 ];
-const SCORE_EXTENSIONS = [".pdf", ".mxl", ".musicxml"];
+const SCORE_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
+const SCORE_EXTENSIONS = [".pdf", ".mxl", ".musicxml", ...SCORE_IMAGE_EXTENSIONS];
 const ACCEPTED_EXTENSIONS = [...ACCEPTED_AUDIO_EXTENSIONS, ...SCORE_EXTENSIONS];
 const MAX_SIZE_BYTES = 100 * 1024 * 1024;
 
@@ -66,6 +72,9 @@ export function getUploadedFormatBadge(asset: MediaAsset): { label: string; isSc
   }
   const mime = (asset.mime_type || "").toLowerCase();
   if (mime.includes("pdf")) return { label: "PDF", isScore: true };
+  if (mime.includes("jpeg") || mime.includes("jpg")) return { label: "JPG", isScore: true };
+  if (mime.includes("png")) return { label: "PNG", isScore: true };
+  if (mime.includes("webp")) return { label: "WEBP", isScore: true };
   if (mime.includes("musicxml") || mime.includes("xml")) return { label: "MUSICXML", isScore: true };
   if (mime.includes("mpeg") || mime.includes("mp3")) return { label: "MP3", isScore: false };
   if (mime.includes("wav")) return { label: "WAV", isScore: false };
@@ -86,6 +95,8 @@ interface MediaUploaderProps {
   onMediaRemoved?: (assetId: string) => void;
   selectedSourceAssetId?: string | null;
   onSelectSourceAsset?: (assetId: string) => void;
+  orderedImageAssetIds?: string[];
+  onReorderImageAssets?: (nextIds: string[]) => void;
   onAudioExtracted?: () => void;
   onArchiveFileDrop?: (file: File) => void;
   hasScore?: boolean;
@@ -101,6 +112,8 @@ export function MediaUploader({
   onMediaRemoved,
   selectedSourceAssetId,
   onSelectSourceAsset,
+  orderedImageAssetIds,
+  onReorderImageAssets,
   onAudioExtracted,
   onArchiveFileDrop,
   hasScore = false,
@@ -141,9 +154,23 @@ export function MediaUploader({
   const [urlNotice, setUrlNotice] = useState<string | null>(null);
   const [deletingAssetId, setDeletingAssetId] = useState<string | null>(null);
   const [confirmingAssetId, setConfirmingAssetId] = useState<string | null>(null);
+  const [localImageOrder, setLocalImageOrder] = useState<string[]>([]);
+  const [localPreviewUrls, setLocalPreviewUrls] = useState<Record<string, string>>({});
+  const localPreviewUrlsRef = useRef<Record<string, string>>({});
+  const [signedPreviewUrls, setSignedPreviewUrls] = useState<Record<string, string>>({});
+  const [dragPageIdx, setDragPageIdx] = useState<number | null>(null);
+  const [batchProgressLabel, setBatchProgressLabel] = useState<string | null>(null);
 
   useEffect(() => {
     return () => {
+      for (const url of Object.values(localPreviewUrlsRef.current)) {
+        try {
+          if (typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
+      }
+      localPreviewUrlsRef.current = {};
       if (timerRef.current) clearInterval(timerRef.current);
       if (tabTimerRef.current) clearInterval(tabTimerRef.current);
       tabSessionRef.current?.dispose();
@@ -176,6 +203,22 @@ export function MediaUploader({
         delete copy[assetId];
         return copy;
       });
+      if (localPreviewUrlsRef.current[assetId]) {
+        try {
+          if (typeof URL.revokeObjectURL === "function") {
+            URL.revokeObjectURL(localPreviewUrlsRef.current[assetId]);
+          }
+        } catch {
+          // ignore
+        }
+        delete localPreviewUrlsRef.current[assetId];
+        setLocalPreviewUrls((prev) => {
+          const copy = { ...prev };
+          delete copy[assetId];
+          return copy;
+        });
+      }
+      setLocalImageOrder((prev) => prev.filter((id) => id !== assetId));
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
@@ -212,8 +255,8 @@ export function MediaUploader({
     if (!allowed.includes(ext)) {
       setError(
         acceptPdf
-          ? `Unsupported file type (${ext}). Supported score formats: .pdf, .mxl, .musicxml.`
-          : `Unsupported file type (${ext}). Supported: MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, WEBM, MKV, PDF, MXL, MUSICXML.`,
+          ? `Unsupported file type (${ext}). Supported score formats: .pdf, .jpg, .jpeg, .png, .webp, .mxl, .musicxml.`
+          : `Unsupported file type (${ext}). Supported: MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, WEBM, MKV, PDF, JPG, JPEG, PNG, WEBP, MXL, MUSICXML.`,
       );
       return;
     }
@@ -229,6 +272,15 @@ export function MediaUploader({
 
     try {
       const asset = await api.uploadMedia(projectId, file, setUploadProgress, controller.signal);
+      if (SCORE_IMAGE_EXTENSIONS.includes(ext) && typeof URL.createObjectURL === "function") {
+        try {
+          const objUrl = URL.createObjectURL(file);
+          localPreviewUrlsRef.current[asset.id] = objUrl;
+          setLocalPreviewUrls((prev) => ({ ...prev, [asset.id]: objUrl }));
+        } catch {
+          // ignore preview errors in restricted environments
+        }
+      }
       setUploadProgress(null);
       setSelectedFile(null);
       onUploadComplete(asset);
@@ -242,12 +294,67 @@ export function MediaUploader({
     }
   };
 
+  const validateAndUploadFiles = async (files: File[]) => {
+    if (files.length === 0) return;
+    if (files.length === 1) {
+      await validateAndUpload(files[0]);
+      return;
+    }
+
+    setError(null);
+    setExtractionError(null);
+
+    for (const f of files) {
+      const ext = "." + (f.name.split(".").pop() || "").toLowerCase();
+      if (!SCORE_IMAGE_EXTENSIONS.includes(ext)) {
+        setError(
+          `Unsupported file "${f.name}" (${ext || "unknown"}) in multi-page upload. Multiple-file upload supports .jpg, .jpeg, .png, and .webp sheet music images.`,
+        );
+        return;
+      }
+      if (f.size > MAX_SIZE_BYTES) {
+        setError(`File "${f.name}" exceeds 100 MB upload limit.`);
+        return;
+      }
+    }
+
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      setSelectedFile(f);
+      setBatchProgressLabel(`Uploading page ${i + 1} of ${files.length}: ${f.name}`);
+      setUploadProgress(0);
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        const asset = await api.uploadMedia(projectId, f, setUploadProgress, controller.signal);
+        if (typeof URL.createObjectURL === "function") {
+          try {
+            const objUrl = URL.createObjectURL(f);
+            localPreviewUrlsRef.current[asset.id] = objUrl;
+            setLocalPreviewUrls((prev) => ({ ...prev, [asset.id]: objUrl }));
+          } catch {
+            // ignore preview errors
+          }
+        }
+        onUploadComplete(asset);
+      } catch (err) {
+        setBatchProgressLabel(null);
+        setUploadProgress(null);
+        setError(err instanceof ApiError ? err.message : `Failed uploading page "${f.name}".`);
+        return;
+      }
+    }
+    setBatchProgressLabel(null);
+    setUploadProgress(null);
+    setSelectedFile(null);
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragActive(false);
     if (isRecording || isRecordingTabAudio || isRequestingTabAudio || uploadProgress !== null) return;
-    const file = e.dataTransfer.files?.[0];
-    if (file) void validateAndUpload(file);
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length > 0) void validateAndUploadFiles(files);
   };
 
   const startRecording = async () => {
@@ -432,6 +539,62 @@ export function MediaUploader({
     .sort((a, b) => Date.parse(b.created_at || "") - Date.parse(a.created_at || ""));
   const extractedAssets = existingAssets.filter((a) => a.asset_type === "extracted_audio");
 
+  const activeImageOrderIds = orderedImageAssetIds ?? localImageOrder;
+  const imageAssetsMap = new Map(originalAssets.filter((a) => isScoreImageAsset(a)).map((a) => [a.id, a]));
+  const orderedImageAssets: MediaAsset[] = [];
+  const seenImageIds = new Set<string>();
+  for (const id of activeImageOrderIds) {
+    const match = imageAssetsMap.get(id);
+    if (match && !seenImageIds.has(id)) {
+      orderedImageAssets.push(match);
+      seenImageIds.add(id);
+    }
+  }
+  const remainingImages = originalAssets
+    .filter((a) => isScoreImageAsset(a) && !seenImageIds.has(a.id))
+    .sort((a, b) => Date.parse(a.created_at || "") - Date.parse(b.created_at || ""));
+  orderedImageAssets.push(...remainingImages);
+  const nonImageOriginals = originalAssets.filter((a) => !isScoreImageAsset(a));
+
+  const updateImageOrder = (nextIds: string[]) => {
+    if (onReorderImageAssets) {
+      onReorderImageAssets(nextIds);
+    } else {
+      setLocalImageOrder(nextIds);
+    }
+  };
+
+  const moveImagePage = (fromIndex: number, toIndex: number) => {
+    if (toIndex < 0 || toIndex >= orderedImageAssets.length || fromIndex === toIndex) return;
+    const next = orderedImageAssets.map((a) => a.id);
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
+    updateImageOrder(next);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const missingIds = orderedImageAssets
+      .map((a) => a.id)
+      .filter((id) => !localPreviewUrls[id] && !signedPreviewUrls[id]);
+    if (missingIds.length === 0 || typeof api.getSignedMediaUrl !== "function") return;
+    for (const assetId of missingIds) {
+      void api
+        .getSignedMediaUrl(assetId)
+        .then((res) => {
+          if (!cancelled && res?.url) {
+            setSignedPreviewUrls((prev) => (prev[assetId] ? prev : { ...prev, [assetId]: res.url }));
+          }
+        })
+        .catch(() => {
+          // Thumbnail fallback handled in UI
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [orderedImageAssets, localPreviewUrls, signedPreviewUrls]);
+
   const hasScoreAsset = originalAssets.some((a) => isScoreMediaAsset(a));
   const selectedIsScore = Boolean(
     selectedFile && isScoreMediaAsset({ original_filename: selectedFile.name, mime_type: selectedFile.type }),
@@ -456,28 +619,29 @@ export function MediaUploader({
         <input
           ref={fileInputRef}
           type="file"
+          multiple
           accept={
             acceptPdf
-              ? ".pdf,.mxl,.musicxml,application/pdf,application/vnd.recordare.musicxml+xml"
+              ? ".pdf,.mxl,.musicxml,.jpg,.jpeg,.png,.webp,application/pdf,application/vnd.recordare.musicxml+xml,image/jpeg,image/png,image/webp"
               : ACCEPTED_EXTENSIONS.join(",")
           }
           className="hidden"
           onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void validateAndUpload(f);
+            const files = Array.from(e.target.files || []);
+            if (files.length > 0) void validateAndUploadFiles(files);
             e.target.value = "";
           }}
         />
         <Upload className="mx-auto h-8 w-8 text-[#A78BFA]" />
         <h3 className="mt-3 text-sm font-semibold text-[#F5F3FF]">
           {acceptPdf
-            ? "Drag & drop SATB score (PDF, MXL, MusicXML), or browse"
+            ? "Drag & drop sheet music (PDF, JPG, PNG, WebP, MXL, MusicXML), or browse"
             : "Drag & drop audio, video, or sheet music, or browse"}
         </h3>
         <p className="mt-1 text-xs text-[#A1A1AA]">
           {acceptPdf
-            ? "PDF, MXL, MusicXML • Up to 100 MB"
-            : "MP3, WAV, FLAC, M4A, MP4, MOV, WEBM, MKV, PDF, MXL, MusicXML • Up to 100 MB"}
+            ? "PDF, JPG, PNG, WebP (multi-page supported), MXL, MusicXML • Up to 100 MB"
+            : "MP3, WAV, FLAC, M4A, MP4, MOV, WEBM, MKV, PDF, JPG, PNG, WebP, MXL, MusicXML • Up to 100 MB"}
         </p>
         <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
           <Button
@@ -595,7 +759,7 @@ export function MediaUploader({
       {uploadProgress !== null && (
         <div className="rounded-lg border border-[#27273A] bg-[#11111B] p-3 space-y-2">
           <div className="flex items-center justify-between text-xs">
-            <span className="truncate">{selectedFile?.name || "Uploading..."}</span>
+            <span className="truncate">{batchProgressLabel || selectedFile?.name || "Uploading..."}</span>
             <div className="flex items-center gap-2">
               <span className="font-mono text-[#A78BFA]">{uploadProgress}%</span>
               <button
@@ -635,10 +799,125 @@ export function MediaUploader({
         </div>
       )}
 
-      {originalAssets.length > 0 && (
+      {orderedImageAssets.length > 0 && (
+        <div className="space-y-2" data-testid="sheet-image-page-list">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-[#A1A1AA]">
+                Sheet Music Pages ({orderedImageAssets.length})
+              </span>
+              <span
+                data-testid="uploaded-format-badge"
+                className="border font-semibold text-[11px] px-2 py-0.5 rounded-full uppercase tracking-wide bg-sky-100 text-sky-900 border-sky-300 dark:bg-sky-500/15 dark:text-sky-300 dark:border-sky-500/35"
+              >
+                {getUploadedFormatBadge(orderedImageAssets[0]).label}
+              </span>
+            </div>
+            <button
+              type="button"
+              disabled={anyRecordingActive || uploadProgress !== null || isProcessing}
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex items-center gap-1 rounded-md border border-[#27273A] bg-[#181825] px-2 py-1 text-[11px] font-medium text-[#F5F3FF] hover:border-[#A78BFA]/60 disabled:opacity-50"
+            >
+              <Plus className="h-3 w-3 text-[#A78BFA]" />
+              Add Pages
+            </button>
+          </div>
+
+          <div className="space-y-1.5">
+            {orderedImageAssets.map((a, pageIdx) => {
+              const isDeleting = deletingAssetId === a.id;
+              const removeDisabled =
+                isProcessing || uploadProgress !== null || deletingAssetId !== null || extractingAssetId !== null;
+              const thumbSrc = localPreviewUrls[a.id] || signedPreviewUrls[a.id] || null;
+              return (
+                <div
+                  key={a.id}
+                  data-testid={`sheet-image-page-item-${pageIdx}`}
+                  draggable={!isProcessing && orderedImageAssets.length > 1}
+                  onDragStart={() => setDragPageIdx(pageIdx)}
+                  onDragOver={(e) => {
+                    if (dragPageIdx !== null) e.preventDefault();
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (dragPageIdx !== null && dragPageIdx !== pageIdx) {
+                      moveImagePage(dragPageIdx, pageIdx);
+                    }
+                    setDragPageIdx(null);
+                  }}
+                  onDragEnd={() => setDragPageIdx(null)}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-[#27273A] bg-[#11111B] px-2.5 py-2 text-xs"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="h-11 w-9 rounded border border-[#27273A] bg-[#09090F] overflow-hidden flex items-center justify-center shrink-0">
+                      {thumbSrc ? (
+                        <img
+                          src={thumbSrc}
+                          alt={`Page ${pageIdx + 1}: ${a.original_filename}`}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <FileImage className="h-4 w-4 text-[#A78BFA]" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="rounded bg-violet-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300">
+                          Page {pageIdx + 1}
+                        </span>
+                        <span className="font-medium text-[#F5F3FF] truncate">{a.original_filename}</span>
+                      </div>
+                      <div className="text-[11px] text-[#A1A1AA] mt-0.5">
+                        {formatBytes(a.size_bytes)} • {a.mime_type}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      aria-label={`Move page ${pageIdx + 1} up`}
+                      data-testid={`move-page-up-${pageIdx}`}
+                      disabled={isProcessing || pageIdx === 0}
+                      onClick={() => moveImagePage(pageIdx, pageIdx - 1)}
+                      className="min-h-[32px] min-w-[32px] inline-flex items-center justify-center rounded-md text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] disabled:opacity-35 disabled:cursor-not-allowed"
+                    >
+                      <ArrowUp className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Move page ${pageIdx + 1} down`}
+                      data-testid={`move-page-down-${pageIdx}`}
+                      disabled={isProcessing || pageIdx === orderedImageAssets.length - 1}
+                      onClick={() => moveImagePage(pageIdx, pageIdx + 1)}
+                      className="min-h-[32px] min-w-[32px] inline-flex items-center justify-center rounded-md text-[#A1A1AA] hover:bg-[#181825] hover:text-[#F5F3FF] disabled:opacity-35 disabled:cursor-not-allowed"
+                    >
+                      <ArrowDown className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Remove uploaded media"
+                      data-testid={`remove-page-${pageIdx}`}
+                      title="Remove page"
+                      disabled={removeDisabled}
+                      onClick={() => handleRemoveClick(a.id)}
+                      className="min-h-[32px] min-w-[32px] inline-flex items-center justify-center rounded-md text-[#A1A1AA] hover:bg-red-500/10 hover:text-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {nonImageOriginals.length > 0 && (
         <div className="space-y-2">
           {(() => {
-            const primaryBadge = getUploadedFormatBadge(originalAssets[0]);
+            const primaryBadge = getUploadedFormatBadge(nonImageOriginals[0]);
             return (
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-xs font-medium text-[#A1A1AA]">
@@ -657,7 +936,7 @@ export function MediaUploader({
               </div>
             );
           })()}
-          {originalAssets.map((a, idx) => {
+          {nonImageOriginals.map((a, idx) => {
             const isDeleting = deletingAssetId === a.id;
             const isExtractingThis = extractingAssetId === a.id;
             const removeDisabled =

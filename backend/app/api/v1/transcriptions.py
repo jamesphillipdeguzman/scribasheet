@@ -5,7 +5,14 @@ from app.api.deps import get_current_user, get_owned_project, get_user_usage_met
 from app.api.v1.worker import get_worker_availability
 from app.core.security import decode_token
 from app.db.session import SessionLocal, get_db
-from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob, TranscriptionResult, User
+from app.models import (
+    MediaAsset,
+    Project,
+    ProjectScore,
+    TranscriptionJob,
+    TranscriptionResult,
+    User,
+)
 from app.schemas.transcription import TranscriptionCreateRequest, TranscriptionJobResponse
 from app.workers.job_runner import enqueue_transcription_job
 from app.workers.ws_manager import job_ws_manager
@@ -77,8 +84,34 @@ def start_transcription(
             ),
         )
 
+    requested_page_ids = payload.source_asset_ids or payload.settings.source_asset_ids
+    ordered_page_ids: list[str] = []
+    if requested_page_ids:
+        seen_ids: set[str] = set()
+        for aid in requested_page_ids:
+            if aid and aid not in seen_ids:
+                seen_ids.add(aid)
+                ordered_page_ids.append(aid)
+
     asset = None
-    if payload.source_asset_id:
+    if ordered_page_ids:
+        matched_assets = (
+            db.query(MediaAsset)
+            .filter(
+                MediaAsset.id.in_(ordered_page_ids),
+                MediaAsset.project_id == project.id,
+                MediaAsset.user_id == current_user.id,
+            )
+            .all()
+        )
+        by_id = {a.id: a for a in matched_assets}
+        if len(by_id) != len(ordered_page_ids):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="One or more selected page images were not found in this project.",
+            )
+        asset = by_id[ordered_page_ids[0]]
+    elif payload.source_asset_id:
         asset = (
             db.query(MediaAsset)
             .filter(MediaAsset.id == payload.source_asset_id, MediaAsset.project_id == project.id)
@@ -101,6 +134,10 @@ def start_transcription(
     worker_online = bool(avail["worker_online"])
     initial_stage = "Queued" if worker_online else "Waiting for Desktop Worker"
 
+    settings_dict = payload.settings.model_dump()
+    if ordered_page_ids:
+        settings_dict["source_asset_ids"] = ordered_page_ids
+
     job = TranscriptionJob(
         project_id=project.id,
         user_id=current_user.id,
@@ -109,7 +146,7 @@ def start_transcription(
         progress=0,
         current_stage=initial_stage,
         engine="basic_pitch",
-        settings_json=payload.settings.model_dump(),
+        settings_json=settings_dict,
     )
     project.status = "processing"
     project.transcription_mode = payload.settings.mode
@@ -219,6 +256,26 @@ def _resolve_retry_source(
 
     source_storage_key = settings_json.get("source_storage_key") or getattr(project, "source_storage_key", None)
     external_media_url = settings_json.get("external_media_url") or getattr(project, "external_media_url", None)
+
+    if isinstance(settings_json.get("source_asset_ids"), list) and settings_json["source_asset_ids"]:
+        kept_ids = [
+            aid
+            for aid in settings_json["source_asset_ids"]
+            if db.query(MediaAsset.id)
+            .filter(MediaAsset.id == aid, MediaAsset.project_id == project.id)
+            .first()
+            is not None
+        ]
+        if kept_ids:
+            settings_json["source_asset_ids"] = kept_ids
+            if not source_asset or source_asset.id != kept_ids[0]:
+                source_asset = (
+                    db.query(MediaAsset)
+                    .filter(MediaAsset.id == kept_ids[0], MediaAsset.project_id == project.id)
+                    .first()
+                )
+        else:
+            settings_json.pop("source_asset_ids", None)
 
     if source_asset:
         settings_json.setdefault("source_storage_key", source_asset.storage_path)
