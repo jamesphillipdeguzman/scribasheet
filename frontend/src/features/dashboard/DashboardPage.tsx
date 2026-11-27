@@ -6,7 +6,9 @@ import {
   Copy,
   Edit3,
   FolderPlus,
+  Loader2,
   Music2,
+  Piano,
   Plus,
   Search,
   Trash2,
@@ -83,6 +85,22 @@ export function DashboardPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["projects"] }),
   });
 
+  const createPlaygroundMutation = useMutation({
+    mutationFn: () =>
+      api.createPlaygroundProject({
+        title: "Untitled Playground",
+        key_signature: "C Major",
+        time_signature: "4/4",
+        tempo_bpm: 120,
+        clef_mode: "grand",
+        measures: 4,
+      }),
+    onSuccess: (project) => {
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      navigate(`/projects/${project.id}`);
+    },
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.deleteProject(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["projects"] }),
@@ -114,6 +132,21 @@ export function DashboardPage() {
             <WorkerStatusBadge />
           </div>
           <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto shrink-0">
+            <Button
+              variant="secondary"
+              onClick={() => createPlaygroundMutation.mutate()}
+              disabled={createPlaygroundMutation.isPending}
+              data-testid="new-midi-playground-btn"
+              title="Open a blank grand-staff score for live MIDI keyboard & notation editing."
+              className="w-full sm:w-auto min-h-[44px] border border-violet-400/50 bg-violet-50 text-violet-900 hover:bg-violet-100 dark:border-violet-500/40 dark:bg-violet-500/15 dark:text-violet-200 dark:hover:bg-violet-500/25"
+            >
+              {createPlaygroundMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Piano className="h-4 w-4" />
+              )}
+              MIDI Playground
+            </Button>
             <Button
               variant="secondary"
               onClick={() => {
@@ -297,6 +330,12 @@ export function DashboardPage() {
                       <Music2 className="h-3.5 w-3.5 text-[#A78BFA]" />
                       {p.instrument.replace(/_/g, " ")}
                     </span>
+                    {p.transcription_mode === "midi_playground" && (
+                      <span className="inline-flex items-center gap-1 rounded-full border border-violet-400/40 bg-violet-500/15 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">
+                        <Piano className="h-2.5 w-2.5" />
+                        MIDI Playground
+                      </span>
+                    )}
                     <span className="inline-flex items-center gap-1">
                       <Clock className="h-3.5 w-3.5" />
                       {formatDuration(p.duration_seconds)}

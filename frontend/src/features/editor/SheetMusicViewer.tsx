@@ -1,34 +1,48 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import {
-  ArrowDown,
-  ArrowUp,
   Loader2,
   Maximize2,
   Minimize2,
   Pause,
   Pencil,
   Play,
-  Plus,
   Printer,
   Square,
-  Trash2,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { AlphaTabSheetViewer } from "@/features/editor/AlphaTabSheetViewer";
 import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
+import { type MetronomeSettings } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
+import { NotationCommandPalette } from "@/features/editor/NotationCommandPalette";
+import { NotationMidiBar } from "@/features/editor/NotationMidiBar";
 import {
   addMeasureToAllParts,
+  computeDiatonicDragPitch,
   convertXmlNoteToRest,
   deleteMeasureFromAllParts,
+  type DiatonicPitchResult,
   type EditableNoteType,
+  flipXmlNoteStem,
+  formatPitchLabel,
   getXmlNoteInfo,
+  type PlaygroundClefMode,
   setXmlNoteAccidental,
   setXmlNoteDuration,
+  setXmlNotePitch,
+  setXmlNoteVoice,
+  toggleXmlNoteArticulation,
+  toggleXmlNoteDot,
+  toggleXmlNoteSlur,
+  toggleXmlNoteTie,
+  toggleXmlNoteTriplet,
   transposeXmlNote,
+  type XmlAccidentalType,
+  type XmlArticulationType,
+  type XmlNoteInfo,
   type XmlNoteTarget,
 } from "@/features/editor/musicXmlEditor";
 import {
@@ -46,7 +60,6 @@ import {
   wholeNotesToQuarterNotes,
   wholeNotesToTimeSec,
 } from "@/features/editor/musicXmlTimeline";
-import { midiToNoteName } from "@/lib/utils";
 import { getStoredTokens } from "@/services/api";
 import type { ScoreChord, ScoreNote, ScoreTrack } from "@/types/api";
 
@@ -101,6 +114,18 @@ interface SheetMusicViewerProps {
   playheadSec?: number;
   isPlaying?: boolean;
   tempoBpm?: number;
+  timeSignature?: string;
+  clefMode?: PlaygroundClefMode;
+  isMidiPlayground?: boolean;
+  defaultEditMode?: boolean;
+  isActiveTab?: boolean;
+  metronomeSettings?: MetronomeSettings;
+  onMetronomeSettingsChange?: (next: MetronomeSettings) => void;
+  onTempoChange?: (nextBpm: number) => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
   playbackRate?: number;
   tracks?: ScoreTrack[];
   satbSoloVoice?: string | null;
@@ -116,6 +141,26 @@ interface SheetMusicViewerProps {
   isPrintingPdf?: boolean;
   canPrintPdf?: boolean;
   printError?: string | null;
+}
+
+function buildStaffIndexMapping(xmlStr: string | null | undefined): Array<{ partIndex: number; staffNumber: number }> {
+  if (!xmlStr || typeof DOMParser === "undefined") return [];
+  try {
+    const doc = new DOMParser().parseFromString(xmlStr, "application/xml");
+    if (doc.querySelector("parsererror")) return [];
+    const mapping: Array<{ partIndex: number; staffNumber: number }> = [];
+    const parts = Array.from(doc.getElementsByTagName("part"));
+    parts.forEach((partEl, partIndex) => {
+      const stavesTxt = partEl.getElementsByTagName("staves")[0]?.textContent || "1";
+      const stavesCount = Math.max(1, Number.parseInt(stavesTxt, 10) || 1);
+      for (let s = 1; s <= stavesCount; s++) {
+        mapping.push({ partIndex, staffNumber: s });
+      }
+    });
+    return mapping;
+  } catch {
+    return [];
+  }
 }
 
 const ENGINE_PREF_KEY = "scribasheet:notation_engine";
@@ -149,6 +194,18 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   playheadSec = 0,
   isPlaying = false,
   tempoBpm = 120,
+  timeSignature = "4/4",
+  clefMode = "grand",
+  isMidiPlayground = false,
+  defaultEditMode = false,
+  isActiveTab = true,
+  metronomeSettings,
+  onMetronomeSettingsChange,
+  onTempoChange,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
   playbackRate = 1.0,
   tracks = EMPTY_TRACKS,
   satbSoloVoice = null,
@@ -166,7 +223,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   printError = null,
 }: SheetMusicViewerProps) {
   const [engine, setEngine] = useState<"alphatab" | "osmd">(() =>
-    getInitialNotationEngine(defaultEngine),
+    defaultEditMode || isMidiPlayground ? "osmd" : getInitialNotationEngine(defaultEngine),
   );
   const handleEngineChange = (next: "alphatab" | "osmd") => {
     setEngine(next);
@@ -186,11 +243,10 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         type="button"
         aria-pressed={engine === "alphatab"}
         onClick={() => handleEngineChange("alphatab")}
-        className={`rounded-md px-2 py-0.5 transition-colors ${
-          engine === "alphatab"
-            ? "bg-violet-600 text-white shadow-sm font-semibold dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:font-medium"
-            : "text-stone-700 hover:text-stone-950 hover:bg-white/60 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-transparent"
-        }`}
+        className={`rounded-md px-2 py-0.5 transition-colors ${engine === "alphatab"
+          ? "bg-violet-600 text-white shadow-sm font-semibold dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:font-medium"
+          : "text-stone-700 hover:text-stone-950 hover:bg-white/60 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-transparent"
+          }`}
       >
         AlphaTab
       </button>
@@ -198,11 +254,10 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         type="button"
         aria-pressed={engine === "osmd"}
         onClick={() => handleEngineChange("osmd")}
-        className={`rounded-md px-2 py-0.5 transition-colors ${
-          engine === "osmd"
-            ? "bg-violet-600 text-white shadow-sm font-semibold dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:font-medium"
-            : "text-stone-700 hover:text-stone-950 hover:bg-white/60 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-transparent"
-        }`}
+        className={`rounded-md px-2 py-0.5 transition-colors ${engine === "osmd"
+          ? "bg-violet-600 text-white shadow-sm font-semibold dark:bg-[#8B5CF6] dark:text-[#F5F3FF] dark:font-medium"
+          : "text-stone-700 hover:text-stone-950 hover:bg-white/60 font-medium dark:text-[#A1A1AA] dark:hover:text-[#F5F3FF] dark:hover:bg-transparent"
+          }`}
       >
         OSMD
       </button>
@@ -216,6 +271,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const highlightedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
   const selectedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
   const svgNoteTargetMapRef = useRef<WeakMap<Element, XmlNoteTarget>>(new WeakMap());
+  const staffLineSpacingMapRef = useRef<Map<string, number>>(new Map());
   const renderedEventsRef = useRef<RenderedMusicalEvent[]>([]);
   const cursorSnapshotsRef = useRef<OsmdCursorSnapshot[]>([]);
   const lastCursorWholeRef = useRef<number>(-1);
@@ -232,11 +288,44 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const [zoom, setZoom] = useState(0.9);
   const [localShowChords, setLocalShowChords] = useState(true);
   const [followCursor, setFollowCursor] = useState(true);
-  const [editMode, setEditMode] = useState(false);
+  const [editMode, setEditMode] = useState(Boolean(defaultEditMode));
+  const [noteInputMode, setNoteInputMode] = useState(false);
+  const [activeDuration, setActiveDuration] = useState<EditableNoteType>("quarter");
+  const [activeDotted, setActiveDotted] = useState(false);
+  const [activeVoice, setActiveVoice] = useState<"1" | "2">("1");
+  const [paletteStatusMsg, setPaletteStatusMsg] = useState<string | null>(null);
   const [selectedTarget, setSelectedTarget] = useState<XmlNoteTarget | null>(null);
   const selectedTargetRef = useRef<XmlNoteTarget | null>(null);
   selectedTargetRef.current = selectedTarget;
   const lastEditedXmlRef = useRef<string | null>(null);
+
+  interface DragSession {
+    pointerId: number;
+    noteEl: HTMLElement;
+    target: XmlNoteTarget;
+    originInfo: XmlNoteInfo;
+    originLabel: string;
+    startClientY: number;
+    lineSpacingPx: number;
+    moved: boolean;
+    stepDelta: number;
+    previewPitch: DiatonicPitchResult;
+  }
+  const dragSessionRef = useRef<DragSession | null>(null);
+  const suppressNextClickRef = useRef(false);
+  const activePreviewPitchRef = useRef<number | null>(null);
+  const [dragTooltip, setDragTooltip] = useState<{
+    text: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (defaultEditMode || isMidiPlayground) {
+      setEngine("osmd");
+      setEditMode(true);
+    }
+  }, [defaultEditMode, isMidiPlayground]);
 
   useEffect(() => {
     if (musicxml && lastEditedXmlRef.current && musicxml === lastEditedXmlRef.current) {
@@ -790,6 +879,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
 
     // Map rendered SVG notehead elements to XmlNoteTarget AND build canonical event -> SVG notehead index
     const newMap = new WeakMap<Element, XmlNoteTarget>();
+    const newSpacingMap = new Map<string, number>();
+    const staffMapping = buildStaffIndexMapping(resolvedXml ?? musicxml);
     const eventBuckets = new Map<number, RenderedMusicalEvent>();
     const usedNoteIds = new Set<string>();
     const notesByPitch = new Map<number, ScoreNote[]>();
@@ -856,6 +947,27 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
             };
             if (!gm || !Array.isArray(gm.staffEntries)) continue;
             const mNum = gm.MeasureNumber ?? gm.parentSourceMeasure?.MeasureNumber ?? mIdx + 1;
+            const staffLoc = staffMapping[sIdx] ?? { partIndex: sIdx, staffNumber: 1 };
+            const gmShape = (gm as unknown as {
+              PositionAndShape?: { Size?: { height?: number } };
+              staffLines?: Array<{ PositionAndShape?: { AbsolutePosition?: { y: number } } }>;
+            });
+            let detectedSpacingPx = 10 * zoom;
+            const staffLines = gmShape?.staffLines;
+            if (Array.isArray(staffLines) && staffLines.length >= 2) {
+              const y0 = staffLines[0]?.PositionAndShape?.AbsolutePosition?.y;
+              const y1 = staffLines[1]?.PositionAndShape?.AbsolutePosition?.y;
+              if (typeof y0 === "number" && typeof y1 === "number" && Math.abs(y1 - y0) > 0.1) {
+                detectedSpacingPx = Math.abs(y1 - y0) * scale;
+              }
+            } else if (typeof gmShape?.PositionAndShape?.Size?.height === "number" && gmShape.PositionAndShape.Size.height > 1) {
+              detectedSpacingPx = (gmShape.PositionAndShape.Size.height / 4) * scale;
+            }
+            newSpacingMap.set(
+              `${staffLoc.partIndex}:${staffLoc.staffNumber}`,
+              Math.max(6, Math.min(24, detectedSpacingPx)),
+            );
+
             const mWholeStart =
               measureStartByIndex.get(mIdx) ?? measureStartByNumber.get(mNum) ?? 0;
             const sys = gm.ParentMusicSystem;
@@ -879,10 +991,11 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
                   const halfTone = gn.sourceNote?.Pitch?.halfTone;
                   const midi = typeof halfTone === "number" ? halfTone + 12 : null;
                   const target: XmlNoteTarget = {
-                    partIndex: sIdx,
+                    partIndex: staffLoc.partIndex,
                     measureNumber: mNum,
                     onsetWhole: rawOnsetWhole,
                     pitchMidi: midi,
+                    staffNumber: staffLoc.staffNumber,
                   };
                   newMap.set(svgEl, target);
                   svgEl.setAttribute("data-mxml-note", "true");
@@ -954,6 +1067,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       // Ignore graphic indexing errors
     }
     svgNoteTargetMapRef.current = newMap;
+    staffLineSpacingMapRef.current = newSpacingMap;
     renderedEventsRef.current = Array.from(eventBuckets.values()).sort(
       (a, b) => a.onsetSec - b.onsetSec,
     );
@@ -990,7 +1104,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       containerRef.current.innerHTML = "";
     }
     renderedEventsRef.current = [];
-    svgNoteTargetMapRef.current = new Map();
+    svgNoteTargetMapRef.current = new WeakMap();
+    staffLineSpacingMapRef.current = new Map();
     cursorSnapshotsRef.current = [];
     baseGeomRef.current = null;
     nextGeomRef.current = null;
@@ -1239,27 +1354,103 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       if (nextTarget !== undefined) {
         setSelectedTarget(nextTarget);
       }
+      setPaletteStatusMsg(null);
       lastEditedXmlRef.current = resultXml;
       onMusicXmlChange(resultXml);
     },
     [isPlaying, onMusicXmlChange, onTogglePlay],
   );
 
-  // Keyboard shortcuts when Edit Notation is active
+  // Focus-scoped MuseScore keyboard shortcuts when Edit Notation is active
   useEffect(() => {
-    if (!editMode || !resolvedXml) return;
+    if (!editMode || !resolvedXml || !isActiveTab) return;
+    const shortcutDurMap: Record<string, EditableNoteType> = {
+      "1": "64th",
+      "2": "32nd",
+      "3": "16th",
+      "4": "eighth",
+      "5": "quarter",
+      "6": "half",
+      "7": "whole",
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
       const targetEl = e.target as HTMLElement | null;
       const tag = targetEl?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || targetEl?.isContentEditable) return;
-      if (e.key === "Escape" && selectedTarget) {
+
+      const lower = e.key.toLowerCase();
+      // Preserve standard browser & global undo/redo/print/clipboard shortcuts
+      if ((e.ctrlKey || e.metaKey) && ["p", "r", "s", "c", "v", "x", "z", "y", "a"].includes(lower)) {
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key === "3" && selectedTarget) {
         e.preventDefault();
-        clearSelectedHighlight();
-        setSelectedTarget(null);
+        const res = toggleXmlNoteTriplet(resolvedXml, selectedTarget);
+        if (res) applyXmlEdit(res.xml, selectedTarget);
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      if (lower === "n") {
+        e.preventDefault();
+        setNoteInputMode((v) => !v);
+        return;
+      }
+      if (e.key in shortcutDurMap) {
+        e.preventDefault();
+        const dur = shortcutDurMap[e.key];
+        setActiveDuration(dur);
+        if (selectedTarget) {
+          const res = setXmlNoteDuration(resolvedXml, selectedTarget, dur);
+          if (res) applyXmlEdit(res.xml, res.nextTarget);
+        }
+        return;
+      }
+      if (e.key === ".") {
+        e.preventDefault();
+        if (selectedTarget) {
+          const res = toggleXmlNoteDot(resolvedXml, selectedTarget);
+          if (res) {
+            setActiveDotted(res.dotted);
+            applyXmlEdit(res.xml, selectedTarget);
+          }
+        } else {
+          setActiveDotted((v) => !v);
+        }
+        return;
+      }
+      if (e.key === "Escape") {
+        if (noteInputMode || selectedTarget) {
+          e.preventDefault();
+          setNoteInputMode(false);
+          clearSelectedHighlight();
+          setSelectedTarget(null);
+        }
         return;
       }
       if (!selectedTarget) return;
-      if (e.key === "ArrowUp") {
+
+      if (lower === "t") {
+        e.preventDefault();
+        const res = toggleXmlNoteTie(resolvedXml, selectedTarget);
+        if (res.changed) applyXmlEdit(res.xml, selectedTarget);
+        else if (res.message) setPaletteStatusMsg(res.message);
+      } else if (lower === "s") {
+        e.preventDefault();
+        const res = toggleXmlNoteSlur(resolvedXml, selectedTarget);
+        if (res.changed) applyXmlEdit(res.xml, selectedTarget);
+        else if (res.message) setPaletteStatusMsg(res.message);
+      } else if (lower === "x") {
+        e.preventDefault();
+        const res = flipXmlNoteStem(resolvedXml, selectedTarget);
+        if (res) applyXmlEdit(res.xml, selectedTarget);
+      } else if (e.key === "0" || e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        const res = convertXmlNoteToRest(resolvedXml, selectedTarget);
+        if (res) applyXmlEdit(res.xml, null);
+      } else if (e.key === "ArrowUp") {
         e.preventDefault();
         const res = transposeXmlNote(resolvedXml, selectedTarget, e.shiftKey ? 12 : 1);
         if (res) applyXmlEdit(res.xml, res.nextTarget);
@@ -1267,15 +1458,179 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         e.preventDefault();
         const res = transposeXmlNote(resolvedXml, selectedTarget, e.shiftKey ? -12 : -1);
         if (res) applyXmlEdit(res.xml, res.nextTarget);
-      } else if (e.key === "Delete" || e.key === "Backspace") {
-        e.preventDefault();
-        const res = convertXmlNoteToRest(resolvedXml, selectedTarget);
-        if (res) applyXmlEdit(res.xml, null);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [editMode, selectedTarget, resolvedXml, applyXmlEdit]);
+  }, [editMode, selectedTarget, resolvedXml, applyXmlEdit, noteInputMode, isActiveTab]);
+
+  const stopPreviewAudio = useCallback(() => {
+    if (activePreviewPitchRef.current !== null) {
+      try {
+        midiSynth.stopSustainedNote(activePreviewPitchRef.current);
+      } catch {
+        // Ignore audio preview teardown errors when Web Audio is unavailable
+      }
+      activePreviewPitchRef.current = null;
+    }
+  }, []);
+
+  const cleanupDragVisuals = useCallback(
+    (session: DragSession | null) => {
+      if (session) {
+        session.noteEl.style.transform = "";
+        session.noteEl.style.cursor = "";
+      }
+      stopPreviewAudio();
+      setDragTooltip(null);
+      dragSessionRef.current = null;
+    },
+    [stopPreviewAudio],
+  );
+
+  useEffect(() => {
+    return () => {
+      cleanupDragVisuals(dragSessionRef.current);
+    };
+  }, [cleanupDragVisuals]);
+
+  const handleScorePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!editMode || !onMusicXmlChange || (e.button !== undefined && e.button !== 0) || isPlaying) return;
+    const currentXml = resolvedXml ?? musicxml;
+    if (!currentXml) return;
+
+    let node: Element | null = e.target as Element | null;
+    while (node && node !== containerRef.current) {
+      const mapped = svgNoteTargetMapRef.current.get(node);
+      if (mapped) {
+        const info = getXmlNoteInfo(currentXml, mapped);
+        if (!info || info.isRest || !info.step || info.octave === null) return;
+
+        const key = `${mapped.partIndex}:${mapped.staffNumber ?? 1}`;
+        const lineSpacingPx = staffLineSpacingMapRef.current.get(key) ?? Math.max(6, 10 * zoom);
+        const originLabel = formatPitchLabel(info.step, info.alter, info.octave);
+        const initialPitch = computeDiatonicDragPitch(
+          { step: info.step, octave: info.octave, alter: info.alter },
+          0,
+          info.keyFifths,
+        );
+
+        dragSessionRef.current = {
+          pointerId: e.pointerId,
+          noteEl: node as HTMLElement,
+          target: mapped,
+          originInfo: info,
+          originLabel,
+          startClientY: e.clientY,
+          lineSpacingPx,
+          moved: false,
+          stepDelta: 0,
+          previewPitch: initialPitch,
+        };
+
+        applySelectedHighlight(node);
+        setSelectedTarget(mapped);
+
+        try {
+          scrollContainerRef.current?.setPointerCapture?.(e.pointerId);
+        } catch {
+          // Ignore pointer capture restriction in tests/jsdom
+        }
+        return;
+      }
+      node = node.parentElement;
+    }
+  };
+
+  const handleScorePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const session = dragSessionRef.current;
+    if (!session || session.pointerId !== e.pointerId) return;
+
+    const deltaY = session.startClientY - e.clientY;
+    if (!session.moved && Math.abs(deltaY) < 4) return;
+    session.moved = true;
+    e.preventDefault();
+
+    const stepPx = Math.max(3, session.lineSpacingPx / 2);
+    const stepDelta = Math.round(deltaY / stepPx);
+    if (stepDelta !== session.stepDelta) {
+      const nextPitch = computeDiatonicDragPitch(
+        {
+          step: session.originInfo.step!,
+          octave: session.originInfo.octave!,
+          alter: session.originInfo.alter,
+        },
+        stepDelta,
+        session.originInfo.keyFifths,
+      );
+      session.stepDelta = stepDelta;
+      session.previewPitch = nextPitch;
+
+      if (activePreviewPitchRef.current !== nextPitch.midi) {
+        stopPreviewAudio();
+        activePreviewPitchRef.current = nextPitch.midi;
+        try {
+          midiSynth.startSustainedNote(nextPitch.midi, 82, 0.75, 0);
+        } catch {
+          // Ignore audio preview errors in restricted/headless environments
+        }
+      }
+    }
+
+    const visualDy = -session.stepDelta * stepPx;
+    session.noteEl.style.transform = `translateY(${visualDy}px)`;
+    session.noteEl.style.cursor = "ns-resize";
+
+    const scRect = scrollContainerRef.current?.getBoundingClientRect();
+    const noteRect = session.noteEl.getBoundingClientRect();
+    const tooltipX = scRect ? noteRect.left - scRect.left + (scrollContainerRef.current?.scrollLeft ?? 0) + 8 : e.clientX;
+    const tooltipY = scRect ? Math.max(4, noteRect.top - scRect.top + (scrollContainerRef.current?.scrollTop ?? 0) - 28) : e.clientY - 28;
+    setDragTooltip({
+      text: `${session.originLabel} → ${session.previewPitch.label}`,
+      x: tooltipX,
+      y: tooltipY,
+    });
+  };
+
+  const handleScorePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const session = dragSessionRef.current;
+    if (!session || session.pointerId !== e.pointerId) return;
+
+    try {
+      scrollContainerRef.current?.releasePointerCapture?.(e.pointerId);
+    } catch {
+      // ignore
+    }
+
+    const { moved, stepDelta, target, previewPitch } = session;
+    cleanupDragVisuals(session);
+
+    if (moved) {
+      suppressNextClickRef.current = true;
+      const currentXml = resolvedXml ?? musicxml;
+      if (stepDelta !== 0 && currentXml) {
+        const res = setXmlNotePitch(currentXml, target, {
+          step: previewPitch.step,
+          octave: previewPitch.octave,
+          alter: previewPitch.alter,
+        });
+        if (res) {
+          applyXmlEdit(res.xml, res.nextTarget);
+        }
+      }
+    }
+  };
+
+  const handleScorePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    const session = dragSessionRef.current;
+    if (!session || session.pointerId !== e.pointerId) return;
+    try {
+      scrollContainerRef.current?.releasePointerCapture?.(e.pointerId);
+    } catch {
+      // ignore
+    }
+    cleanupDragVisuals(session);
+  };
 
   const handleManualScrollSignal = () => {
     if (performance.now() - programmaticScrollAtRef.current < 350) return;
@@ -1283,6 +1638,10 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   };
 
   const handleScoreClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (suppressNextClickRef.current) {
+      suppressNextClickRef.current = false;
+      return;
+    }
     // Direct single-notehead selection works even before Edit Notation is toggled on
     if (onMusicXmlChange) {
       let node: Element | null = e.target as Element | null;
@@ -1540,185 +1899,122 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         </div>
       )}
 
-      {/* Direct Notation Editing Toolbar (only visible when Edit Notation is enabled) */}
+      {/* MuseScore-Style Notation Command Palette & Inline MIDI Controls */}
       {editMode && (() => {
         const noteInfo = selectedTarget && activeXml ? getXmlNoteInfo(activeXml, selectedTarget) : null;
-        const formatDur = (dur: EditableNoteType | null | undefined) =>
-          !dur ? "" : dur === "16th" ? "16th" : dur.charAt(0).toUpperCase() + dur.slice(1);
-        const editBtnClass = (isActive: boolean, isDisabled: boolean) =>
-          `inline-flex items-center justify-center gap-1 h-7 rounded-md border px-2 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-violet-500/40 ${
-            isDisabled
-              ? "bg-stone-100 text-stone-500 border-stone-200 cursor-not-allowed dark:bg-white/5 dark:text-slate-500 dark:border-white/10"
-              : isActive
-                ? "bg-violet-600 text-white border-violet-700 font-semibold dark:bg-violet-500 dark:text-white dark:border-violet-400"
-                : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300 font-medium dark:bg-white/5 dark:hover:bg-white/10 dark:text-slate-200 dark:border-white/15"
-          }`;
-        const durLabel = formatDur(noteInfo?.durationType);
         return (
-          <div
-            data-testid="notation-edit-toolbar"
-            className="flex flex-wrap items-center gap-2 rounded-lg bg-amber-50/90 border border-amber-300 px-3 py-2 text-xs shrink-0 dark:bg-amber-500/10 dark:border-amber-500/25"
-          >
-            {isPlaying ? (
-              <span className="text-amber-950 font-medium dark:text-amber-300">
-                Pause playback before editing notation.
-              </span>
-            ) : (
-              <>
-                <span
-                  data-testid="notation-edit-readout"
-                  className="font-mono text-amber-950 font-medium dark:text-amber-200"
-                >
-                  {selectedTarget
-                    ? `Selected: ${selectedTarget.pitchMidi !== null ? midiToNoteName(selectedTarget.pitchMidi) : "Rest"}${durLabel ? ` (${durLabel})` : ""} • m.${selectedTarget.measureNumber}`
-                    : "Click a notehead to edit"}
-                </span>
-
-                <div className="flex items-center gap-1 border-l border-amber-300/70 pl-2 dark:border-[#27273A]">
-                  <button
-                    type="button"
-                    disabled={!selectedTarget}
-                    aria-label="Pitch up"
-                    className={editBtnClass(false, !selectedTarget)}
-                    onClick={() => {
-                      if (!selectedTarget) return;
-                      const res = transposeXmlNote(activeXml, selectedTarget, 1);
-                      if (res) applyXmlEdit(res.xml, res.nextTarget);
-                    }}
-                  >
-                    <ArrowUp className="h-3 w-3" />
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!selectedTarget}
-                    aria-label="Pitch down"
-                    className={editBtnClass(false, !selectedTarget)}
-                    onClick={() => {
-                      if (!selectedTarget) return;
-                      const res = transposeXmlNote(activeXml, selectedTarget, -1);
-                      if (res) applyXmlEdit(res.xml, res.nextTarget);
-                    }}
-                  >
-                    <ArrowDown className="h-3 w-3" />
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!selectedTarget}
-                    aria-label="Octave up"
-                    className={editBtnClass(false, !selectedTarget)}
-                    onClick={() => {
-                      if (!selectedTarget) return;
-                      const res = transposeXmlNote(activeXml, selectedTarget, 12);
-                      if (res) applyXmlEdit(res.xml, res.nextTarget);
-                    }}
-                  >
-                    +8va
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!selectedTarget}
-                    aria-label="Octave down"
-                    className={editBtnClass(false, !selectedTarget)}
-                    onClick={() => {
-                      if (!selectedTarget) return;
-                      const res = transposeXmlNote(activeXml, selectedTarget, -12);
-                      if (res) applyXmlEdit(res.xml, res.nextTarget);
-                    }}
-                  >
-                    -8va
-                  </button>
-                </div>
-
-                <div className="flex items-center gap-1 border-l border-amber-300/70 pl-2 dark:border-[#27273A]">
-                  {(["sharp", "flat", "natural"] as const).map((acc) => (
-                    <button
-                      key={acc}
-                      type="button"
-                      disabled={!selectedTarget}
-                      aria-label={`Set accidental ${acc}`}
-                      aria-pressed={noteInfo?.accidental === acc}
-                      className={editBtnClass(noteInfo?.accidental === acc, !selectedTarget)}
-                      onClick={() => {
-                        if (!selectedTarget) return;
-                        const res = setXmlNoteAccidental(activeXml, selectedTarget, acc);
-                        if (res) applyXmlEdit(res.xml, res.nextTarget);
-                      }}
-                    >
-                      {acc === "sharp" ? "♯" : acc === "flat" ? "♭" : "♮"}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="flex items-center gap-1 border-l border-amber-300/70 pl-2 dark:border-[#27273A]">
-                  {(["whole", "half", "quarter", "eighth", "16th"] as EditableNoteType[]).map((dur) => (
-                    <button
-                      key={dur}
-                      type="button"
-                      disabled={!selectedTarget}
-                      aria-label={`Set duration ${dur}`}
-                      aria-pressed={noteInfo?.durationType === dur}
-                      className={editBtnClass(noteInfo?.durationType === dur, !selectedTarget)}
-                      onClick={() => {
-                        if (!selectedTarget) return;
-                        const res = setXmlNoteDuration(activeXml, selectedTarget, dur);
-                        if (res) applyXmlEdit(res.xml, res.nextTarget);
-                      }}
-                    >
-                      {dur === "16th" ? "16th" : dur.charAt(0).toUpperCase() + dur.slice(1)}
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    disabled={!selectedTarget}
-                    aria-label="Convert note to rest"
-                    className={editBtnClass(false, !selectedTarget)}
-                    onClick={() => {
-                      if (!selectedTarget) return;
-                      const res = convertXmlNoteToRest(activeXml, selectedTarget);
-                      if (res) applyXmlEdit(res.xml, null);
-                    }}
-                  >
-                    Rest
-                  </button>
-                </div>
-
-                <div className="flex items-center gap-1 border-l border-amber-300/70 pl-2 dark:border-[#27273A]">
-                  <button
-                    type="button"
-                    aria-label="Add measure"
-                    className={editBtnClass(false, false)}
-                    onClick={() => {
-                      const nextXml = addMeasureToAllParts(activeXml, selectedTarget?.measureNumber);
-                      if (nextXml) applyXmlEdit(nextXml);
-                    }}
-                  >
-                    <Plus className="h-3 w-3" /> Add Measure
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!selectedTarget}
-                    aria-label="Delete measure"
-                    className={`inline-flex items-center justify-center gap-1 h-7 rounded-md border px-2 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-red-500/40 ${
-                      !selectedTarget
-                        ? "bg-stone-100 text-stone-500 border-stone-200 cursor-not-allowed dark:bg-white/5 dark:text-slate-500 dark:border-white/10"
-                        : "bg-white hover:bg-red-50 text-red-800 border-red-300 font-medium dark:bg-red-500/15 dark:hover:bg-red-500/25 dark:text-red-300 dark:border-red-500/35"
-                    }`}
-                    onClick={() => {
-                      if (!selectedTarget) return;
-                      if (
-                        typeof window.confirm === "function" &&
-                        !window.confirm(`Delete measure ${selectedTarget.measureNumber} across all parts?`)
-                      ) {
-                        return;
-                      }
-                      const nextXml = deleteMeasureFromAllParts(activeXml, selectedTarget.measureNumber);
-                      if (nextXml) applyXmlEdit(nextXml, null);
-                    }}
-                  >
-                    <Trash2 className="h-3 w-3" /> Delete Measure
-                  </button>
-                </div>
-              </>
+          <div className="space-y-2 shrink-0">
+            <NotationCommandPalette
+              isPlaying={isPlaying}
+              noteInputMode={noteInputMode}
+              onToggleNoteInputMode={() => setNoteInputMode((v) => !v)}
+              activeDuration={activeDuration}
+              activeDotted={activeDotted}
+              activeVoice={activeVoice}
+              selectedTarget={selectedTarget}
+              noteInfo={noteInfo}
+              statusMessage={paletteStatusMsg}
+              canUndo={canUndo}
+              canRedo={canRedo}
+              onUndo={onUndo}
+              onRedo={onRedo}
+              onSelectDuration={(dur) => {
+                setActiveDuration(dur);
+                if (!selectedTarget) return;
+                const res = setXmlNoteDuration(activeXml, selectedTarget, dur);
+                if (res) applyXmlEdit(res.xml, res.nextTarget);
+              }}
+              onToggleDot={() => {
+                if (selectedTarget) {
+                  const res = toggleXmlNoteDot(activeXml, selectedTarget);
+                  if (res) {
+                    setActiveDotted(res.dotted);
+                    applyXmlEdit(res.xml, selectedTarget);
+                  }
+                } else {
+                  setActiveDotted((v) => !v);
+                }
+              }}
+              onToggleRest={() => {
+                if (!selectedTarget) return;
+                const res = convertXmlNoteToRest(activeXml, selectedTarget);
+                if (res) applyXmlEdit(res.xml, null);
+              }}
+              onSelectAccidental={(acc: XmlAccidentalType) => {
+                if (!selectedTarget) return;
+                const res = setXmlNoteAccidental(activeXml, selectedTarget, acc);
+                if (res) applyXmlEdit(res.xml, res.nextTarget);
+              }}
+              onToggleTie={() => {
+                if (!selectedTarget) return;
+                const res = toggleXmlNoteTie(activeXml, selectedTarget);
+                if (res.changed) applyXmlEdit(res.xml, selectedTarget);
+                else if (res.message) setPaletteStatusMsg(res.message);
+              }}
+              onToggleSlur={() => {
+                if (!selectedTarget) return;
+                const res = toggleXmlNoteSlur(activeXml, selectedTarget);
+                if (res.changed) applyXmlEdit(res.xml, selectedTarget);
+                else if (res.message) setPaletteStatusMsg(res.message);
+              }}
+              onToggleArticulation={(art: XmlArticulationType) => {
+                if (!selectedTarget) return;
+                const res = toggleXmlNoteArticulation(activeXml, selectedTarget, art);
+                if (res) applyXmlEdit(res.xml, selectedTarget);
+              }}
+              onToggleTriplet={() => {
+                if (!selectedTarget) return;
+                const res = toggleXmlNoteTriplet(activeXml, selectedTarget);
+                if (res) applyXmlEdit(res.xml, selectedTarget);
+              }}
+              onFlipStem={() => {
+                if (!selectedTarget) return;
+                const res = flipXmlNoteStem(activeXml, selectedTarget);
+                if (res) applyXmlEdit(res.xml, selectedTarget);
+              }}
+              onSelectVoice={(voice) => {
+                setActiveVoice(voice);
+                if (!selectedTarget) return;
+                const res = setXmlNoteVoice(activeXml, selectedTarget, voice);
+                if (res) applyXmlEdit(res.xml, selectedTarget);
+              }}
+              onTranspose={(semitones) => {
+                if (!selectedTarget) return;
+                const res = transposeXmlNote(activeXml, selectedTarget, semitones);
+                if (res) applyXmlEdit(res.xml, res.nextTarget);
+              }}
+              onAddMeasure={() => {
+                const nextXml = addMeasureToAllParts(activeXml, selectedTarget?.measureNumber);
+                if (nextXml) applyXmlEdit(nextXml);
+              }}
+              onDeleteMeasure={() => {
+                if (!selectedTarget) return;
+                if (
+                  typeof window.confirm === "function" &&
+                  !window.confirm(`Delete measure ${selectedTarget.measureNumber} across all parts?`)
+                ) {
+                  return;
+                }
+                const nextXml = deleteMeasureFromAllParts(activeXml, selectedTarget.measureNumber);
+                if (nextXml) applyXmlEdit(nextXml, null);
+              }}
+            />
+            {onMusicXmlChange && (
+              <NotationMidiBar
+                isActiveTab={isActiveTab}
+                activeXml={activeXml}
+                tempoBpm={tempoBpm}
+                timeSignature={timeSignature}
+                clefMode={clefMode}
+                activeDuration={activeDuration}
+                activeDotted={activeDotted}
+                activeVoice={activeVoice}
+                selectedTarget={selectedTarget}
+                metronomeSettings={metronomeSettings}
+                onMetronomeSettingsChange={onMetronomeSettingsChange}
+                onTempoChange={onTempoChange}
+                onCommitXml={(nextXml, nextTarget) => applyXmlEdit(nextXml, nextTarget)}
+              />
             )}
           </div>
         );
@@ -1735,15 +2031,30 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         data-testid="sheet-music-scroll-container"
         data-editable={onMusicXmlChange ? "true" : "false"}
         onClick={handleScoreClick}
+        onPointerDown={handleScorePointerDown}
+        onPointerMove={handleScorePointerMove}
+        onPointerUp={handleScorePointerUp}
+        onPointerCancel={handleScorePointerCancel}
+        onLostPointerCapture={handleScorePointerCancel}
         onWheel={handleManualScrollSignal}
         onTouchMove={handleManualScrollSignal}
         onScroll={handleManualScrollSignal}
-        className={`relative w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 touch-pan-x touch-pan-y ${isFocusMode ? "flex-1 min-h-0" : "min-h-[280px] max-h-[560px]"
+        className={`relative w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 touch-pan-x touch-pan-y ${dragTooltip ? "select-none touch-none" : ""
+          } ${isFocusMode ? "flex-1 min-h-0" : "min-h-[280px] max-h-[560px]"
           } ${onSeek || editMode ? "cursor-pointer" : ""}`}
       >
         {isRendering && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/20 text-xs text-zinc-700 z-30">
             Rendering notation...
+          </div>
+        )}
+        {dragTooltip && (
+          <div
+            data-testid="staff-drag-pitch-tooltip"
+            style={{ left: `${dragTooltip.x}px`, top: `${dragTooltip.y}px` }}
+            className="pointer-events-none absolute z-40 rounded-md bg-violet-700 px-2 py-0.5 text-[11px] font-mono font-semibold text-white shadow-lg"
+          >
+            {dragTooltip.text}
           </div>
         )}
         <div className="relative min-w-[560px]">

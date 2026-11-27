@@ -12,6 +12,38 @@ class ProjectCreateRequest(BaseModel):
     transcription_mode: str = Field(default="single_instrument", max_length=64)
 
 
+class PlaygroundProjectCreateRequest(BaseModel):
+    title: str = Field(default="Untitled Playground", min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    key_signature: str = Field(default="C Major", max_length=32)
+    time_signature: str = Field(default="4/4", max_length=16)
+    tempo_bpm: float = Field(default=120.0, ge=30.0, le=240.0)
+    clef_mode: Literal["grand", "treble", "bass"] = "grand"
+    measures: int = Field(default=4, ge=1, le=64)
+
+    @field_validator("title")
+    @classmethod
+    def _validate_playground_title(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Project title cannot be empty.")
+        return trimmed
+
+
+class PlaygroundCopyRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def _validate_copy_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Project title cannot be empty.")
+        return trimmed
+
+
 class ProjectUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)

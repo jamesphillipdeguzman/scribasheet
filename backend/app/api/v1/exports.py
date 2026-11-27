@@ -1,3 +1,5 @@
+import io
+import zipfile
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -21,7 +23,6 @@ from app.models import (
 )
 from app.notation.generator import (
     _render_pdf_from_musicxml_via_musescore,
-    _render_pdf_via_musescore,
     add_pdf_arranger_credit_page1,
     add_pdf_footer,
     apply_scribasheet_musicxml_branding,
@@ -43,8 +44,10 @@ router = APIRouter(tags=["Exports"])
 EXPORT_MIME_TYPES = {
     "midi": ("audio/midi", "mid"),
     "musicxml": ("application/vnd.recordare.musicxml+xml", "musicxml"),
+    "mxl": ("application/vnd.recordare.musicxml", "mxl"),
     "pdf": ("application/pdf", "pdf"),
     "wav": ("audio/wav", "wav"),
+    "mp3": ("audio/mpeg", "mp3"),
     "soprano_mp3": ("audio/mpeg", "mp3"),
     "alto_mp3": ("audio/mpeg", "mp3"),
     "tenor_mp3": ("audio/mpeg", "mp3"),
@@ -52,6 +55,23 @@ EXPORT_MIME_TYPES = {
     "extracted_mp3": ("audio/mpeg", "mp3"),
     "extracted_wav": ("audio/wav", "wav"),
 }
+
+
+def _package_musicxml_to_mxl(xml_bytes: bytes) -> bytes:
+    """Wrap uncompressed MusicXML bytes in a standards-compliant compressed .mxl ZIP container."""
+    container_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<container>\n"
+        "  <rootfiles>\n"
+        '    <rootfile full-path="score.musicxml" media-type="application/vnd.recordare.musicxml+xml"/>\n'
+        "  </rootfiles>\n"
+        "</container>\n"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("META-INF/container.xml", container_xml.encode("utf-8"))
+        zf.writestr("score.musicxml", xml_bytes)
+    return buf.getvalue()
 
 
 DEFAULT_TRANSCRIBED_BY = "James De Guzman"
@@ -281,6 +301,14 @@ def create_export(
                 transcribed_by=effective_transcribed_by,
             )
             content = xml_out.encode("utf-8")
+        elif payload.format == "mxl":
+            xml_out = _prepare_export_musicxml(
+                score,
+                include_chords=payload.include_chords,
+                musicxml_path=score_row.musicxml_path,
+                transcribed_by=effective_transcribed_by,
+            )
+            content = _package_musicxml_to_mxl(xml_out.encode("utf-8"))
         elif payload.format == "pdf":
             content = _resolve_pdf_export_bytes(
                 db,
@@ -293,6 +321,17 @@ def create_export(
             )
         elif payload.format == "wav":
             content = render_score_wav(score)
+        elif payload.format == "mp3":
+            from app.notation.satb_audio import _encode_wav_to_mp3
+
+            wav_bytes = render_score_wav(score)
+            try:
+                content = _encode_wav_to_mp3(wav_bytes)
+            except RuntimeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"MP3 export unavailable: {exc}",
+                ) from exc
         elif payload.format in ("soprano_mp3", "alto_mp3", "tenor_mp3", "bass_mp3"):
             from app.notation.satb_audio import (
                 infer_satb_voice_assignments,

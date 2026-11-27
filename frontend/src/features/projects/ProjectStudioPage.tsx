@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft,
   Check,
   Clock,
+  Copy,
   Download,
   FileMusic,
   FileText,
@@ -31,7 +32,11 @@ import { LyricsPanel } from "@/features/editor/LyricsPanel";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { metronomeEngine } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
-import { musicXmlToScoreNotes } from "@/features/editor/musicXmlEditor";
+import {
+  musicXmlToScoreNotes,
+  type PlaygroundClefMode,
+  updateXmlScoreHeader,
+} from "@/features/editor/musicXmlEditor";
 import { applyScoreTitleToMusicXml } from "@/features/editor/musicXmlNormalization";
 import {
   loadMetronomeSettings,
@@ -52,9 +57,12 @@ type StudioTab = "notation" | "pianoroll" | "chords" | "lyrics" | "exports";
 
 export function ProjectStudioPage() {
   const { projectId = "" } = useParams();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const autoCollapsedPlaygroundRef = useRef<string | null>(null);
+  const [isCreatingPlaygroundCopy, setIsCreatingPlaygroundCopy] = useState(false);
   const [activeTab, setActiveTab] = useState<StudioTab>("notation");
   const [isFocusMode, setIsFocusMode] = useState(false);
 
@@ -94,8 +102,8 @@ export function ProjectStudioPage() {
     "idle" | "loading" | "ready" | "missing_score" | "missing_file" | "unauthorized" | "error"
   >("idle");
   const [scoreLoadError, setScoreLoadError] = useState<string | null>(null);
-  const [undoStack, setUndoStack] = useState<ScoreData[]>([]);
-  const [redoStack, setRedoStack] = useState<ScoreData[]>([]);
+  const [undoStack, setUndoStack] = useState<Array<{ scoreData: ScoreData; musicxml: string | null }>>([]);
+  const [redoStack, setRedoStack] = useState<Array<{ scoreData: ScoreData; musicxml: string | null }>>([]);
   const [saveStatus, setSaveStatus] = useState<"saved" | "unsaved" | "saving" | "error">("saved");
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -580,9 +588,10 @@ export function ProjectStudioPage() {
 
   const mutateScore = (updater: (prev: ScoreData) => ScoreData, xmlOverride?: string | null) => {
     if (!scoreData) return;
-    setUndoStack((s) => [...s.slice(-29), scoreData]);
+    setUndoStack((s) => [...s.slice(-29), { scoreData, musicxml }]);
     setRedoStack([]);
     const next = updater(scoreData);
+    const nextXml = xmlOverride !== undefined ? xmlOverride : musicxml;
     setScoreData(next);
     if (xmlOverride !== undefined) {
       setMusicxml(xmlOverride);
@@ -591,27 +600,67 @@ export function ProjectStudioPage() {
 
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = window.setTimeout(() => {
-      persistScore(next, scoreVersion, xmlOverride);
+      persistScore(next, scoreVersion, nextXml);
     }, 1500);
   };
 
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     if (undoStack.length === 0 || !scoreData) return;
     const prev = undoStack[undoStack.length - 1];
     setUndoStack((s) => s.slice(0, -1));
-    setRedoStack((r) => [...r, scoreData]);
-    setScoreData(prev);
+    setRedoStack((r) => [...r, { scoreData, musicxml }]);
+    setScoreData(prev.scoreData);
+    setMusicxml(prev.musicxml);
     setSaveStatus("unsaved");
-  };
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = window.setTimeout(() => {
+      persistScore(prev.scoreData, scoreVersion, prev.musicxml);
+    }, 1500);
+  }, [undoStack, scoreData, musicxml, persistScore, scoreVersion]);
 
-  const handleRedo = () => {
+  const handleRedo = useCallback(() => {
     if (redoStack.length === 0 || !scoreData) return;
     const next = redoStack[redoStack.length - 1];
     setRedoStack((r) => r.slice(0, -1));
-    setUndoStack((s) => [...s, scoreData]);
-    setScoreData(next);
+    setUndoStack((s) => [...s, { scoreData, musicxml }]);
+    setScoreData(next.scoreData);
+    setMusicxml(next.musicxml);
     setSaveStatus("unsaved");
-  };
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = window.setTimeout(() => {
+      persistScore(next.scoreData, scoreVersion, next.musicxml);
+    }, 1500);
+  }, [redoStack, scoreData, musicxml, persistScore, scoreVersion]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      const key = e.key.toLowerCase();
+      if (key === "z" && !e.shiftKey) {
+        if (undoStack.length > 0) {
+          e.preventDefault();
+          handleUndo();
+        }
+      } else if ((key === "z" && e.shiftKey) || (key === "y" && !e.shiftKey)) {
+        if (redoStack.length > 0) {
+          e.preventDefault();
+          handleRedo();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [handleUndo, handleRedo, undoStack.length, redoStack.length]);
 
   const handleNotesChange = (newNotes: ScoreNote[]) => {
     mutateScore((prev) => ({ ...prev, notes: newNotes }));
@@ -802,6 +851,18 @@ export function ProjectStudioPage() {
     trimTotalDuration,
   ]);
 
+  const isMidiPlayground = Boolean(
+    project?.transcription_mode === "midi_playground" ||
+      scoreData?.analysis?.source_type === "midi_playground",
+  );
+
+  useEffect(() => {
+    if (isMidiPlayground && project?.id && autoCollapsedPlaygroundRef.current !== project.id) {
+      autoCollapsedPlaygroundRef.current = project.id;
+      setSidebarOpen(false);
+    }
+  }, [isMidiPlayground, project?.id]);
+
   if (projectLoading) {
     return (
       <AppShell>
@@ -844,9 +905,64 @@ export function ProjectStudioPage() {
   const uploadedVideoAsset = topUploadedVideoAsset;
   const isScoreAsset = isScoreMediaAsset(originalAsset);
   const isScoreProject =
+    isMidiPlayground ||
     isScoreAsset ||
     (!originalAsset &&
       (project?.transcription_mode === "satb_pdf" || scoreData?.analysis?.mode === "satb_pdf"));
+
+  const playgroundClefMode: PlaygroundClefMode = (() => {
+    const cfgClef = (scoreData?.analysis?.playground_config as { clef_mode?: string } | undefined)?.clef_mode;
+    if (cfgClef === "treble" || cfgClef === "bass" || cfgClef === "grand") return cfgClef;
+    if (scoreData?.tracks && scoreData.tracks.length === 1 && scoreData.tracks[0].clef === "bass") {
+      return "bass";
+    }
+    if (scoreData?.tracks && scoreData.tracks.length === 1 && scoreData.tracks[0].clef === "treble") {
+      return "treble";
+    }
+    return "grand";
+  })();
+
+  const handlePlaygroundConfigChange = (updates: {
+    keySignature?: string;
+    timeSignature?: string;
+    tempoBpm?: number;
+    clefMode?: PlaygroundClefMode;
+  }) => {
+    if (!scoreData || !musicxml) return;
+    const nextXml = updateXmlScoreHeader(musicxml, updates) ?? musicxml;
+    const nextTempo = updates.tempoBpm ?? scoreData.tempo_bpm;
+    const synced = musicXmlToScoreNotes(nextXml, scoreData.tracks, nextTempo);
+    mutateScore(
+      (prev) => ({
+        ...prev,
+        ...(updates.keySignature ? { key_signature: updates.keySignature, key_signature_estimated: false } : {}),
+        ...(updates.timeSignature ? { time_signature: updates.timeSignature, time_signature_estimated: false } : {}),
+        ...(updates.tempoBpm ? { tempo_bpm: updates.tempoBpm, tempo_estimated: false } : {}),
+        notes: synced.notes,
+        duration_seconds: Math.max(synced.durationSeconds, 0.5),
+        analysis: {
+          ...prev.analysis,
+          playground_config: {
+            ...((prev.analysis?.playground_config as Record<string, unknown> | undefined) || {}),
+            ...(updates.clefMode ? { clef_mode: updates.clefMode } : {}),
+          },
+        },
+      }),
+      nextXml,
+    );
+  };
+
+  const handleEditCopyInPlayground = async () => {
+    if (!project || isCreatingPlaygroundCopy) return;
+    setIsCreatingPlaygroundCopy(true);
+    try {
+      const copy = await api.createPlaygroundCopy(project.id);
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      navigate(`/projects/${copy.id}`);
+    } finally {
+      setIsCreatingPlaygroundCopy(false);
+    }
+  };
 
   const effectiveProjectTitle = optimisticTitle ?? project.title;
   const effectiveScoreTitle = resolveDisplayScoreTitle(effectiveProjectTitle);
@@ -883,6 +999,25 @@ export function ProjectStudioPage() {
             <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 sm:order-3">
               {scoreData && (
                 <>
+                  {!isMidiPlayground && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      data-testid="edit-copy-in-playground-btn"
+                      onClick={() => void handleEditCopyInPlayground()}
+                      disabled={isCreatingPlaygroundCopy}
+                      title="Create a non-destructive copy of this score in MIDI Playground."
+                      className="whitespace-nowrap shrink-0"
+                    >
+                      {isCreatingPlaygroundCopy ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                      <span className="hidden xl:inline">Edit Copy in Playground</span>
+                      <span className="xl:hidden">Playground Copy</span>
+                    </Button>
+                  )}
                   <Button size="sm" variant="ghost" onClick={handleUndo} disabled={undoStack.length === 0} aria-label="Undo" className="shrink-0">
                     <Undo2 className="h-4 w-4" />
                   </Button>
@@ -907,7 +1042,7 @@ export function ProjectStudioPage() {
                   </span>
                   <Button
                     size="sm"
-                    onClick={() => persistScore(scoreData, scoreVersion)}
+                    onClick={() => persistScore(scoreData, scoreVersion, musicxml)}
                     disabled={saveStatus === "saving"}
                     className="whitespace-nowrap shrink-0"
                   >
@@ -970,6 +1105,15 @@ export function ProjectStudioPage() {
                 </div>
               )}
               <StatusBadge status={project.status} />
+              {isMidiPlayground && (
+                <span
+                  data-testid="midi-playground-badge"
+                  className="inline-flex items-center gap-1 rounded-full border border-violet-400/50 bg-violet-500/15 px-2 py-0.5 text-[11px] font-medium text-violet-700 dark:text-violet-300"
+                >
+                  <Piano className="h-3 w-3" />
+                  MIDI Playground
+                </span>
+              )}
               <WorkerStatusBadge />
             </div>
             {renameError && (
@@ -1222,6 +1366,69 @@ export function ProjectStudioPage() {
               />
             )}
 
+            {isMidiPlayground && scoreData && musicxml && (
+              <div
+                data-testid="playground-config-bar"
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-violet-400/35 bg-violet-50/70 px-3 py-2 text-xs dark:border-violet-500/30 dark:bg-[#141425]"
+              >
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="font-semibold text-violet-900 dark:text-violet-200">
+                    Playground Setup
+                  </span>
+                  <label className="inline-flex items-center gap-1 text-stone-700 dark:text-[#C4C4D4]">
+                    Key
+                    <select
+                      aria-label="Playground key signature"
+                      value={scoreData.key_signature}
+                      onChange={(e) => handlePlaygroundConfigChange({ keySignature: e.target.value })}
+                      className="h-7 rounded-md border border-stone-300 bg-white px-2 text-xs text-stone-900 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#F5F3FF]"
+                    >
+                      {[
+                        "C Major", "G Major", "D Major", "A Major", "E Major",
+                        "F Major", "Bb Major", "Eb Major", "Ab Major", "Db Major",
+                        "A Minor", "E Minor", "B Minor", "F# Minor", "D Minor", "G Minor", "C Minor",
+                      ].map((k) => (
+                        <option key={k} value={k}>{k}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="inline-flex items-center gap-1 text-stone-700 dark:text-[#C4C4D4]">
+                    Time
+                    <select
+                      aria-label="Playground time signature"
+                      value={scoreData.time_signature}
+                      onChange={(e) => handlePlaygroundConfigChange({ timeSignature: e.target.value })}
+                      className="h-7 rounded-md border border-stone-300 bg-white px-2 text-xs text-stone-900 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#F5F3FF]"
+                    >
+                      {["4/4", "3/4", "2/4", "6/8", "3/8", "12/8"].map((ts) => (
+                        <option key={ts} value={ts}>{ts}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="inline-flex items-center gap-1 text-stone-700 dark:text-[#C4C4D4]">
+                    Staff
+                    <select
+                      aria-label="Playground clef layout"
+                      value={playgroundClefMode}
+                      onChange={(e) =>
+                        handlePlaygroundConfigChange({ clefMode: e.target.value as PlaygroundClefMode })
+                      }
+                      className="h-7 rounded-md border border-stone-300 bg-white px-2 text-xs text-stone-900 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#F5F3FF]"
+                    >
+                      <option value="grand">Grand Staff (Treble + Bass)</option>
+                      <option value="treble">Treble Clef</option>
+                      <option value="bass">Bass Clef</option>
+                    </select>
+                  </label>
+                </div>
+                {Boolean(scoreData.analysis?.copied_from_project_id) && (
+                  <span className="text-[11px] text-emerald-800 dark:text-emerald-300">
+                    Isolated copy — original transcription untouched
+                  </span>
+                )}
+              </div>
+            )}
+
             {/* Workspace Tabs */}
             <div className="rounded-xl border border-[#27273A] bg-[#11111B] p-3 sm:p-4 space-y-4 min-w-0">
               <div className="flex flex-nowrap items-center justify-between gap-2 overflow-x-auto border-b border-[#27273A] pb-3" role="tablist">
@@ -1407,6 +1614,18 @@ export function ProjectStudioPage() {
                     playheadSec={playheadSec}
                     isPlaying={isPlaybackActive}
                     tempoBpm={scoreData?.tempo_bpm || 120}
+                    timeSignature={scoreData?.time_signature || "4/4"}
+                    clefMode={playgroundClefMode}
+                    isMidiPlayground={isMidiPlayground}
+                    defaultEditMode={isMidiPlayground}
+                    isActiveTab={activeTab === "notation"}
+                    metronomeSettings={metronomeSettings}
+                    onMetronomeSettingsChange={handleMetronomeSettingsChange}
+                    onTempoChange={(nextBpm) => handlePlaygroundConfigChange({ tempoBpm: nextBpm })}
+                    canUndo={undoStack.length > 0}
+                    canRedo={redoStack.length > 0}
+                    onUndo={handleUndo}
+                    onRedo={handleRedo}
                     playbackRate={playbackRate}
                     tracks={scoreData?.tracks || []}
                     onPrintPdf={() => void handlePrintPdf()}

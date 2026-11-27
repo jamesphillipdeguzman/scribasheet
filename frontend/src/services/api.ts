@@ -395,6 +395,17 @@ export const api = {
   },
   createProject: (data: { title: string; description?: string; instrument?: string; transcription_mode?: string }) =>
     request<Project>("/projects", { method: "POST", body: JSON.stringify(data) }),
+  createPlaygroundProject: (data?: {
+    title?: string;
+    description?: string;
+    key_signature?: string;
+    time_signature?: string;
+    tempo_bpm?: number;
+    clef_mode?: "grand" | "treble" | "bass";
+    measures?: number;
+  }) => request<Project>("/projects/playground", { method: "POST", body: JSON.stringify(data || {}) }),
+  createPlaygroundCopy: (id: string, data?: { title?: string }) =>
+    request<Project>(`/projects/${id}/playground-copy`, { method: "POST", body: JSON.stringify(data || {}) }),
   getProject: (id: string) => request<Project>(`/projects/${id}`),
   updateProject: (id: string, data: Partial<Pick<Project, "title" | "description" | "instrument" | "transcription_mode">>) =>
     request<Project>(`/projects/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
@@ -619,8 +630,10 @@ export const api = {
     format:
       | "midi"
       | "musicxml"
+      | "mxl"
       | "pdf"
       | "wav"
+      | "mp3"
       | "soprano_mp3"
       | "alto_mp3"
       | "tenor_mp3"

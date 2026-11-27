@@ -34,8 +34,10 @@ interface ExportCenterProps {
 type ExportFormatId =
   | "midi"
   | "musicxml"
+  | "mxl"
   | "pdf"
   | "wav"
+  | "mp3"
   | "soprano_mp3"
   | "alto_mp3"
   | "tenor_mp3"
@@ -55,16 +57,18 @@ const SATB_MP3_FORMATS: Array<{
   ];
 
 const FORMATS: Array<{
-  id: "midi" | "musicxml" | "pdf" | "wav";
+  id: "midi" | "musicxml" | "mxl" | "pdf" | "wav" | "mp3";
   label: string;
   ext: string;
   desc: string;
   icon: typeof Music;
 }> = [
-    { id: "midi", label: "MIDI File", ext: ".mid", desc: "Standard MIDI for any DAW", icon: Music },
-    { id: "musicxml", label: "MusicXML", ext: ".musicxml", desc: "MuseScore, Finale, Sibelius, Dorico", icon: FileMusic },
     { id: "pdf", label: "PDF Sheet Music", ext: ".pdf", desc: "Printable multi-page score", icon: FileText },
-    { id: "wav", label: "WAV Audio", ext: ".wav", desc: "Synthesized playback render", icon: FileAudio },
+    { id: "musicxml", label: "MusicXML", ext: ".musicxml", desc: "Uncompressed MuseScore, Finale, Dorico", icon: FileMusic },
+    { id: "mxl", label: "Compressed MusicXML", ext: ".mxl", desc: "Portable MuseScore / MXL archive", icon: FileMusic },
+    { id: "midi", label: "MIDI File", ext: ".mid", desc: "Standard MIDI for any DAW", icon: Music },
+    { id: "wav", label: "WAV Audio", ext: ".wav", desc: "Uncompressed synthesized audio", icon: FileAudio },
+    { id: "mp3", label: "MP3 Audio", ext: ".mp3", desc: "Compressed score playback mix", icon: FileAudio },
   ];
 
 export function ExportCenter({
@@ -300,7 +304,7 @@ export function ExportCenter({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 min-w-0">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 min-w-0">
         {FORMATS.map((f) => {
           const Icon = f.icon;
           const loading = activeFmt === f.id;

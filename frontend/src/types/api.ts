@@ -192,8 +192,10 @@ export interface ExportRecord {
   format:
     | "midi"
     | "musicxml"
+    | "mxl"
     | "pdf"
     | "wav"
+    | "mp3"
     | "soprano_mp3"
     | "alto_mp3"
     | "tenor_mp3"

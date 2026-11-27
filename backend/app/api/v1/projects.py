@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session, joinedload
@@ -8,17 +10,26 @@ from app.audio.extraction_service import ensure_extracted_audio_asset
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob, User
-from app.notation.generator import apply_scribasheet_musicxml_branding, resolve_project_score_title
+from app.notation.generator import (
+    apply_scribasheet_musicxml_branding,
+    resolve_project_score_title,
+    score_data_to_midi_bytes,
+    score_data_to_musicxml,
+)
+from app.notation.playground import build_blank_playground_score
 from app.schemas.project import (
     ExtractAudioRequest,
     ExtractAudioResponse,
     ExtractedAudioItem,
     MediaAssetResponse,
+    PlaygroundCopyRequest,
+    PlaygroundProjectCreateRequest,
     ProjectCreateRequest,
     ProjectListResponse,
     ProjectResponse,
     ProjectUpdateRequest,
 )
+from app.schemas.score import ScoreData
 from app.storage.service import sanitize_download_title, storage_service
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
@@ -58,12 +69,7 @@ def list_projects(
     return ProjectListResponse(items=items, total=total, page=page, page_size=page_size)
 
 
-@router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
-def create_project(
-    payload: ProjectCreateRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
+def _enforce_project_quota(current_user: User, db: Session) -> None:
     if not is_user_unlimited(current_user):
         limits = PLAN_LIMITS.get(current_user.plan_tier, PLAN_LIMITS["free"])
         current_count = db.query(Project).filter(Project.user_id == current_user.id).count()
@@ -72,6 +78,93 @@ def create_project(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Project limit reached ({limits['projects']}) for your {current_user.plan_tier} plan.",
             )
+
+
+def _clone_score_for_copy(
+    source_score: ProjectScore,
+    *,
+    owner_id: str,
+    target_project_id: str,
+    target_title: str,
+    mark_playground: bool = False,
+    copied_from_project_id: str | None = None,
+) -> ProjectScore:
+    """Create a completely isolated ProjectScore copy with independent MusicXML/MIDI files."""
+    resolved_title = resolve_project_score_title(target_title)
+    score_json_copy = deepcopy(source_score.score_json or {})
+    if isinstance(score_json_copy, dict):
+        score_json_copy["title"] = resolved_title
+        if mark_playground:
+            analysis = dict(score_json_copy.get("analysis") or {})
+            analysis["source_type"] = "midi_playground"
+            analysis["mode"] = "midi_playground"
+            if copied_from_project_id:
+                analysis["copied_from_project_id"] = copied_from_project_id
+            score_json_copy["analysis"] = analysis
+
+    new_xml_key: str | None = None
+    if source_score.musicxml_path and storage_service.exists(source_score.musicxml_path):
+        raw_bytes = storage_service.read_bytes(source_score.musicxml_path)
+        if not source_score.musicxml_path.lower().endswith(".mxl") and raw_bytes[:2] != b"PK":
+            raw_xml = raw_bytes.decode("utf-8-sig", errors="replace")
+            branded_xml = apply_scribasheet_musicxml_branding(
+                raw_xml,
+                title=resolved_title,
+                force_title=True,
+            )
+            new_xml_key = storage_service.build_key(owner_id, target_project_id, "musicxml", "score.musicxml")
+            storage_service.save_bytes(
+                new_xml_key,
+                branded_xml.encode("utf-8"),
+                content_type="application/vnd.recordare.musicxml+xml",
+            )
+        else:
+            new_xml_key = storage_service.build_key(owner_id, target_project_id, "musicxml", "score.mxl")
+            storage_service.save_bytes(
+                new_xml_key,
+                raw_bytes,
+                content_type="application/vnd.recordare.musicxml",
+            )
+    elif isinstance(score_json_copy, dict) and score_json_copy:
+        fallback_score = ScoreData(**score_json_copy)
+        fallback_xml = apply_scribasheet_musicxml_branding(
+            score_data_to_musicxml(fallback_score),
+            title=resolved_title,
+            force_title=True,
+        )
+        new_xml_key = storage_service.build_key(owner_id, target_project_id, "musicxml", "score.musicxml")
+        storage_service.save_bytes(
+            new_xml_key,
+            fallback_xml.encode("utf-8"),
+            content_type="application/vnd.recordare.musicxml+xml",
+        )
+
+    new_midi_key: str | None = None
+    if source_score.midi_path and storage_service.exists(source_score.midi_path):
+        midi_bytes = storage_service.read_bytes(source_score.midi_path)
+        new_midi_key = storage_service.build_key(owner_id, target_project_id, "midi", "score.mid")
+        storage_service.save_bytes(new_midi_key, midi_bytes, content_type="audio/midi")
+    elif isinstance(score_json_copy, dict) and score_json_copy:
+        midi_bytes = score_data_to_midi_bytes(ScoreData(**score_json_copy))
+        new_midi_key = storage_service.build_key(owner_id, target_project_id, "midi", "score.mid")
+        storage_service.save_bytes(new_midi_key, midi_bytes, content_type="audio/midi")
+
+    return ProjectScore(
+        project_id=target_project_id,
+        version=1,
+        score_json=score_json_copy,
+        musicxml_path=new_xml_key,
+        midi_path=new_midi_key,
+    )
+
+
+@router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
+def create_project(
+    payload: ProjectCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _enforce_project_quota(current_user, db)
 
     project = Project(
         user_id=current_user.id,
@@ -82,6 +175,61 @@ def create_project(
         status="draft",
     )
     db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.post("/playground", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
+def create_playground_project(
+    payload: PlaygroundProjectCreateRequest = Body(default_factory=PlaygroundProjectCreateRequest),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a standalone blank MIDI Playground project with an initialized grand/treble/bass MusicXML score."""
+    _enforce_project_quota(current_user, db)
+
+    title = payload.title.strip() or "Untitled Playground"
+    score_data, musicxml_str = build_blank_playground_score(
+        title=title,
+        key_signature=payload.key_signature,
+        time_signature=payload.time_signature,
+        tempo_bpm=payload.tempo_bpm,
+        clef_mode=payload.clef_mode,
+        measures=payload.measures,
+    )
+
+    project = Project(
+        user_id=current_user.id,
+        title=title[:200],
+        description=payload.description.strip(),
+        instrument="piano",
+        transcription_mode="midi_playground",
+        duration_seconds=score_data.duration_seconds,
+        status="ready",
+    )
+    db.add(project)
+    db.flush()
+
+    xml_key = storage_service.build_key(current_user.id, project.id, "musicxml", "score.musicxml")
+    storage_service.save_bytes(
+        xml_key,
+        musicxml_str.encode("utf-8"),
+        content_type="application/vnd.recordare.musicxml+xml",
+    )
+    midi_bytes = score_data_to_midi_bytes(score_data)
+    midi_key = storage_service.build_key(current_user.id, project.id, "midi", "score.mid")
+    storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
+
+    db.add(
+        ProjectScore(
+            project_id=project.id,
+            version=1,
+            score_json=score_data.model_dump(),
+            musicxml_path=xml_key,
+            midi_path=midi_key,
+        )
+    )
     db.commit()
     db.refresh(project)
     return project
@@ -146,9 +294,11 @@ def duplicate_project(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _enforce_project_quota(current_user, db)
+    copy_title = f"{project.title} (Copy)"[:120]
     copy = Project(
         user_id=current_user.id,
-        title=f"{project.title} (Copy)"[:200],
+        title=copy_title,
         description=project.description,
         instrument=project.instrument,
         transcription_mode=project.transcription_mode,
@@ -160,14 +310,57 @@ def duplicate_project(
 
     if project.score:
         db.add(
-            ProjectScore(
-                project_id=copy.id,
-                version=1,
-                score_json=project.score.score_json,
-                musicxml_path=project.score.musicxml_path,
-                midi_path=project.score.midi_path,
+            _clone_score_for_copy(
+                project.score,
+                owner_id=current_user.id,
+                target_project_id=copy.id,
+                target_title=copy_title,
             )
         )
+
+    db.commit()
+    db.refresh(copy)
+    return copy
+
+
+@router.post("/{project_id}/playground-copy", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
+def create_playground_copy(
+    payload: PlaygroundCopyRequest = Body(default_factory=PlaygroundCopyRequest),
+    project: Project = Depends(get_owned_project),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Clone an existing project's score into an isolated MIDI Playground project without altering the original."""
+    if not project.score:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project does not have a score to open in the MIDI Playground yet.",
+        )
+    _enforce_project_quota(current_user, db)
+
+    copy_title = (payload.title.strip() if payload.title else f"{project.title} (Playground Copy)")[:120]
+    copy = Project(
+        user_id=current_user.id,
+        title=copy_title,
+        description=project.description,
+        instrument=project.instrument,
+        transcription_mode="midi_playground",
+        duration_seconds=project.duration_seconds,
+        status="ready",
+    )
+    db.add(copy)
+    db.flush()
+
+    db.add(
+        _clone_score_for_copy(
+            project.score,
+            owner_id=current_user.id,
+            target_project_id=copy.id,
+            target_title=copy_title,
+            mark_playground=True,
+            copied_from_project_id=project.id,
+        )
+    )
 
     db.commit()
     db.refresh(copy)
