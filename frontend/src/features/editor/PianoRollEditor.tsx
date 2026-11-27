@@ -54,6 +54,7 @@ interface PianoRollEditorProps {
   durationSeconds: number;
   tempoBpm: number;
   timeSignature?: string;
+  keyFifths?: number;
   playheadSec: number;
   selectedNoteId: string | null;
   onSelectNote: (id: string | null) => void;
@@ -117,6 +118,7 @@ export function PianoRollEditor({
   durationSeconds,
   tempoBpm,
   timeSignature = "4/4",
+  keyFifths = 0,
   playheadSec,
   selectedNoteId,
   onSelectNote,
@@ -724,7 +726,7 @@ export function PianoRollEditor({
         {selectedNote && (
           <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[#27273A] bg-[#181825] px-3 py-1 text-xs">
             <span className="font-mono text-[#A78BFA]">
-              {midiToNoteName(selectedNote.pitch_midi)}
+              {midiToNoteName(selectedNote.pitch_midi, keyFifths)}
               {selectedCount > 1 ? ` (+${selectedCount - 1})` : ""}
             </span>
             <span className="text-[#A1A1AA]">
@@ -825,7 +827,7 @@ export function PianoRollEditor({
                       : "bg-stone-50 text-stone-800 dark:bg-[#181825] dark:text-[#A1A1AA]"
                 }`}
               >
-                {isC || isSharp === false ? midiToNoteName(p) : ""}
+                {isC || isSharp === false ? midiToNoteName(p, keyFifths) : ""}
               </div>
             );
           })}
@@ -912,7 +914,7 @@ export function PianoRollEditor({
                 }`}
               >
                 <span className="truncate pointer-events-none">
-                  {width > 26 ? midiToNoteName(n.pitch_midi) : ""}
+                  {width > 26 ? midiToNoteName(n.pitch_midi, keyFifths) : ""}
                 </span>
                 <div
                   onMouseDown={(e) => {
@@ -1217,6 +1219,7 @@ export function PianoRollEditor({
         <VirtualPianoKeyboard
           minPitch={21}
           maxPitch={108}
+          keyFifths={keyFifths}
           activePlaybackNotes={activePlaybackNotes}
           activeMidiPitchesStore={liveMidiStore}
           rePitchArmed={rePitchArmed}

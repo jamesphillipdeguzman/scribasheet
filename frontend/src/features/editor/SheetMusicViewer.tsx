@@ -17,6 +17,7 @@ import { AlphaTabSheetViewer } from "@/features/editor/AlphaTabSheetViewer";
 import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
 import { type MetronomeSettings } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
+import { KeySignatureControl, type KeyChangeAction } from "@/features/editor/KeySignatureControl";
 import { NotationCommandPalette } from "@/features/editor/NotationCommandPalette";
 import { NotationMidiBar } from "@/features/editor/NotationMidiBar";
 import {
@@ -24,6 +25,7 @@ import {
   computeDiatonicDragPitch,
   convertXmlNoteToRest,
   deleteMeasureFromAllParts,
+  deleteXmlNote,
   type DiatonicPitchResult,
   type EditableNoteType,
   flipXmlNoteStem,
@@ -45,12 +47,9 @@ import {
   type XmlNoteInfo,
   type XmlNoteTarget,
 } from "@/features/editor/musicXmlEditor";
-import {
-  cleanDisplayScoreTitle,
-  normalizeScorePayload,
-  prepareDisplayMusicXml,
-} from "@/features/editor/musicXmlNormalization";
+import { cleanDisplayScoreTitle, normalizeScorePayload, prepareDisplayMusicXml } from "@/features/editor/musicXmlNormalization";
 import { injectChordsIntoMusicXml } from "@/features/editor/musicXmlChords";
+import type { KeyMode } from "@/lib/keySignature";
 import {
   buildMusicXmlTimeline,
   findCursorSnapshotIndex,
@@ -116,6 +115,9 @@ interface SheetMusicViewerProps {
   tempoBpm?: number;
   timeSignature?: string;
   clefMode?: PlaygroundClefMode;
+  keyFifths?: number;
+  keyMode?: KeyMode;
+  onApplyKeySignature?: (targetFifths: number, targetMode: KeyMode, action: KeyChangeAction) => void;
   isMidiPlayground?: boolean;
   defaultEditMode?: boolean;
   isActiveTab?: boolean;
@@ -196,6 +198,9 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   tempoBpm = 120,
   timeSignature = "4/4",
   clefMode = "grand",
+  keyFifths = 0,
+  keyMode = "major",
+  onApplyKeySignature,
   isMidiPlayground = false,
   defaultEditMode = false,
   isActiveTab = true,
@@ -272,6 +277,14 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const selectedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
   const svgNoteTargetMapRef = useRef<WeakMap<Element, XmlNoteTarget>>(new WeakMap());
   const staffLineSpacingMapRef = useRef<Map<string, number>>(new Map());
+  interface MeasureBoundingRect {
+    measureNumber: number;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  }
+  const measureRectsRef = useRef<MeasureBoundingRect[]>([]);
   const renderedEventsRef = useRef<RenderedMusicalEvent[]>([]);
   const cursorSnapshotsRef = useRef<OsmdCursorSnapshot[]>([]);
   const lastCursorWholeRef = useRef<number>(-1);
@@ -297,6 +310,10 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const [selectedTarget, setSelectedTarget] = useState<XmlNoteTarget | null>(null);
   const selectedTargetRef = useRef<XmlNoteTarget | null>(null);
   selectedTargetRef.current = selectedTarget;
+  const [selectedMeasureNumber, setSelectedMeasureNumber] = useState<number | null>(null);
+  const selectedMeasureNumberRef = useRef<number | null>(null);
+  selectedMeasureNumberRef.current = selectedMeasureNumber;
+  const [selectedMeasureRect, setSelectedMeasureRect] = useState<MeasureBoundingRect | null>(null);
   const lastEditedXmlRef = useRef<string | null>(null);
 
   interface DragSession {
@@ -334,6 +351,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     lastEditedXmlRef.current = null;
     clearSelectedHighlight();
     setSelectedTarget(null);
+    setSelectedMeasureNumber(null);
+    setSelectedMeasureRect(null);
   }, [musicxml]);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
@@ -880,6 +899,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     // Map rendered SVG notehead elements to XmlNoteTarget AND build canonical event -> SVG notehead index
     const newMap = new WeakMap<Element, XmlNoteTarget>();
     const newSpacingMap = new Map<string, number>();
+    const measureBoundsMap = new Map<number, { minX: number; minY: number; maxX: number; maxY: number }>();
     const staffMapping = buildStaffIndexMapping(resolvedXml ?? musicxml);
     const eventBuckets = new Map<number, RenderedMusicalEvent>();
     const usedNoteIds = new Set<string>();
@@ -949,9 +969,36 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
             const mNum = gm.MeasureNumber ?? gm.parentSourceMeasure?.MeasureNumber ?? mIdx + 1;
             const staffLoc = staffMapping[sIdx] ?? { partIndex: sIdx, staffNumber: 1 };
             const gmShape = (gm as unknown as {
-              PositionAndShape?: { Size?: { height?: number } };
+              PositionAndShape?: {
+                AbsolutePosition?: { x?: number; y?: number };
+                Size?: { width?: number; height?: number };
+              };
               staffLines?: Array<{ PositionAndShape?: { AbsolutePosition?: { y: number } } }>;
             });
+            const mPos = gmShape?.PositionAndShape?.AbsolutePosition;
+            const mSize = gmShape?.PositionAndShape?.Size;
+            if (
+              mPos &&
+              mSize &&
+              typeof mPos.x === "number" &&
+              typeof mPos.y === "number" &&
+              typeof mSize.width === "number" &&
+              typeof mSize.height === "number"
+            ) {
+              const rx = mPos.x * scale;
+              const ry = mPos.y * scale;
+              const rx2 = rx + mSize.width * scale;
+              const ry2 = ry + mSize.height * scale;
+              const prevBounds = measureBoundsMap.get(mNum);
+              if (prevBounds) {
+                prevBounds.minX = Math.min(prevBounds.minX, rx);
+                prevBounds.minY = Math.min(prevBounds.minY, ry);
+                prevBounds.maxX = Math.max(prevBounds.maxX, rx2);
+                prevBounds.maxY = Math.max(prevBounds.maxY, ry2);
+              } else {
+                measureBoundsMap.set(mNum, { minX: rx, minY: ry, maxX: rx2, maxY: ry2 });
+              }
+            }
             let detectedSpacingPx = 10 * zoom;
             const staffLines = gmShape?.staffLines;
             if (Array.isArray(staffLines) && staffLines.length >= 2) {
@@ -1068,6 +1115,19 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     }
     svgNoteTargetMapRef.current = newMap;
     staffLineSpacingMapRef.current = newSpacingMap;
+    measureRectsRef.current = Array.from(measureBoundsMap.entries()).map(([measureNumber, b]) => ({
+      measureNumber,
+      left: b.minX,
+      top: b.minY,
+      width: Math.max(12, b.maxX - b.minX),
+      height: Math.max(24, b.maxY - b.minY),
+    }));
+    const activeMeasureNum = selectedMeasureNumberRef.current;
+    if (activeMeasureNum !== null) {
+      setSelectedMeasureRect(
+        measureRectsRef.current.find((r) => r.measureNumber === activeMeasureNum) ?? null,
+      );
+    }
     renderedEventsRef.current = Array.from(eventBuckets.values()).sort(
       (a, b) => a.onsetSec - b.onsetSec,
     );
@@ -1106,6 +1166,9 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     renderedEventsRef.current = [];
     svgNoteTargetMapRef.current = new WeakMap();
     staffLineSpacingMapRef.current = new Map();
+    measureRectsRef.current = [];
+    setSelectedMeasureNumber(null);
+    setSelectedMeasureRect(null);
     cursorSnapshotsRef.current = [];
     baseGeomRef.current = null;
     nextGeomRef.current = null;
@@ -1377,7 +1440,16 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     const onKeyDown = (e: KeyboardEvent) => {
       const targetEl = e.target as HTMLElement | null;
       const tag = targetEl?.tagName;
-      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || targetEl?.isContentEditable) return;
+      if (
+        tag === "INPUT" ||
+        tag === "SELECT" ||
+        tag === "TEXTAREA" ||
+        targetEl?.isContentEditable ||
+        targetEl?.closest?.('[role="dialog"]') ||
+        document.querySelector('[role="dialog"][aria-modal="true"]')
+      ) {
+        return;
+      }
 
       const lower = e.key.toLowerCase();
       // Preserve standard browser & global undo/redo/print/clipboard shortcuts
@@ -1422,11 +1494,29 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         return;
       }
       if (e.key === "Escape") {
-        if (noteInputMode || selectedTarget) {
+        if (noteInputMode || selectedTarget || selectedMeasureNumber !== null) {
           e.preventDefault();
           setNoteInputMode(false);
           clearSelectedHighlight();
           setSelectedTarget(null);
+          setSelectedMeasureNumber(null);
+          setSelectedMeasureRect(null);
+        }
+        return;
+      }
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (selectedTarget) {
+          e.preventDefault();
+          const res = deleteXmlNote(resolvedXml, selectedTarget);
+          if (res) applyXmlEdit(res.xml, null);
+        } else if (selectedMeasureNumber !== null) {
+          e.preventDefault();
+          const nextXml = deleteMeasureFromAllParts(resolvedXml, selectedMeasureNumber);
+          if (nextXml) {
+            setSelectedMeasureNumber(null);
+            setSelectedMeasureRect(null);
+            applyXmlEdit(nextXml, null);
+          }
         }
         return;
       }
@@ -1446,7 +1536,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         e.preventDefault();
         const res = flipXmlNoteStem(resolvedXml, selectedTarget);
         if (res) applyXmlEdit(res.xml, selectedTarget);
-      } else if (e.key === "0" || e.key === "Delete" || e.key === "Backspace") {
+      } else if (e.key === "0") {
         e.preventDefault();
         const res = convertXmlNoteToRest(resolvedXml, selectedTarget);
         if (res) applyXmlEdit(res.xml, null);
@@ -1462,7 +1552,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [editMode, selectedTarget, resolvedXml, applyXmlEdit, noteInputMode, isActiveTab]);
+  }, [editMode, selectedTarget, selectedMeasureNumber, resolvedXml, applyXmlEdit, noteInputMode, isActiveTab]);
 
   const stopPreviewAudio = useCallback(() => {
     if (activePreviewPitchRef.current !== null) {
@@ -1530,6 +1620,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
 
         applySelectedHighlight(node);
         setSelectedTarget(mapped);
+        setSelectedMeasureNumber(null);
+        setSelectedMeasureRect(null);
 
         try {
           scrollContainerRef.current?.setPointerCapture?.(e.pointerId);
@@ -1654,6 +1746,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
           setEditMode(true);
           applySelectedHighlight(node);
           setSelectedTarget(mapped);
+          setSelectedMeasureNumber(null);
+          setSelectedMeasureRect(null);
           return;
         }
         node = node.parentElement;
@@ -1661,6 +1755,25 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       if (editMode) {
         clearSelectedHighlight();
         setSelectedTarget(null);
+        if (containerRef.current) {
+          const containerRect = containerRef.current.getBoundingClientRect();
+          const clickX = e.clientX - containerRect.left;
+          const clickY = e.clientY - containerRect.top;
+          const hitMeasure = measureRectsRef.current.find(
+            (r) =>
+              clickX >= r.left - 4 &&
+              clickX <= r.left + r.width + 4 &&
+              clickY >= r.top - 8 &&
+              clickY <= r.top + r.height + 8,
+          );
+          if (hitMeasure) {
+            setSelectedMeasureNumber(hitMeasure.measureNumber);
+            setSelectedMeasureRect(hitMeasure);
+            return;
+          }
+        }
+        setSelectedMeasureNumber(null);
+        setSelectedMeasureRect(null);
         return;
       }
     }
@@ -1724,6 +1837,9 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         playheadSec={playheadSec}
         isPlaying={isPlaying}
         tempoBpm={tempoBpm}
+        keyFifths={keyFifths}
+        keyMode={keyMode}
+        onApplyKeySignature={onApplyKeySignature}
         playbackRate={playbackRate}
         tracks={tracks}
         satbSoloVoice={satbSoloVoice}
@@ -1810,6 +1926,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
                 setEditMode((v) => !v);
                 clearSelectedHighlight();
                 setSelectedTarget(null);
+                setSelectedMeasureNumber(null);
+                setSelectedMeasureRect(null);
               }}
               className={`inline-flex items-center gap-1 h-8 rounded-lg border px-2.5 text-xs transition-colors ${editMode
                 ? "bg-amber-100 text-amber-950 border-amber-400 font-semibold shadow-xs dark:bg-amber-500/20 dark:text-amber-200 dark:border-amber-500/40"
@@ -1844,6 +1962,21 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
           >
             Chords
           </button>
+          {onApplyKeySignature && (
+            <KeySignatureControl
+              compact
+              fifths={keyFifths}
+              mode={keyMode}
+              noteCount={
+                notes.length > 0
+                  ? notes.length
+                  : (resolvedXml ?? musicxml)?.includes("<pitch>")
+                    ? 1
+                    : 0
+              }
+              onApplyKeyChange={onApplyKeySignature}
+            />
+          )}
           <Button
             size="sm"
             variant="secondary"
@@ -1911,7 +2044,9 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
               activeDuration={activeDuration}
               activeDotted={activeDotted}
               activeVoice={activeVoice}
+              keyFifths={keyFifths}
               selectedTarget={selectedTarget}
+              selectedMeasureNumber={selectedMeasureNumber}
               noteInfo={noteInfo}
               statusMessage={paletteStatusMsg}
               canUndo={canUndo}
@@ -1988,15 +2123,20 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
                 if (nextXml) applyXmlEdit(nextXml);
               }}
               onDeleteMeasure={() => {
-                if (!selectedTarget) return;
+                const targetMeasure = selectedTarget?.measureNumber ?? selectedMeasureNumber;
+                if (targetMeasure === null || targetMeasure === undefined) return;
                 if (
                   typeof window.confirm === "function" &&
-                  !window.confirm(`Delete measure ${selectedTarget.measureNumber} across all parts?`)
+                  !window.confirm(`Delete measure ${targetMeasure} across all parts?`)
                 ) {
                   return;
                 }
-                const nextXml = deleteMeasureFromAllParts(activeXml, selectedTarget.measureNumber);
-                if (nextXml) applyXmlEdit(nextXml, null);
+                const nextXml = deleteMeasureFromAllParts(activeXml, targetMeasure);
+                if (nextXml) {
+                  setSelectedMeasureNumber(null);
+                  setSelectedMeasureRect(null);
+                  applyXmlEdit(nextXml, null);
+                }
               }}
             />
             {onMusicXmlChange && (
@@ -2059,6 +2199,24 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         )}
         <div className="relative min-w-[560px]">
           <div ref={containerRef} />
+          {selectedMeasureNumber !== null && selectedMeasureRect && (
+            <div
+              data-testid="selected-measure-highlight"
+              aria-label={`Selected Measure ${selectedMeasureNumber}`}
+              style={{
+                position: "absolute",
+                left: `${selectedMeasureRect.left}px`,
+                top: `${selectedMeasureRect.top}px`,
+                width: `${selectedMeasureRect.width}px`,
+                height: `${selectedMeasureRect.height}px`,
+                backgroundColor: "rgba(124, 58, 237, 0.10)",
+                border: "2px solid rgba(124, 58, 237, 0.72)",
+                borderRadius: "6px",
+                zIndex: 15,
+                pointerEvents: "none",
+              }}
+            />
+          )}
           {playheadRect.visible && (
             <div
               data-testid="sheet-music-playhead"

@@ -3,9 +3,11 @@ import * as alphaTab from "@coderline/alphatab";
 import { Loader2, Maximize2, Minimize2, Pause, Play, Printer, Square, ZoomIn, ZoomOut } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
+import { type KeyChangeAction, KeySignatureControl } from "@/features/editor/KeySignatureControl";
 import { midiSynth } from "@/features/editor/midiSynth";
 import { injectChordsIntoMusicXml } from "@/features/editor/musicXmlChords";
 import { normalizeScorePayload } from "@/features/editor/musicXmlNormalization";
+import type { KeyMode } from "@/lib/keySignature";
 import { getStoredTokens } from "@/services/api";
 import type { ScoreChord, ScoreNote, ScoreTrack } from "@/types/api";
 
@@ -33,6 +35,9 @@ export interface AlphaTabSheetViewerProps {
   isPrintingPdf?: boolean;
   canPrintPdf?: boolean;
   printError?: string | null;
+  keyFifths?: number;
+  keyMode?: KeyMode;
+  onApplyKeySignature?: (targetFifths: number, targetMode: KeyMode, action: KeyChangeAction) => void;
 }
 
 const SATB_COLORS: Record<string, string> = {
@@ -93,6 +98,9 @@ export function AlphaTabSheetViewer({
   isPrintingPdf = false,
   canPrintPdf = false,
   printError = null,
+  keyFifths = 0,
+  keyMode = "major",
+  onApplyKeySignature,
 }: AlphaTabSheetViewerProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -686,6 +694,15 @@ export function AlphaTabSheetViewer({
           >
             Chords
           </button>
+          {onApplyKeySignature && (
+            <KeySignatureControl
+              compact
+              fifths={keyFifths}
+              mode={keyMode}
+              noteCount={notes.length}
+              onApplyKeyChange={onApplyKeySignature}
+            />
+          )}
           <Button
             size="sm"
             variant="secondary"

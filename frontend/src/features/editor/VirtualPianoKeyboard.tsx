@@ -53,12 +53,13 @@ export function createLiveMidiPitchStore(): LiveMidiPitchStore {
 }
 
 const EMPTY_MIDI_SET = new Set<number>();
-const SUBSCRIBE_NOOP = () => () => {};
+const SUBSCRIBE_NOOP = () => () => { };
 const GET_EMPTY_MIDI_SET = () => EMPTY_MIDI_SET;
 
 interface VirtualPianoKeyboardProps {
   minPitch?: number;
   maxPitch?: number;
+  keyFifths?: number;
   activePlaybackNotes: PlaybackActivePitch[];
   activeMidiPitches?: Set<number>;
   activeMidiPitchesStore?: LiveMidiPitchStore;
@@ -74,6 +75,7 @@ const BLACK_PCS = new Set([1, 3, 6, 8, 10]);
 export const VirtualPianoKeyboard = React.memo(function VirtualPianoKeyboard({
   minPitch = 21, // A0 (88-key lower bound)
   maxPitch = 108, // C8 (88-key upper bound)
+  keyFifths = 0,
   activePlaybackNotes,
   activeMidiPitches,
   activeMidiPitchesStore,
@@ -160,7 +162,7 @@ export const VirtualPianoKeyboard = React.memo(function VirtualPianoKeyboard({
             const playbackTrack = playbackTrackByPitch.get(pitch);
             const isVocalPlaying = playbackTrack === 0;
             const isAccompPlaying = playbackTrack !== undefined && playbackTrack > 0;
-            const label = midiToNoteName(pitch);
+            const label = midiToNoteName(pitch, keyFifths);
 
             let bgClass =
               "bg-white hover:bg-stone-50 text-stone-600 shadow-[inset_0_-2px_0_rgba(15,23,42,0.12)] dark:bg-[#E4E4E7] dark:hover:bg-[#F4F4F5] dark:text-[#52525B]";
@@ -205,7 +207,7 @@ export const VirtualPianoKeyboard = React.memo(function VirtualPianoKeyboard({
           const playbackTrack = playbackTrackByPitch.get(pitch);
           const isVocalPlaying = playbackTrack === 0;
           const isAccompPlaying = playbackTrack !== undefined && playbackTrack > 0;
-          const label = midiToNoteName(pitch);
+          const label = midiToNoteName(pitch, keyFifths);
 
           let bgClass = "bg-[#1e293b] hover:bg-slate-700 border-[#0f172a]";
           if (isMidiActive) {

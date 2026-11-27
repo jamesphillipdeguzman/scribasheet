@@ -65,7 +65,9 @@ interface NotationCommandPaletteProps {
   activeDuration: EditableNoteType;
   activeDotted: boolean;
   activeVoice: "1" | "2";
+  keyFifths?: number;
   selectedTarget: XmlNoteTarget | null;
+  selectedMeasureNumber?: number | null;
   noteInfo: XmlNoteInfo | null;
   statusMessage?: string | null;
   canUndo?: boolean;
@@ -94,7 +96,9 @@ export function NotationCommandPalette({
   activeDuration,
   activeDotted,
   activeVoice,
+  keyFifths = 0,
   selectedTarget,
+  selectedMeasureNumber = null,
   noteInfo,
   statusMessage,
   canUndo = false,
@@ -393,11 +397,11 @@ export function NotationCommandPalette({
             </button>
             <button
               type="button"
-              disabled={!hasSelection}
+              disabled={!hasSelection && selectedMeasureNumber === null}
               aria-label="Delete measure"
-              title="Delete selected measure"
+              title="Delete selected measure (Delete / Backspace)"
               className={`inline-flex items-center justify-center gap-1 h-7 rounded-md border px-2 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-red-500/40 ${
-                !hasSelection
+                !hasSelection && selectedMeasureNumber === null
                   ? "bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed dark:bg-white/5 dark:text-slate-600 dark:border-white/10"
                   : "bg-white hover:bg-red-50 text-red-800 border-red-300 font-medium dark:bg-red-500/15 dark:hover:bg-red-500/25 dark:text-red-300 dark:border-red-500/35"
               }`}
@@ -414,8 +418,10 @@ export function NotationCommandPalette({
             className="font-mono text-[11px] text-amber-950 font-medium dark:text-amber-200"
           >
             {selectedTarget
-              ? `Selected: ${selectedTarget.pitchMidi !== null ? midiToNoteName(selectedTarget.pitchMidi) : "Rest"} (${durLabel}${currentDotted ? "." : ""}) • m.${selectedTarget.measureNumber}`
-              : "Click a notehead to edit"}
+              ? `Selected: ${selectedTarget.pitchMidi !== null ? midiToNoteName(selectedTarget.pitchMidi, keyFifths) : "Rest"} (${durLabel}${currentDotted ? "." : ""}) • m.${selectedTarget.measureNumber}`
+              : selectedMeasureNumber !== null
+                ? `Selected: Measure ${selectedMeasureNumber} (Press Delete/Backspace to remove)`
+                : "Click a notehead to edit"}
           </span>
           {onUndo && (
             <button

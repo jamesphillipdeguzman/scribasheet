@@ -30,13 +30,17 @@ import { ChordAndTabPanel } from "@/features/editor/ChordAndTabPanel";
 import { ExportCenter } from "@/features/editor/ExportCenter";
 import { LyricsPanel } from "@/features/editor/LyricsPanel";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
+import { KeySignatureControl, type KeyChangeAction } from "@/features/editor/KeySignatureControl";
 import { metronomeEngine } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
 import {
+  applyKeySignatureToMusicXml,
+  extractKeySignatureFromXml,
   musicXmlToScoreNotes,
   type PlaygroundClefMode,
   updateXmlScoreHeader,
 } from "@/features/editor/musicXmlEditor";
+import { parseKeySignature, respellChordSymbol, type KeyMode } from "@/lib/keySignature";
 import { applyScoreTitleToMusicXml } from "@/features/editor/musicXmlNormalization";
 import {
   loadMetronomeSettings,
@@ -922,6 +926,53 @@ export function ProjectStudioPage() {
     return "grand";
   })();
 
+  const activeKeySignature = (() => {
+    const xmlKey = musicxml
+      ? extractKeySignatureFromXml(musicxml)
+      : { fifths: 0, mode: "major" as const, label: "C Major" };
+    const analysisFifths =
+      typeof scoreData?.analysis?.key_signature_fifths === "number"
+        ? (scoreData.analysis.key_signature_fifths as number)
+        : xmlKey.fifths;
+    const analysisMode: KeyMode = scoreData?.analysis?.key_signature_mode === "minor" ? "minor" : xmlKey.mode;
+    return parseKeySignature(scoreData?.key_signature, analysisFifths, analysisMode);
+  })();
+
+  const handleApplyKeySignature = (targetFifths: number, targetMode: KeyMode, action: KeyChangeAction) => {
+    if (!scoreData || !musicxml) return;
+    const res = applyKeySignatureToMusicXml(musicxml, {
+      targetFifths,
+      targetMode,
+      action,
+      fromFifths: activeKeySignature.fifths,
+      fromMode: activeKeySignature.mode,
+    });
+    if (!res) return;
+    const nextXml = res.xml;
+    const delta = res.semitoneDelta;
+    const synced = musicXmlToScoreNotes(nextXml, scoreData.tracks, scoreData.tempo_bpm);
+    const targetParsed = parseKeySignature(undefined, targetFifths, targetMode);
+    mutateScore(
+      (prev) => ({
+        ...prev,
+        key_signature: targetParsed.label,
+        key_signature_estimated: false,
+        notes: synced.notes,
+        chords: prev.chords.map((ch) => {
+          const { symbol, root } = respellChordSymbol(ch.symbol, targetFifths, delta);
+          return { ...ch, symbol, root };
+        }),
+        duration_seconds: Math.max(synced.durationSeconds, 0.5),
+        analysis: {
+          ...prev.analysis,
+          key_signature_fifths: targetFifths,
+          key_signature_mode: targetMode,
+        },
+      }),
+      nextXml,
+    );
+  };
+
   const handlePlaygroundConfigChange = (updates: {
     keySignature?: string;
     timeSignature?: string;
@@ -1375,23 +1426,12 @@ export function ProjectStudioPage() {
                   <span className="font-semibold text-violet-900 dark:text-violet-200">
                     Playground Setup
                   </span>
-                  <label className="inline-flex items-center gap-1 text-stone-700 dark:text-[#C4C4D4]">
-                    Key
-                    <select
-                      aria-label="Playground key signature"
-                      value={scoreData.key_signature}
-                      onChange={(e) => handlePlaygroundConfigChange({ keySignature: e.target.value })}
-                      className="h-7 rounded-md border border-stone-300 bg-white px-2 text-xs text-stone-900 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#F5F3FF]"
-                    >
-                      {[
-                        "C Major", "G Major", "D Major", "A Major", "E Major",
-                        "F Major", "Bb Major", "Eb Major", "Ab Major", "Db Major",
-                        "A Minor", "E Minor", "B Minor", "F# Minor", "D Minor", "G Minor", "C Minor",
-                      ].map((k) => (
-                        <option key={k} value={k}>{k}</option>
-                      ))}
-                    </select>
-                  </label>
+                  <KeySignatureControl
+                    fifths={activeKeySignature.fifths}
+                    mode={activeKeySignature.mode}
+                    noteCount={scoreData.notes.length}
+                    onApplyKeyChange={handleApplyKeySignature}
+                  />
                   <label className="inline-flex items-center gap-1 text-stone-700 dark:text-[#C4C4D4]">
                     Time
                     <select
@@ -1616,6 +1656,9 @@ export function ProjectStudioPage() {
                     tempoBpm={scoreData?.tempo_bpm || 120}
                     timeSignature={scoreData?.time_signature || "4/4"}
                     clefMode={playgroundClefMode}
+                    keyFifths={activeKeySignature.fifths}
+                    keyMode={activeKeySignature.mode}
+                    onApplyKeySignature={handleApplyKeySignature}
                     isMidiPlayground={isMidiPlayground}
                     defaultEditMode={isMidiPlayground}
                     isActiveTab={activeTab === "notation"}
@@ -1662,6 +1705,7 @@ export function ProjectStudioPage() {
                     durationSeconds={scoreData.duration_seconds}
                     tempoBpm={scoreData.tempo_bpm}
                     timeSignature={scoreData.time_signature}
+                    keyFifths={activeKeySignature.fifths}
                     playheadSec={playheadSec}
                     selectedNoteId={selectedNoteId}
                     onSelectNote={setSelectedNoteId}

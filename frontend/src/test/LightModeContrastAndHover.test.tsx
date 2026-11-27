@@ -144,7 +144,7 @@ describe("Light Mode Contrast & Hover-State Fixes", () => {
     const activeWhite = screen.getByRole("button", { name: "Piano key C4" });
     const inactiveWhite = screen.getByRole("button", { name: "Piano key D4" });
     const activeBlack = screen.getByRole("button", { name: "Piano key C#4" });
-    const inactiveBlack = screen.getByRole("button", { name: "Piano key D#4" });
+    const inactiveBlack = screen.getByRole("button", { name: "Piano key Eb4" });
 
     expect(activeWhite.className).toContain("bg-[#7c3aed]");
     expect(activeWhite.className).toContain("text-white");

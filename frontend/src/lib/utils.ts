@@ -1,5 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { spellMidiPitch } from "@/lib/keySignature";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -191,13 +192,8 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-
-export function midiToNoteName(midi: number): string {
-  const clamped = Math.max(0, Math.min(127, Math.round(midi)));
-  const octave = Math.floor(clamped / 12) - 1;
-  const name = NOTE_NAMES[clamped % 12];
-  return `${name}${octave}`;
+export function midiToNoteName(midi: number, keyFifths = 0): string {
+  return spellMidiPitch(midi, keyFifths).label;
 }
 
 export function midiToFreq(midi: number): number {

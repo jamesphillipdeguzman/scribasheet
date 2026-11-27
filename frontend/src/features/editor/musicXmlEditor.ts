@@ -1,6 +1,19 @@
 import { buildMusicXmlTimeline, wholeNotesToTimeSec } from "@/features/editor/musicXmlTimeline";
 import { prepareDisplayMusicXml } from "@/features/editor/musicXmlNormalization";
 import type { SnapGridMode } from "@/features/editor/midiRecordingUtils";
+import {
+  clampKeyFifths,
+  computeShortestKeyInterval,
+  formatKeySignatureName,
+  formatPitchLabel,
+  getKeySignatureAlterForStep,
+  type KeyMode,
+  type KeySignatureState,
+  parseKeySignature,
+  respellChordSymbol,
+  spellMidiPitch,
+  STEP_TO_PC,
+} from "@/lib/keySignature";
 import type { ScoreNote, ScoreTrack } from "@/types/api";
 
 export type EditableNoteType = "64th" | "32nd" | "16th" | "eighth" | "quarter" | "half" | "whole";
@@ -48,49 +61,7 @@ export interface DiatonicPitchResult {
   label: string;
 }
 
-const STEP_TO_PC: Record<string, number> = {
-  C: 0,
-  D: 2,
-  E: 4,
-  F: 5,
-  G: 7,
-  A: 9,
-  B: 11,
-};
-
 const DIATONIC_STEPS = ["C", "D", "E", "F", "G", "A", "B"] as const;
-const SHARP_ORDER = ["F", "C", "G", "D", "A", "E", "B"] as const;
-const FLAT_ORDER = ["B", "E", "A", "D", "G", "C", "F"] as const;
-
-const PC_TO_SHARP: Array<{ step: string; alter: number }> = [
-  { step: "C", alter: 0 },
-  { step: "C", alter: 1 },
-  { step: "D", alter: 0 },
-  { step: "D", alter: 1 },
-  { step: "E", alter: 0 },
-  { step: "F", alter: 0 },
-  { step: "F", alter: 1 },
-  { step: "G", alter: 0 },
-  { step: "G", alter: 1 },
-  { step: "A", alter: 0 },
-  { step: "A", alter: 1 },
-  { step: "B", alter: 0 },
-];
-
-const PC_TO_FLAT: Array<{ step: string; alter: number }> = [
-  { step: "C", alter: 0 },
-  { step: "D", alter: -1 },
-  { step: "D", alter: 0 },
-  { step: "E", alter: -1 },
-  { step: "E", alter: 0 },
-  { step: "F", alter: 0 },
-  { step: "G", alter: -1 },
-  { step: "G", alter: 0 },
-  { step: "A", alter: -1 },
-  { step: "A", alter: 0 },
-  { step: "B", alter: -1 },
-  { step: "B", alter: 0 },
-];
 
 export const TYPE_TO_QUARTERS: Record<EditableNoteType, number> = {
   whole: 4,
@@ -102,74 +73,7 @@ export const TYPE_TO_QUARTERS: Record<EditableNoteType, number> = {
   "64th": 0.0625,
 };
 
-const KEY_SIGNATURE_TO_FIFTHS: Record<string, { fifths: number; mode: "major" | "minor" }> = {
-  "c major": { fifths: 0, mode: "major" },
-  c: { fifths: 0, mode: "major" },
-  "a minor": { fifths: 0, mode: "minor" },
-  am: { fifths: 0, mode: "minor" },
-  "g major": { fifths: 1, mode: "major" },
-  g: { fifths: 1, mode: "major" },
-  "e minor": { fifths: 1, mode: "minor" },
-  em: { fifths: 1, mode: "minor" },
-  "d major": { fifths: 2, mode: "major" },
-  d: { fifths: 2, mode: "major" },
-  "b minor": { fifths: 2, mode: "minor" },
-  bm: { fifths: 2, mode: "minor" },
-  "a major": { fifths: 3, mode: "major" },
-  a: { fifths: 3, mode: "major" },
-  "f# minor": { fifths: 3, mode: "minor" },
-  "f#m": { fifths: 3, mode: "minor" },
-  "e major": { fifths: 4, mode: "major" },
-  e: { fifths: 4, mode: "major" },
-  "c# minor": { fifths: 4, mode: "minor" },
-  "c#m": { fifths: 4, mode: "minor" },
-  "b major": { fifths: 5, mode: "major" },
-  b: { fifths: 5, mode: "major" },
-  "g# minor": { fifths: 5, mode: "minor" },
-  "g#m": { fifths: 5, mode: "minor" },
-  "f# major": { fifths: 6, mode: "major" },
-  "f#": { fifths: 6, mode: "major" },
-  "c# major": { fifths: 7, mode: "major" },
-  "f major": { fifths: -1, mode: "major" },
-  f: { fifths: -1, mode: "major" },
-  "d minor": { fifths: -1, mode: "minor" },
-  dm: { fifths: -1, mode: "minor" },
-  "bb major": { fifths: -2, mode: "major" },
-  bb: { fifths: -2, mode: "major" },
-  "g minor": { fifths: -2, mode: "minor" },
-  gm: { fifths: -2, mode: "minor" },
-  "eb major": { fifths: -3, mode: "major" },
-  eb: { fifths: -3, mode: "major" },
-  "c minor": { fifths: -3, mode: "minor" },
-  cm: { fifths: -3, mode: "minor" },
-  "ab major": { fifths: -4, mode: "major" },
-  ab: { fifths: -4, mode: "major" },
-  "f minor": { fifths: -4, mode: "minor" },
-  fm: { fifths: -4, mode: "minor" },
-  "db major": { fifths: -5, mode: "major" },
-  db: { fifths: -5, mode: "major" },
-  "bb minor": { fifths: -5, mode: "minor" },
-  bbm: { fifths: -5, mode: "minor" },
-  "gb major": { fifths: -6, mode: "major" },
-  "cb major": { fifths: -7, mode: "major" },
-};
-
-export function getKeySignatureAlterForStep(step: string, fifths: number): number {
-  const s = step.toUpperCase();
-  if (fifths > 0) {
-    return (SHARP_ORDER.slice(0, Math.min(7, fifths)) as readonly string[]).includes(s) ? 1 : 0;
-  }
-  if (fifths < 0) {
-    return (FLAT_ORDER.slice(0, Math.min(7, Math.abs(fifths))) as readonly string[]).includes(s) ? -1 : 0;
-  }
-  return 0;
-}
-
-export function formatPitchLabel(step: string, alter: number, octave: number): string {
-  const acc =
-    alter === 2 ? "x" : alter === 1 ? "#" : alter === -1 ? "b" : alter === -2 ? "bb" : "";
-  return `${step.toUpperCase()}${acc}${octave}`;
-}
+export { formatPitchLabel, getKeySignatureAlterForStep };
 
 export function computeDiatonicDragPitch(
   origin: { step: string; octave: number; alter?: number },
@@ -553,6 +457,69 @@ export function getXmlNoteInfo(xmlStr: string, target: XmlNoteTarget): XmlNoteIn
   };
 }
 
+function alterToAccidentalName(alter: number): XmlAccidentalType {
+  if (alter === 2) return "double-sharp";
+  if (alter === 1) return "sharp";
+  if (alter === -1) return "flat";
+  if (alter === -2) return "flat-flat";
+  return "natural";
+}
+
+/**
+ * Recompute measure-scoped <accidental> elements across every measure in a part
+ * so key-signature accidentals are suppressed while chromatic and cancellation accidentals are emitted.
+ */
+function recomputePartAccidentals(doc: Document, partEl: Element): void {
+  const measures = Array.from(partEl.getElementsByTagName("measure"));
+  let activeFifths = 0;
+
+  for (const m of measures) {
+    const attrs = Array.from(m.children).find((c) => c.tagName.toLowerCase() === "attributes");
+    const fifthsTxt = attrs?.getElementsByTagName("fifths")[0]?.textContent;
+    if (fifthsTxt !== undefined && fifthsTxt !== null && fifthsTxt.trim() !== "") {
+      const f = Number.parseInt(fifthsTxt, 10);
+      if (Number.isFinite(f)) activeFifths = clampKeyFifths(f);
+    }
+
+    const measureState = new Map<string, number>();
+    for (const child of Array.from(m.children)) {
+      if (child.tagName.toLowerCase() !== "note") continue;
+      if (child.getElementsByTagName("rest").length > 0) continue;
+      const pitchEl = child.getElementsByTagName("pitch")[0];
+      if (!pitchEl) continue;
+
+      const step = (pitchEl.getElementsByTagName("step")[0]?.textContent || "C").trim().toUpperCase();
+      const alter = Number.parseInt(pitchEl.getElementsByTagName("alter")[0]?.textContent || "0", 10) || 0;
+      const octave = Number.parseInt(pitchEl.getElementsByTagName("octave")[0]?.textContent || "4", 10) || 4;
+      const staff = getNoteStaffNumber(child);
+      const stateKey = `${staff}:${step}:${octave}`;
+
+      const expectedAlter = measureState.get(stateKey) ?? getKeySignatureAlterForStep(step, activeFifths);
+      const existingAcc = child.getElementsByTagName("accidental")[0];
+
+      if (alter !== expectedAlter) {
+        setElementText(doc, child, "accidental", alterToAccidentalName(alter));
+        measureState.set(stateKey, alter);
+      } else if (existingAcc) {
+        existingAcc.parentNode?.removeChild(existingAcc);
+      }
+    }
+  }
+}
+
+export function extractKeySignatureFromXml(xmlStr: string | null | undefined): KeySignatureState {
+  if (!xmlStr) return { fifths: 0, mode: "major", label: "C Major" };
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return { fifths: 0, mode: "major", label: "C Major" };
+  const keyEl = doc.getElementsByTagName("key")[0];
+  if (!keyEl) return { fifths: 0, mode: "major", label: "C Major" };
+  const rawFifths = Number.parseInt(keyEl.getElementsByTagName("fifths")[0]?.textContent || "0", 10);
+  const fifths = Number.isFinite(rawFifths) ? clampKeyFifths(rawFifths) : 0;
+  const rawMode = (keyEl.getElementsByTagName("mode")[0]?.textContent || "major").trim().toLowerCase();
+  const mode: KeyMode = rawMode === "minor" ? "minor" : "major";
+  return { fifths, mode, label: formatKeySignatureName(fifths, mode) };
+}
+
 export function setXmlNotePitch(
   xmlStr: string,
   target: XmlNoteTarget,
@@ -563,7 +530,7 @@ export function setXmlNotePitch(
   const found = findTargetNoteElement(doc, target);
   if (!found) return null;
 
-  const { noteEl, fifths } = found;
+  const { noteEl, partEl } = found;
   const restEl = noteEl.getElementsByTagName("rest")[0];
   if (restEl) noteEl.removeChild(restEl);
 
@@ -585,16 +552,7 @@ export function setXmlNotePitch(
   }
   setElementText(doc, pitchEl, "octave", String(octave));
 
-  // Show explicit accidental only if different from key signature
-  const keyAlter = getKeySignatureAlterForStep(step, fifths);
-  const existingAcc = noteEl.getElementsByTagName("accidental")[0];
-  if (alter === keyAlter) {
-    if (existingAcc) noteEl.removeChild(existingAcc);
-  } else {
-    const accName: XmlAccidentalType =
-      alter === 2 ? "double-sharp" : alter === 1 ? "sharp" : alter === -1 ? "flat" : alter === -2 ? "flat-flat" : "natural";
-    setElementText(doc, noteEl, "accidental", accName);
-  }
+  recomputePartAccidentals(doc, partEl);
 
   const nextMidi = Math.max(21, Math.min(108, (octave + 1) * 12 + (STEP_TO_PC[step] ?? 0) + alter));
   return {
@@ -623,14 +581,11 @@ export function transposeXmlNote(
   const curMidi = (oct + 1) * 12 + (STEP_TO_PC[step] ?? 0) + alter;
   const nextMidi = Math.max(21, Math.min(108, curMidi + semitones));
 
-  const table = fifths < 0 ? PC_TO_FLAT : PC_TO_SHARP;
-  const spelled = table[nextMidi % 12];
-  const nextOct = Math.floor(nextMidi / 12) - 1;
-
+  const spelled = spellMidiPitch(nextMidi, fifths);
   return setXmlNotePitch(xmlStr, target, {
     step: spelled.step,
     alter: spelled.alter,
-    octave: nextOct,
+    octave: spelled.octave,
   });
 }
 
@@ -1021,7 +976,7 @@ export function convertXmlNoteToRest(xmlStr: string, target: XmlNoteTarget): { x
   const found = findTargetNoteElement(doc, target);
   if (!found) return null;
 
-  const { noteEl } = found;
+  const { noteEl, partEl } = found;
   for (const tag of ["pitch", "chord", "tie", "accidental", "stem"]) {
     for (const el of Array.from(noteEl.getElementsByTagName(tag))) {
       el.parentNode?.removeChild(el);
@@ -1034,7 +989,150 @@ export function convertXmlNoteToRest(xmlStr: string, target: XmlNoteTarget): { x
     const restEl = doc.createElement("rest");
     noteEl.insertBefore(restEl, noteEl.firstChild);
   }
+  recomputePartAccidentals(doc, partEl);
   return { xml: serializeXmlDoc(doc) };
+}
+
+/**
+ * Delete an individual selected note or chord tone:
+ * - Within a chord: removes ONLY the selected note, promoting the next chord sibling if needed.
+ * - Sole note at its onset: converts that rhythmic slot to a rest preserving duration/staff/voice.
+ */
+export function deleteXmlNote(
+  xmlStr: string,
+  target: XmlNoteTarget,
+): { xml: string; deletedChordTone: boolean } | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+  const found = findTargetNoteElement(doc, target);
+  if (!found) return null;
+
+  const { noteEl, measureEl, partEl } = found;
+  const isChordChild = noteEl.getElementsByTagName("chord").length > 0;
+  const nextEl = noteEl.nextElementSibling;
+  const hasChordFollower =
+    Boolean(nextEl) &&
+    nextEl!.tagName.toLowerCase() === "note" &&
+    nextEl!.getElementsByTagName("chord").length > 0;
+
+  if (isChordChild || hasChordFollower) {
+    if (!isChordChild && hasChordFollower && nextEl) {
+      const followerChordTag = nextEl.getElementsByTagName("chord")[0];
+      if (followerChordTag) nextEl.removeChild(followerChordTag);
+    }
+    measureEl.removeChild(noteEl);
+    recomputePartAccidentals(doc, partEl);
+    return { xml: serializeXmlDoc(doc), deletedChordTone: true };
+  }
+
+  const restConverted = convertXmlNoteToRest(xmlStr, target);
+  if (!restConverted) return null;
+  return { xml: restConverted.xml, deletedChordTone: false };
+}
+
+export function applyKeySignatureToMusicXml(
+  xmlStr: string,
+  options: {
+    targetFifths: number;
+    targetMode: KeyMode;
+    action: "respell" | "transpose";
+    fromFifths?: number;
+    fromMode?: KeyMode;
+  },
+): { xml: string; semitoneDelta: number } | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+
+  const parts = Array.from(doc.getElementsByTagName("part"));
+  if (parts.length === 0) return null;
+
+  const currentKey = extractKeySignatureFromXml(xmlStr);
+  const oldFifths = options.fromFifths ?? currentKey.fifths;
+  const oldMode = options.fromMode ?? currentKey.mode;
+  const targetFifths = clampKeyFifths(options.targetFifths);
+  const targetMode: KeyMode = options.targetMode === "minor" ? "minor" : "major";
+
+  const semitoneDelta =
+    options.action === "transpose"
+      ? computeShortestKeyInterval(oldFifths, oldMode, targetFifths, targetMode)
+      : 0;
+
+  for (const partEl of parts) {
+    const measures = Array.from(partEl.getElementsByTagName("measure"));
+    if (measures.length > 0) {
+      const m1 = measures[0];
+      const attrs = getOrCreateChild(doc, m1, "attributes");
+      const keyEl = getOrCreateChild(doc, attrs, "key");
+      setElementText(doc, keyEl, "fifths", String(targetFifths));
+      setElementText(doc, keyEl, "mode", targetMode);
+    }
+
+    // Re-spell or transpose every pitched note in this part
+    for (const noteEl of Array.from(partEl.getElementsByTagName("note"))) {
+      if (noteEl.getElementsByTagName("rest").length > 0) continue;
+      const pitchEl = noteEl.getElementsByTagName("pitch")[0];
+      if (!pitchEl) continue;
+
+      const step = (pitchEl.getElementsByTagName("step")[0]?.textContent || "C").trim().toUpperCase();
+      const alter = Number.parseInt(pitchEl.getElementsByTagName("alter")[0]?.textContent || "0", 10) || 0;
+      const oct = Number.parseInt(pitchEl.getElementsByTagName("octave")[0]?.textContent || "4", 10) || 4;
+      const curMidi = (oct + 1) * 12 + (STEP_TO_PC[step] ?? 0) + alter;
+      const nextMidi = Math.max(21, Math.min(108, curMidi + semitoneDelta));
+      const spelled = spellMidiPitch(nextMidi, targetFifths);
+
+      setElementText(doc, pitchEl, "step", spelled.step);
+      if (spelled.alter === 0) {
+        const altEl = pitchEl.getElementsByTagName("alter")[0];
+        if (altEl) pitchEl.removeChild(altEl);
+      } else {
+        setElementText(doc, pitchEl, "alter", String(spelled.alter));
+      }
+      setElementText(doc, pitchEl, "octave", String(spelled.octave));
+    }
+
+    // Re-spell / transpose <harmony> root & bass elements
+    for (const harmEl of Array.from(partEl.getElementsByTagName("harmony"))) {
+      const rootEl = harmEl.getElementsByTagName("root")[0];
+      const rootStepEl = rootEl?.getElementsByTagName("root-step")[0];
+      if (rootEl && rootStepEl?.textContent) {
+        const rs = rootStepEl.textContent.trim().toUpperCase();
+        const ra = Number.parseInt(rootEl.getElementsByTagName("root-alter")[0]?.textContent || "0", 10) || 0;
+        const kindText = harmEl.getElementsByTagName("kind")[0]?.getAttribute("text") || "";
+        const bassEl = harmEl.getElementsByTagName("bass")[0];
+        const bs = bassEl?.getElementsByTagName("bass-step")[0]?.textContent?.trim().toUpperCase();
+        const ba = Number.parseInt(bassEl?.getElementsByTagName("bass-alter")[0]?.textContent || "0", 10) || 0;
+        const rawSym =
+          `${rs}${ra === 1 ? "#" : ra === -1 ? "b" : ""}${kindText}` +
+          (bs ? `/${bs}${ba === 1 ? "#" : ba === -1 ? "b" : ""}` : "");
+        const updated = respellChordSymbol(rawSym, targetFifths, semitoneDelta);
+        const [newMain, newBass] = updated.symbol.split("/", 2);
+        const rm = newMain.match(/^([A-G])([#b]?)/);
+        if (rm) {
+          setElementText(doc, rootEl, "root-step", rm[1]);
+          if (rm[2]) setElementText(doc, rootEl, "root-alter", rm[2] === "#" ? "1" : "-1");
+          else {
+            const existingRa = rootEl.getElementsByTagName("root-alter")[0];
+            if (existingRa) rootEl.removeChild(existingRa);
+          }
+        }
+        if (bassEl && newBass) {
+          const bm = newBass.match(/^([A-G])([#b]?)/);
+          if (bm) {
+            setElementText(doc, bassEl, "bass-step", bm[1]);
+            if (bm[2]) setElementText(doc, bassEl, "bass-alter", bm[2] === "#" ? "1" : "-1");
+            else {
+              const existingBa = bassEl.getElementsByTagName("bass-alter")[0];
+              if (existingBa) bassEl.removeChild(existingBa);
+            }
+          }
+        }
+      }
+    }
+
+    recomputePartAccidentals(doc, partEl);
+  }
+
+  return { xml: serializeXmlDoc(doc), semitoneDelta };
 }
 
 export function updateXmlScoreHeader(
@@ -1052,19 +1150,24 @@ export function updateXmlScoreHeader(
   const parts = Array.from(doc.getElementsByTagName("part"));
   if (parts.length === 0) return null;
 
+  if (options.keySignature !== undefined) {
+    const parsed = parseKeySignature(options.keySignature);
+    for (const partEl of parts) {
+      const m1 = partEl.getElementsByTagName("measure")[0];
+      if (!m1) continue;
+      const attrs = getOrCreateChild(doc, m1, "attributes");
+      const keyEl = getOrCreateChild(doc, attrs, "key");
+      setElementText(doc, keyEl, "fifths", String(parsed.fifths));
+      setElementText(doc, keyEl, "mode", parsed.mode);
+      recomputePartAccidentals(doc, partEl);
+    }
+  }
+
   const partEl = parts[0];
   const measures = Array.from(partEl.getElementsByTagName("measure"));
   if (measures.length === 0) return null;
   const m1 = measures[0];
   const attrs = getOrCreateChild(doc, m1, "attributes");
-
-  if (options.keySignature !== undefined) {
-    const norm = options.keySignature.trim().toLowerCase().replace(/♭/g, "b").replace(/♯/g, "#").replace(/\s+/g, " ");
-    const entry = KEY_SIGNATURE_TO_FIFTHS[norm] ?? { fifths: 0, mode: "major" as const };
-    const keyEl = getOrCreateChild(doc, attrs, "key");
-    setElementText(doc, keyEl, "fifths", String(entry.fifths));
-    setElementText(doc, keyEl, "mode", entry.mode);
-  }
 
   if (options.timeSignature !== undefined && options.timeSignature.includes("/")) {
     const [bStr, btStr] = options.timeSignature.split("/", 2);
@@ -1200,27 +1303,21 @@ function createPitchedNoteElements(
     fifths: number;
   },
 ): Element[] {
-  const table = options.fifths < 0 ? PC_TO_FLAT : PC_TO_SHARP;
   const sorted = [...options.pitchesMidi].sort((a, b) => a - b);
   return sorted.map((rawMidi, idx) => {
     const midi = Math.max(21, Math.min(108, Math.round(rawMidi)));
-    const spelled = table[midi % 12];
-    const oct = Math.floor(midi / 12) - 1;
+    const spelled = spellMidiPitch(midi, options.fifths);
     const noteEl = doc.createElement("note");
     if (idx > 0) noteEl.appendChild(doc.createElement("chord"));
     const pitchEl = doc.createElement("pitch");
     setElementText(doc, pitchEl, "step", spelled.step);
     if (spelled.alter !== 0) setElementText(doc, pitchEl, "alter", String(spelled.alter));
-    setElementText(doc, pitchEl, "octave", String(oct));
+    setElementText(doc, pitchEl, "octave", String(spelled.octave));
     noteEl.appendChild(pitchEl);
     setElementText(doc, noteEl, "duration", String(options.durDivs));
     setElementText(doc, noteEl, "voice", options.voice);
     setElementText(doc, noteEl, "type", options.noteType);
     if (options.dotted) noteEl.appendChild(doc.createElement("dot"));
-    const keyAlter = getKeySignatureAlterForStep(spelled.step, options.fifths);
-    if (spelled.alter !== keyAlter) {
-      setElementText(doc, noteEl, "accidental", spelled.alter > 0 ? "sharp" : spelled.alter < 0 ? "flat" : "natural");
-    }
     if (options.staffNumber !== null) setElementText(doc, noteEl, "staff", String(options.staffNumber));
     return noteEl;
   });
@@ -1328,12 +1425,54 @@ export function deleteMeasureFromAllParts(xmlStr: string, measureNumber: number)
       if (attrs && !measures[1].getElementsByTagName("attributes")[0]) {
         measures[1].insertBefore(attrs.cloneNode(true), measures[1].firstChild);
       }
+      const tempoDir = Array.from(removed.children).find(
+        (c) => c.tagName.toLowerCase() === "direction" && c.getElementsByTagName("sound").length > 0,
+      );
+      if (tempoDir && !Array.from(measures[1].children).some((c) => c.tagName.toLowerCase() === "direction" && c.getElementsByTagName("sound").length > 0)) {
+        const nextAttrs = measures[1].getElementsByTagName("attributes")[0];
+        if (nextAttrs && nextAttrs.nextSibling) {
+          measures[1].insertBefore(tempoDir.cloneNode(true), nextAttrs.nextSibling);
+        } else {
+          measures[1].insertBefore(tempoDir.cloneNode(true), measures[1].firstChild);
+        }
+      }
+    }
+
+    // Preserve final barline if deleting the last measure
+    const removedBarline = Array.from(removed.children).find(
+      (c) => c.tagName.toLowerCase() === "barline" && c.getAttribute("location") === "right",
+    );
+
+    // Clear orphaned cross-bar ties on adjacent measures
+    if (delIdx > 0) {
+      for (const t of Array.from(measures[delIdx - 1].getElementsByTagName("tie"))) {
+        if (t.getAttribute("type") === "start") t.parentNode?.removeChild(t);
+      }
+      for (const t of Array.from(measures[delIdx - 1].getElementsByTagName("tied"))) {
+        if (t.getAttribute("type") === "start") t.parentNode?.removeChild(t);
+      }
+    }
+    if (delIdx + 1 < measures.length) {
+      for (const t of Array.from(measures[delIdx + 1].getElementsByTagName("tie"))) {
+        if (t.getAttribute("type") === "stop") t.parentNode?.removeChild(t);
+      }
+      for (const t of Array.from(measures[delIdx + 1].getElementsByTagName("tied"))) {
+        if (t.getAttribute("type") === "stop") t.parentNode?.removeChild(t);
+      }
     }
 
     partEl.removeChild(removed);
-    Array.from(partEl.getElementsByTagName("measure")).forEach((m, idx) => {
+    const remaining = Array.from(partEl.getElementsByTagName("measure"));
+    remaining.forEach((m, idx) => {
       m.setAttribute("number", String(idx + 1));
     });
+    if (removedBarline && remaining.length > 0) {
+      const newLast = remaining[remaining.length - 1];
+      if (newLast.getElementsByTagName("barline").length === 0) {
+        newLast.appendChild(removedBarline.cloneNode(true));
+      }
+    }
+    recomputePartAccidentals(doc, partEl);
   }
 
   return serializeXmlDoc(doc);
@@ -1473,6 +1612,7 @@ export function insertStepMidiNotesIntoXml(
   for (const oldEl of toRemove) {
     measureEl.removeChild(oldEl);
   }
+  recomputePartAccidentals(doc, partEl);
 
   // Locate next slot cursor (either remainder rest, next slot in measure, or next measure's first slot)
   const serialized = serializeXmlDoc(doc);
@@ -1669,6 +1809,7 @@ export function mergeLiveMidiRecordingIntoXml(
     }
   });
 
+  recomputePartAccidentals(nextDoc, nextPart);
   return serializeXmlDoc(nextDoc);
 }
 

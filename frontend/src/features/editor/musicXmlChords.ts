@@ -1,8 +1,6 @@
 import { buildMusicXmlTimeline } from "@/features/editor/musicXmlTimeline";
+import { respellChordSymbol, spellPitchClass } from "@/lib/keySignature";
 import type { ScoreChord, ScoreNote } from "@/types/api";
-
-const SHARP_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-const FLAT_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
 
 interface ChordTemplate {
   suffix: string;
@@ -116,7 +114,7 @@ function parseChordSymbol(symbol: string, fallbackRoot?: string, fallbackQuality
 
 function inferChordFromPitches(
   pitchesMidi: number[],
-  preferFlats: boolean,
+  keyFifths: number,
 ): { symbol: string } | null {
   if (pitchesMidi.length < 2) return null;
   const sorted = [...pitchesMidi].sort((a, b) => a - b);
@@ -124,7 +122,6 @@ function inferChordFromPitches(
   const pitchClasses = Array.from(new Set(sorted.map((p) => ((p % 12) + 12) % 12)));
   if (pitchClasses.length < 2) return null;
 
-  const names = preferFlats ? FLAT_NAMES : SHARP_NAMES;
   let bestScore = -1;
   let bestSymbol: string | null = null;
 
@@ -141,7 +138,7 @@ function inferChordFromPitches(
       const score = matched * 2 - extra * 0.75 + rootBonus + triadBonus;
       if (score > bestScore) {
         bestScore = score;
-        bestSymbol = `${names[rootPc]}${tpl.suffix}`;
+        bestSymbol = `${spellPitchClass(rootPc, keyFifths).name}${tpl.suffix}`;
       }
     }
   }
@@ -151,8 +148,8 @@ function inferChordFromPitches(
     for (const rootPc of pitchClasses) {
       const other = pitchClasses.find((pc) => pc !== rootPc)!;
       const iv = (other - rootPc + 12) % 12;
-      if (iv === 4) return { symbol: names[rootPc] };
-      if (iv === 3) return { symbol: `${names[rootPc]}m` };
+      if (iv === 4) return { symbol: spellPitchClass(rootPc, keyFifths).name };
+      if (iv === 3) return { symbol: `${spellPitchClass(rootPc, keyFifths).name}m` };
     }
   }
 
@@ -210,7 +207,7 @@ export function injectChordsIntoMusicXml(
 
     const fifthsText = doc.getElementsByTagName("fifths")[0]?.textContent?.trim();
     const fifthsVal = fifthsText ? Number(fifthsText) : 0;
-    const preferFlats = Number.isFinite(fifthsVal) && fifthsVal < 0;
+    const keyFifths = Number.isFinite(fifthsVal) ? Math.max(-7, Math.min(7, Math.round(fifthsVal))) : 0;
 
     const timeline = buildMusicXmlTimeline(xml, tempoBpm);
 
@@ -295,11 +292,12 @@ export function injectChordsIntoMusicXml(
           }
         }
 
+        const resSymbol = respellChordSymbol(ch.symbol, keyFifths);
         placements.push({
           measureIdx: mIdx,
           quarterOffset: qOffset,
-          symbol: ch.symbol,
-          root: ch.root,
+          symbol: resSymbol.symbol || ch.symbol,
+          root: resSymbol.root || ch.root,
           quality: ch.quality,
         });
       }
@@ -323,7 +321,7 @@ export function injectChordsIntoMusicXml(
           );
           const inferred = inferChordFromPitches(
             sounding.map((n) => n.pitch_midi),
-            preferFlats,
+            keyFifths,
           );
           if (!inferred) continue;
           if (inferred.symbol === prevSymbol && b > 0) continue;
