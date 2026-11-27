@@ -1,5 +1,13 @@
 import { buildMusicXmlTimeline, wholeNotesToTimeSec } from "@/features/editor/musicXmlTimeline";
 import { prepareDisplayMusicXml } from "@/features/editor/musicXmlNormalization";
+import {
+  extractScoreStructure,
+  getBeatUnitQuarters,
+  getMeasureNumber,
+  type NavigationMarkerType,
+  validateNavigationMarkers,
+  validateVoltaEndings,
+} from "@/features/editor/musicXmlStructure";
 import type { SnapGridMode } from "@/features/editor/midiRecordingUtils";
 import {
   clampKeyFifths,
@@ -231,7 +239,7 @@ function findTargetNoteElement(doc: Document, target: XmlNoteTarget): TargetMatc
 
   for (let mIdx = 0; mIdx < measures.length; mIdx++) {
     const m = measures[mIdx];
-    const mNum = Number.parseInt(m.getAttribute("number") || String(mIdx + 1), 10) || mIdx + 1;
+    const mNum = getMeasureNumber(m, mIdx);
     let offsetDiv = 0;
     let lastNoteStartDiv = 0;
     let maxDiv = 0;
@@ -1173,9 +1181,35 @@ export function updateXmlScoreHeader(
     const [bStr, btStr] = options.timeSignature.split("/", 2);
     const beats = Math.max(1, Math.min(16, Number.parseInt(bStr.trim(), 10) || 4));
     const beatType = Math.max(1, Math.min(16, Number.parseInt(btStr.trim(), 10) || 4));
-    const timeEl = getOrCreateChild(doc, attrs, "time");
-    setElementText(doc, timeEl, "beats", String(beats));
-    setElementText(doc, timeEl, "beat-type", String(beatType));
+    for (const p of parts) {
+      ensurePartDivisionsAtLeast(doc, p, 0, 48);
+      const pMeasures = Array.from(p.getElementsByTagName("measure"));
+      const pm1 = pMeasures[0];
+      if (!pm1) continue;
+      const pAttrs = getOrCreateChild(doc, pm1, "attributes");
+      const timeEl = getOrCreateChild(doc, pAttrs, "time");
+      setElementText(doc, timeEl, "beats", String(beats));
+      setElementText(doc, timeEl, "beat-type", String(beatType));
+
+      const { divisions } = getEffectiveDivisionsAndFifths(p, 0);
+      const targetDivs = Math.max(1, Math.round(divisions * beats * getBeatUnitQuarters(beatType)));
+      for (let mIdx = 0; mIdx < pMeasures.length; mIdx++) {
+        const curM = pMeasures[mIdx];
+        if (mIdx === 0 && ((curM.getAttribute("implicit") || "").toLowerCase() === "yes" || getMeasureNumber(curM, 0) === 0)) {
+          continue;
+        }
+        if (mIdx > 0) {
+          const curAttrs = Array.from(curM.children).find((c) => c.tagName.toLowerCase() === "attributes");
+          if (curAttrs && curAttrs.getElementsByTagName("time").length > 0) break;
+        }
+        const hasPitched = Array.from(curM.getElementsByTagName("note")).some(
+          (n) => n.getElementsByTagName("pitch").length > 0,
+        );
+        if (!hasPitched) {
+          inspectAndResizeMeasure(doc, p, curM, mIdx, targetDivs, divisions, true);
+        }
+      }
+    }
   }
 
   if (options.tempoBpm !== undefined) {
@@ -1323,6 +1357,832 @@ function createPitchedNoteElements(
   });
 }
 
+export interface MeasureMeterUpdateResult {
+  xml: string;
+  requiresOverflowConfirmation?: boolean;
+  overflowNoteCount?: number;
+  overflowMessage?: string;
+}
+
+function renumberPartMeasures(partEl: Element): void {
+  const measures = Array.from(partEl.getElementsByTagName("measure"));
+  if (measures.length === 0) return;
+  const first = measures[0];
+  const firstIsPickup =
+    (first.getAttribute("implicit") || "").toLowerCase() === "yes" ||
+    getMeasureNumber(first, 0) === 0;
+  measures.forEach((m, idx) => {
+    if (idx === 0 && firstIsPickup) {
+      m.setAttribute("number", "0");
+      m.setAttribute("implicit", "yes");
+    } else {
+      m.removeAttribute("implicit");
+      m.setAttribute("number", String(firstIsPickup ? idx : idx + 1));
+    }
+  });
+}
+
+function computePartHasGrandStaves(partEl: Element, upToMeasureIdx: number): boolean {
+  const measures = Array.from(partEl.getElementsByTagName("measure"));
+  for (let i = 0; i <= Math.min(upToMeasureIdx, measures.length - 1); i++) {
+    const staves = measures[i]?.getElementsByTagName("staves")[0]?.textContent;
+    if (staves && Number.parseInt(staves, 10) >= 2) return true;
+  }
+  return Array.from(partEl.getElementsByTagName("clef")).some(
+    (c) => Number.parseInt(c.getAttribute("number") || "1", 10) >= 2,
+  );
+}
+
+interface ParsedLaneEvent {
+  el: Element;
+  isRest: boolean;
+  isChord: boolean;
+  startDiv: number;
+  endDiv: number;
+  durDiv: number;
+}
+
+function inspectAndResizeMeasure(
+  doc: Document,
+  partEl: Element,
+  measureEl: Element,
+  measureIdx: number,
+  targetDivs: number,
+  divisions: number,
+  applyMutation: boolean,
+): { overflowCount: number } {
+  const hasGrand = computePartHasGrandStaves(partEl, measureIdx);
+  const leadingMeta: Element[] = [];
+  const trailingBarlines: Element[] = [];
+  const lanes = new Map<string, { voice: string; staff: number | null; events: ParsedLaneEvent[] }>();
+
+  let offsetDiv = 0;
+  let lastStartDiv = 0;
+  let seenNoteOrBackup = false;
+
+  for (const child of Array.from(measureEl.children)) {
+    const tag = child.tagName.toLowerCase();
+    if (tag === "note") {
+      seenNoteOrBackup = true;
+      const isRest = child.getElementsByTagName("rest").length > 0;
+      const isChord = child.getElementsByTagName("chord").length > 0;
+      const dur = Math.max(0, Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0") || 0);
+      const startDiv = isChord ? lastStartDiv : offsetDiv;
+      const endDiv = startDiv + dur;
+      const voice = getNoteVoice(child);
+      const staffNum = hasGrand ? getNoteStaffNumber(child) : null;
+      const key = `${staffNum ?? 0}:${voice}`;
+      if (!lanes.has(key)) lanes.set(key, { voice, staff: staffNum, events: [] });
+      lanes.get(key)!.events.push({ el: child, isRest, isChord, startDiv, endDiv, durDiv: dur });
+      if (!isChord) {
+        lastStartDiv = offsetDiv;
+        offsetDiv += dur;
+      }
+    } else if (tag === "backup") {
+      seenNoteOrBackup = true;
+      const dur = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0") || 0;
+      offsetDiv = Math.max(0, offsetDiv - dur);
+    } else if (tag === "forward") {
+      seenNoteOrBackup = true;
+      const dur = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0") || 0;
+      offsetDiv += dur;
+    } else if (tag === "barline" && seenNoteOrBackup && child.getAttribute("location") !== "left") {
+      trailingBarlines.push(child);
+    } else {
+      leadingMeta.push(child);
+    }
+  }
+
+  let overflowCount = 0;
+  for (const lane of lanes.values()) {
+    for (const ev of lane.events) {
+      if (!ev.isRest && ev.endDiv > targetDivs + 0.5) {
+        overflowCount += 1;
+      }
+    }
+  }
+
+  if (!applyMutation) {
+    return { overflowCount };
+  }
+
+  if (lanes.size === 0) {
+    if (hasGrand) {
+      lanes.set("1:1", { voice: "1", staff: 1, events: [] });
+      lanes.set("2:2", { voice: "2", staff: 2, events: [] });
+    } else {
+      lanes.set("0:1", { voice: "1", staff: null, events: [] });
+    }
+  } else if (hasGrand) {
+    const hasS1 = Array.from(lanes.values()).some((l) => l.staff === 1);
+    const hasS2 = Array.from(lanes.values()).some((l) => l.staff === 2);
+    if (!hasS1) lanes.set("1:1", { voice: "1", staff: 1, events: [] });
+    if (!hasS2) lanes.set("2:2", { voice: "2", staff: 2, events: [] });
+  }
+
+  // Clear children and rebuild in canonical MusicXML order
+  while (measureEl.firstChild) measureEl.removeChild(measureEl.firstChild);
+  for (const el of leadingMeta) measureEl.appendChild(el);
+
+  const laneList = Array.from(lanes.values()).sort((a, b) => (a.staff ?? 0) - (b.staff ?? 0));
+  laneList.forEach((lane, lIdx) => {
+    const lastPitchedEnd = lane.events.reduce(
+      (maxEnd, ev) => (!ev.isRest && ev.startDiv < targetDivs - 0.5 ? Math.max(maxEnd, Math.min(targetDivs, ev.endDiv)) : maxEnd),
+      0,
+    );
+    let cursor = 0;
+
+    for (const ev of lane.events) {
+      if (ev.isRest) {
+        if (ev.startDiv < lastPitchedEnd - 0.5 && ev.endDiv <= targetDivs + 0.5) {
+          for (const restAttr of Array.from(ev.el.getElementsByTagName("rest"))) {
+            restAttr.removeAttribute("measure");
+          }
+          measureEl.appendChild(ev.el);
+          cursor = Math.max(cursor, ev.endDiv);
+        }
+        continue;
+      }
+      if (ev.startDiv >= targetDivs - 0.5) {
+        continue;
+      }
+      if (ev.endDiv > targetDivs + 0.5) {
+        const clampedDur = Math.max(1, Math.round(targetDivs - ev.startDiv));
+        setElementText(doc, ev.el, "duration", String(clampedDur));
+        const spec = durationDivsToBestType(clampedDur, divisions);
+        setElementText(doc, ev.el, "type", spec.type);
+        for (const d of Array.from(ev.el.getElementsByTagName("dot"))) {
+          d.parentNode?.removeChild(d);
+        }
+        if (spec.dotted) ev.el.appendChild(doc.createElement("dot"));
+        if (!ev.isChord) cursor = ev.startDiv + clampedDur;
+      } else {
+        if (!ev.isChord) cursor = Math.max(cursor, ev.endDiv);
+      }
+      measureEl.appendChild(ev.el);
+    }
+
+    const rem = Math.round(targetDivs - cursor);
+    if (rem > 0) {
+      const fillRests = buildRestNoteElementsForDuration(doc, rem, divisions, lane.voice, lane.staff);
+      for (const r of fillRests) measureEl.appendChild(r);
+    }
+
+    if (lIdx < laneList.length - 1) {
+      const backupEl = doc.createElement("backup");
+      setElementText(doc, backupEl, "duration", String(targetDivs));
+      measureEl.appendChild(backupEl);
+    }
+  });
+
+  for (const bl of trailingBarlines) measureEl.appendChild(bl);
+  return { overflowCount };
+}
+
+function buildRestMeasureContent(
+  doc: Document,
+  measureEl: Element,
+  divisions: number,
+  targetDivs: number,
+  hasGrand: boolean,
+  isWholeBarRest: boolean,
+): void {
+  const appendLane = (voice: string, staff: number | null) => {
+    if (isWholeBarRest) {
+      const noteEl = doc.createElement("note");
+      const restEl = doc.createElement("rest");
+      restEl.setAttribute("measure", "yes");
+      noteEl.appendChild(restEl);
+      setElementText(doc, noteEl, "duration", String(targetDivs));
+      setElementText(doc, noteEl, "voice", voice);
+      const spec = durationDivsToBestType(targetDivs, divisions);
+      setElementText(doc, noteEl, "type", spec.type);
+      if (spec.dotted) noteEl.appendChild(doc.createElement("dot"));
+      if (staff !== null) setElementText(doc, noteEl, "staff", String(staff));
+      measureEl.appendChild(noteEl);
+    } else {
+      const rests = buildRestNoteElementsForDuration(doc, targetDivs, divisions, voice, staff);
+      for (const r of rests) measureEl.appendChild(r);
+    }
+  };
+
+  if (hasGrand) {
+    appendLane("1", 1);
+    const backupEl = doc.createElement("backup");
+    setElementText(doc, backupEl, "duration", String(targetDivs));
+    measureEl.appendChild(backupEl);
+    appendLane("2", 2);
+  } else {
+    appendLane("1", null);
+  }
+}
+
+export function setScorePickupMeasure(
+  xmlStr: string,
+  pickupBeats: number | null,
+  options?: { forceTruncate?: boolean },
+): MeasureMeterUpdateResult | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+  const parts = Array.from(doc.getElementsByTagName("part"));
+  if (parts.length === 0) return null;
+
+  const structure = extractScoreStructure(xmlStr);
+  const beatUnitQ = getBeatUnitQuarters(structure.baseBeatType);
+  const firstMeasureHasPickup =
+    structure.measures.length > 0 &&
+    (structure.measures[0].isImplicit || structure.measures[0].measureNumber === 0);
+
+  if (pickupBeats === null || pickupBeats <= 0) {
+    if (!firstMeasureHasPickup) return { xml: serializeXmlDoc(doc) };
+
+    let pickupPitchedCount = 0;
+    for (const partEl of parts) {
+      const m0 = partEl.getElementsByTagName("measure")[0];
+      if (!m0) continue;
+      for (const n of Array.from(m0.getElementsByTagName("note"))) {
+        if (n.getElementsByTagName("pitch").length > 0 && n.getElementsByTagName("chord").length === 0) {
+          pickupPitchedCount += 1;
+        }
+      }
+    }
+    if (pickupPitchedCount > 0 && !options?.forceTruncate) {
+      return {
+        xml: xmlStr,
+        requiresOverflowConfirmation: true,
+        overflowNoteCount: pickupPitchedCount,
+        overflowMessage: `Removing the pickup measure will discard ${pickupPitchedCount} note${pickupPitchedCount === 1 ? "" : "s"} in Measure 0 (Pickup).`,
+      };
+    }
+
+    for (const partEl of parts) {
+      const measures = Array.from(partEl.getElementsByTagName("measure"));
+      if (measures.length <= 1) return null;
+      const m0 = measures[0];
+      const m1 = measures[1];
+      const attrs = Array.from(m0.children).find((c) => c.tagName.toLowerCase() === "attributes");
+      if (attrs && !Array.from(m1.children).some((c) => c.tagName.toLowerCase() === "attributes")) {
+        m1.insertBefore(attrs.cloneNode(true), m1.firstChild);
+      }
+      const m1Attrs = Array.from(m1.children).find((c) => c.tagName.toLowerCase() === "attributes");
+      const dirs = Array.from(m0.children).filter((c) => c.tagName.toLowerCase() === "direction");
+      for (const dir of dirs.reverse()) {
+        if (m1Attrs && m1Attrs.nextSibling) m1.insertBefore(dir.cloneNode(true), m1Attrs.nextSibling);
+        else m1.insertBefore(dir.cloneNode(true), m1.firstChild);
+      }
+      const leftBar = Array.from(m0.children).find(
+        (c) => c.tagName.toLowerCase() === "barline" && c.getAttribute("location") === "left",
+      );
+      if (leftBar) m1.insertBefore(leftBar.cloneNode(true), m1.firstChild);
+      partEl.removeChild(m0);
+      renumberPartMeasures(partEl);
+      recomputePartAccidentals(doc, partEl);
+    }
+    return { xml: serializeXmlDoc(doc) };
+  }
+
+  for (const p of parts) ensurePartDivisionsAtLeast(doc, p, 0, 48);
+
+  if (firstMeasureHasPickup) {
+    let totalOverflow = 0;
+    for (const p of parts) {
+      const m0 = p.getElementsByTagName("measure")[0];
+      if (!m0) continue;
+      const { divisions } = getEffectiveDivisionsAndFifths(p, 0);
+      const targetDivs = Math.max(Math.round(divisions / 8), Math.round(divisions * pickupBeats * beatUnitQ));
+      totalOverflow += inspectAndResizeMeasure(doc, p, m0, 0, targetDivs, divisions, false).overflowCount;
+    }
+    if (totalOverflow > 0 && !options?.forceTruncate) {
+      return {
+        xml: xmlStr,
+        requiresOverflowConfirmation: true,
+        overflowNoteCount: totalOverflow,
+        overflowMessage: `${totalOverflow} note${totalOverflow === 1 ? "" : "s"} in the pickup measure extend beyond ${pickupBeats} beat(s) and will be truncated or removed.`,
+      };
+    }
+    for (const p of parts) {
+      const m0 = p.getElementsByTagName("measure")[0];
+      if (!m0) continue;
+      const { divisions } = getEffectiveDivisionsAndFifths(p, 0);
+      const targetDivs = Math.max(Math.round(divisions / 8), Math.round(divisions * pickupBeats * beatUnitQ));
+      inspectAndResizeMeasure(doc, p, m0, 0, targetDivs, divisions, true);
+      m0.setAttribute("number", "0");
+      m0.setAttribute("implicit", "yes");
+      renumberPartMeasures(p);
+      recomputePartAccidentals(doc, p);
+    }
+    return { xml: serializeXmlDoc(doc) };
+  }
+
+  // Create new <measure number="0" implicit="yes"> before existing Measure 1 across all parts
+  for (const partEl of parts) {
+    const measures = Array.from(partEl.getElementsByTagName("measure"));
+    if (measures.length === 0) continue;
+    const oldM1 = measures[0];
+    const divisions = ensurePartDivisionsAtLeast(doc, partEl, 0, 48);
+    const pickupDivs = Math.max(Math.round(divisions / 8), Math.round(divisions * pickupBeats * beatUnitQ));
+    const hasGrand = computePartHasGrandStaves(partEl, 0);
+
+    const m0 = doc.createElement("measure");
+    m0.setAttribute("number", "0");
+    m0.setAttribute("implicit", "yes");
+
+    const attrs = Array.from(oldM1.children).find((c) => c.tagName.toLowerCase() === "attributes");
+    if (attrs) {
+      m0.appendChild(attrs);
+    }
+    const leadDirs = Array.from(oldM1.children).filter(
+      (c) =>
+        c.tagName.toLowerCase() === "direction" &&
+        (c.getElementsByTagName("sound").length > 0 || c.getElementsByTagName("metronome").length > 0),
+    );
+    for (const ld of leadDirs) {
+      m0.appendChild(ld);
+    }
+    const leftBar = Array.from(oldM1.children).find(
+      (c) => c.tagName.toLowerCase() === "barline" && c.getAttribute("location") === "left",
+    );
+    if (leftBar) m0.insertBefore(leftBar, m0.firstChild);
+
+    buildRestMeasureContent(doc, m0, divisions, pickupDivs, hasGrand, false);
+    partEl.insertBefore(m0, oldM1);
+    renumberPartMeasures(partEl);
+    recomputePartAccidentals(doc, partEl);
+  }
+
+  return { xml: serializeXmlDoc(doc) };
+}
+
+export function setMeasureBeatsOrMeter(
+  xmlStr: string,
+  options: {
+    measureNumber: number;
+    mode: "this_measure_only" | "from_this_measure_onward";
+    beats: number;
+    beatType?: number;
+    showMeterChange?: boolean;
+    forceTruncate?: boolean;
+  },
+): MeasureMeterUpdateResult | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+  const parts = Array.from(doc.getElementsByTagName("part"));
+  if (parts.length === 0) return null;
+
+  for (const p of parts) ensurePartDivisionsAtLeast(doc, p, 0, 48);
+
+  const primaryMeasures = Array.from(parts[0].getElementsByTagName("measure"));
+  const targetIdx = primaryMeasures.findIndex(
+    (m, idx) => getMeasureNumber(m, idx) === options.measureNumber,
+  );
+  if (targetIdx < 0) return null;
+
+  const structure = extractScoreStructure(xmlStr);
+  const prevInfo = structure.measures[Math.max(0, targetIdx - 1)];
+  const curInfo = structure.measures[targetIdx];
+  const prevBeats = curInfo?.hasExplicitTimeChange ? prevInfo?.timeBeats ?? 4 : curInfo?.timeBeats ?? 4;
+  const prevBeatType = curInfo?.hasExplicitTimeChange ? prevInfo?.timeBeatType ?? 4 : curInfo?.timeBeatType ?? 4;
+
+  const nextBeatType = options.beatType && [2, 4, 8, 16].includes(options.beatType) ? options.beatType : prevBeatType;
+  const rawBeats = Math.max(0.25, Math.min(16, Number.isFinite(options.beats) ? options.beats : prevBeats));
+  const beatUnitQ = getBeatUnitQuarters(nextBeatType);
+
+  let endIdx = targetIdx + 1;
+  if (options.mode === "from_this_measure_onward") {
+    while (endIdx < primaryMeasures.length) {
+      const attrs = Array.from(primaryMeasures[endIdx].children).find(
+        (c) => c.tagName.toLowerCase() === "attributes",
+      );
+      if (attrs && attrs.getElementsByTagName("time").length > 0) {
+        break;
+      }
+      endIdx += 1;
+    }
+  }
+
+  // Pre-check note overflow across all parts & affected measures
+  let totalOverflow = 0;
+  for (const p of parts) {
+    const pMeasures = Array.from(p.getElementsByTagName("measure"));
+    const { divisions } = getEffectiveDivisionsAndFifths(p, targetIdx);
+    const targetDivs = Math.max(Math.round(divisions / 8), Math.round(divisions * rawBeats * beatUnitQ));
+    for (let mIdx = targetIdx; mIdx < Math.min(endIdx, pMeasures.length); mIdx++) {
+      totalOverflow += inspectAndResizeMeasure(doc, p, pMeasures[mIdx], mIdx, targetDivs, divisions, false).overflowCount;
+    }
+  }
+
+  if (totalOverflow > 0 && !options.forceTruncate) {
+    return {
+      xml: xmlStr,
+      requiresOverflowConfirmation: true,
+      overflowNoteCount: totalOverflow,
+      overflowMessage: `Shortening ${
+        options.mode === "this_measure_only" ? `Measure ${options.measureNumber}` : `Measures ${options.measureNumber} onward`
+      } will clip or remove ${totalOverflow} note${totalOverflow === 1 ? "" : "s"}. Proceed anyway?`,
+    };
+  }
+
+  for (const p of parts) {
+    const pMeasures = Array.from(p.getElementsByTagName("measure"));
+    const { divisions } = getEffectiveDivisionsAndFifths(p, targetIdx);
+    const targetDivs = Math.max(Math.round(divisions / 8), Math.round(divisions * rawBeats * beatUnitQ));
+
+    for (let mIdx = targetIdx; mIdx < Math.min(endIdx, pMeasures.length); mIdx++) {
+      inspectAndResizeMeasure(doc, p, pMeasures[mIdx], mIdx, targetDivs, divisions, true);
+    }
+
+    const targetM = pMeasures[targetIdx];
+    const shouldWriteMeter =
+      options.mode === "from_this_measure_onward" || Boolean(options.showMeterChange);
+    const intBeats = Math.max(1, Math.min(16, Math.round(rawBeats)));
+
+    if (shouldWriteMeter && targetM) {
+      const attrs = getOrCreateChild(doc, targetM, "attributes");
+      const timeEl = getOrCreateChild(doc, attrs, "time");
+      setElementText(doc, timeEl, "beats", String(intBeats));
+      setElementText(doc, timeEl, "beat-type", String(nextBeatType));
+
+      if (options.mode === "this_measure_only" && targetIdx + 1 < pMeasures.length) {
+        const nextM = pMeasures[targetIdx + 1];
+        const nextAttrs = Array.from(nextM.children).find((c) => c.tagName.toLowerCase() === "attributes");
+        const nextAlreadyHasTime = Boolean(nextAttrs && nextAttrs.getElementsByTagName("time").length > 0);
+        if (!nextAlreadyHasTime) {
+          const restoreAttrs = getOrCreateChild(doc, nextM, "attributes");
+          const restoreTime = getOrCreateChild(doc, restoreAttrs, "time");
+          setElementText(doc, restoreTime, "beats", String(prevBeats));
+          setElementText(doc, restoreTime, "beat-type", String(prevBeatType));
+        }
+      }
+    } else if (options.mode === "this_measure_only" && targetM && targetIdx > 0) {
+      // Remove any prior local <time> display on this measure if switching to hidden irregular duration
+      const mAttrs = Array.from(targetM.children).find((c) => c.tagName.toLowerCase() === "attributes");
+      if (mAttrs) {
+        for (const t of Array.from(mAttrs.getElementsByTagName("time"))) {
+          mAttrs.removeChild(t);
+        }
+        if (mAttrs.children.length === 0) targetM.removeChild(mAttrs);
+      }
+    }
+
+    renumberPartMeasures(p);
+    recomputePartAccidentals(doc, p);
+  }
+
+  return { xml: serializeXmlDoc(doc) };
+}
+
+function getOrCreateMeasureBarline(doc: Document, measureEl: Element, location: "left" | "right"): Element {
+  const existing = Array.from(measureEl.children).find(
+    (c) => c.tagName.toLowerCase() === "barline" && (c.getAttribute("location") || "right") === location,
+  );
+  if (existing) return existing;
+
+  const bl = doc.createElement("barline");
+  bl.setAttribute("location", location);
+  if (location === "left") {
+    const attrs = Array.from(measureEl.children).find((c) => c.tagName.toLowerCase() === "attributes");
+    if (attrs && attrs.nextSibling) measureEl.insertBefore(bl, attrs.nextSibling);
+    else measureEl.insertBefore(bl, measureEl.firstChild);
+  } else {
+    measureEl.appendChild(bl);
+  }
+  return bl;
+}
+
+function cleanupEmptyBarline(measureEl: Element, barlineEl: Element): void {
+  if (barlineEl.children.length === 0) {
+    measureEl.removeChild(barlineEl);
+  }
+}
+
+export function toggleMeasureRepeatBarline(
+  xmlStr: string,
+  measureNumber: number,
+  kind: "forward" | "backward" | "both",
+  repeatCount = 2,
+): { xml: string; message?: string } | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+  const parts = Array.from(doc.getElementsByTagName("part"));
+  if (parts.length === 0) return null;
+
+  const structure = extractScoreStructure(xmlStr);
+  const mInfo = structure.measures.find((m) => m.measureNumber === measureNumber);
+  if (!mInfo) return null;
+
+  const safeTimes = Math.max(2, Math.min(8, Math.round(repeatCount || 2)));
+  let infoMsg: string | undefined;
+
+  if (kind === "forward") {
+    const nextEnabled = !mInfo.forwardRepeat;
+    for (const partEl of parts) {
+      const m = Array.from(partEl.getElementsByTagName("measure")).find(
+        (el, i) => getMeasureNumber(el, i) === measureNumber,
+      );
+      if (!m) continue;
+      if (nextEnabled) {
+        const bl = getOrCreateMeasureBarline(doc, m, "left");
+        setElementText(doc, bl, "bar-style", "heavy-light");
+        for (const r of Array.from(bl.getElementsByTagName("repeat"))) bl.removeChild(r);
+        const rep = doc.createElement("repeat");
+        rep.setAttribute("direction", "forward");
+        bl.appendChild(rep);
+      } else {
+        const bl = Array.from(m.children).find(
+          (c) => c.tagName.toLowerCase() === "barline" && c.getAttribute("location") === "left",
+        );
+        if (bl) {
+          for (const r of Array.from(bl.getElementsByTagName("repeat"))) bl.removeChild(r);
+          for (const bs of Array.from(bl.getElementsByTagName("bar-style"))) bl.removeChild(bs);
+          cleanupEmptyBarline(m, bl);
+        }
+      }
+    }
+  } else if (kind === "backward") {
+    const nextEnabled = !mInfo.backwardRepeat;
+    for (const partEl of parts) {
+      const m = Array.from(partEl.getElementsByTagName("measure")).find(
+        (el, i) => getMeasureNumber(el, i) === measureNumber,
+      );
+      if (!m) continue;
+      if (nextEnabled) {
+        const bl = getOrCreateMeasureBarline(doc, m, "right");
+        setElementText(doc, bl, "bar-style", "light-heavy");
+        for (const r of Array.from(bl.getElementsByTagName("repeat"))) bl.removeChild(r);
+        const rep = doc.createElement("repeat");
+        rep.setAttribute("direction", "backward");
+        if (safeTimes > 2) rep.setAttribute("times", String(safeTimes));
+        bl.appendChild(rep);
+      } else {
+        const bl = Array.from(m.children).find(
+          (c) => c.tagName.toLowerCase() === "barline" && (c.getAttribute("location") || "right") === "right",
+        );
+        if (bl) {
+          for (const r of Array.from(bl.getElementsByTagName("repeat"))) bl.removeChild(r);
+          for (const bs of Array.from(bl.getElementsByTagName("bar-style"))) bl.removeChild(bs);
+          cleanupEmptyBarline(m, bl);
+        }
+      }
+    }
+  } else {
+    // both (:| |:) -> backward on measureNumber, forward on following measure
+    const nextMInfo = structure.measures[mInfo.measureIndex + 1] ?? null;
+    const bothActive = mInfo.backwardRepeat && Boolean(nextMInfo?.forwardRepeat);
+    const nextEnabled = !bothActive;
+
+    for (const partEl of parts) {
+      const measures = Array.from(partEl.getElementsByTagName("measure"));
+      const m = measures[mInfo.measureIndex];
+      const mNext = measures[mInfo.measureIndex + 1];
+      if (m) {
+        if (nextEnabled) {
+          const bl = getOrCreateMeasureBarline(doc, m, "right");
+          setElementText(doc, bl, "bar-style", "light-heavy");
+          for (const r of Array.from(bl.getElementsByTagName("repeat"))) bl.removeChild(r);
+          const rep = doc.createElement("repeat");
+          rep.setAttribute("direction", "backward");
+          if (safeTimes > 2) rep.setAttribute("times", String(safeTimes));
+          bl.appendChild(rep);
+        } else {
+          const bl = Array.from(m.children).find(
+            (c) => c.tagName.toLowerCase() === "barline" && (c.getAttribute("location") || "right") === "right",
+          );
+          if (bl) {
+            for (const r of Array.from(bl.getElementsByTagName("repeat"))) bl.removeChild(r);
+            for (const bs of Array.from(bl.getElementsByTagName("bar-style"))) bl.removeChild(bs);
+            cleanupEmptyBarline(m, bl);
+          }
+        }
+      }
+      if (mNext) {
+        if (nextEnabled) {
+          const bl = getOrCreateMeasureBarline(doc, mNext, "left");
+          setElementText(doc, bl, "bar-style", "heavy-light");
+          for (const r of Array.from(bl.getElementsByTagName("repeat"))) bl.removeChild(r);
+          const rep = doc.createElement("repeat");
+          rep.setAttribute("direction", "forward");
+          bl.appendChild(rep);
+        } else {
+          const bl = Array.from(mNext.children).find(
+            (c) => c.tagName.toLowerCase() === "barline" && c.getAttribute("location") === "left",
+          );
+          if (bl) {
+            for (const r of Array.from(bl.getElementsByTagName("repeat"))) bl.removeChild(r);
+            for (const bs of Array.from(bl.getElementsByTagName("bar-style"))) bl.removeChild(bs);
+            cleanupEmptyBarline(mNext, bl);
+          }
+        }
+      } else if (nextEnabled) {
+        infoMsg = "Backward repeat added on the final measure (no following bar for forward repeat).";
+      }
+    }
+  }
+
+  return { xml: serializeXmlDoc(doc), message: infoMsg };
+}
+
+export function setMeasureRepeatCount(
+  xmlStr: string,
+  measureNumber: number,
+  repeatCount: number,
+): string | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+  const safeTimes = Math.max(2, Math.min(8, Math.round(repeatCount || 2)));
+  let updated = false;
+  for (const partEl of Array.from(doc.getElementsByTagName("part"))) {
+    const m = Array.from(partEl.getElementsByTagName("measure")).find(
+      (el, i) => getMeasureNumber(el, i) === measureNumber,
+    );
+    if (!m) continue;
+    for (const rep of Array.from(m.getElementsByTagName("repeat"))) {
+      if (rep.getAttribute("direction") === "backward") {
+        rep.setAttribute("times", String(safeTimes));
+        updated = true;
+      }
+    }
+  }
+  return updated ? serializeXmlDoc(doc) : null;
+}
+
+export function setMeasureVoltaEnding(
+  xmlStr: string,
+  measureNumber: number,
+  action: "start_1" | "start_2" | "end_ending" | "clear_ending",
+): { xml: string; warning?: string } | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+  const parts = Array.from(doc.getElementsByTagName("part"));
+  if (parts.length === 0) return null;
+
+  const removeEndingFromBarline = (m: Element, loc: "left" | "right", types: string[]) => {
+    const bl = Array.from(m.children).find(
+      (c) => c.tagName.toLowerCase() === "barline" && (c.getAttribute("location") || "right") === loc,
+    );
+    if (!bl) return;
+    for (const endEl of Array.from(bl.getElementsByTagName("ending"))) {
+      if (types.includes((endEl.getAttribute("type") || "").toLowerCase())) {
+        bl.removeChild(endEl);
+      }
+    }
+    cleanupEmptyBarline(m, bl);
+  };
+
+  for (const partEl of parts) {
+    const measures = Array.from(partEl.getElementsByTagName("measure"));
+    const targetIdx = measures.findIndex((m, idx) => getMeasureNumber(m, idx) === measureNumber);
+    if (targetIdx < 0) continue;
+    const targetM = measures[targetIdx];
+
+    if (action === "clear_ending") {
+      removeEndingFromBarline(targetM, "left", ["start"]);
+      removeEndingFromBarline(targetM, "right", ["stop", "discontinue"]);
+    } else if (action === "start_1" || action === "start_2") {
+      const endingNum = action === "start_1" ? "1" : "2";
+      const closeType = action === "start_1" ? "stop" : "discontinue";
+      removeEndingFromBarline(targetM, "left", ["start"]);
+      const leftBl = getOrCreateMeasureBarline(doc, targetM, "left");
+      const startEl = doc.createElement("ending");
+      startEl.setAttribute("number", endingNum);
+      startEl.setAttribute("type", "start");
+      startEl.textContent = `${endingNum}.`;
+      leftBl.insertBefore(startEl, leftBl.firstChild);
+
+      // Pair with a closing tag on targetM unless an ending closer already exists ahead
+      removeEndingFromBarline(targetM, "right", ["stop", "discontinue"]);
+      const rightBl = getOrCreateMeasureBarline(doc, targetM, "right");
+      const stopEl = doc.createElement("ending");
+      stopEl.setAttribute("number", endingNum);
+      stopEl.setAttribute("type", closeType);
+      rightBl.appendChild(stopEl);
+    } else if (action === "end_ending") {
+      // Find nearest active <ending type="start"> at or before targetIdx
+      let activeNum = "1";
+      let startIdx = -1;
+      for (let i = targetIdx; i >= 0; i--) {
+        const starts = Array.from(measures[i].getElementsByTagName("ending")).filter(
+          (e) => e.getAttribute("type") === "start",
+        );
+        if (starts.length > 0) {
+          activeNum = starts[0].getAttribute("number") || "1";
+          startIdx = i;
+          break;
+        }
+      }
+      if (startIdx < 0) {
+        return {
+          xml: xmlStr,
+          warning: "Start a 1st or 2nd ending before closing it on a measure.",
+        };
+      }
+      // Remove any intermediate closer for this ending number between startIdx and targetIdx
+      for (let i = startIdx; i <= targetIdx; i++) {
+        removeEndingFromBarline(measures[i], "right", ["stop", "discontinue"]);
+      }
+      const rightBl = getOrCreateMeasureBarline(doc, targetM, "right");
+      const closeType = activeNum.includes("1") && !activeNum.includes("2") ? "stop" : "discontinue";
+      const stopEl = doc.createElement("ending");
+      stopEl.setAttribute("number", activeNum);
+      stopEl.setAttribute("type", closeType);
+      rightBl.appendChild(stopEl);
+    }
+  }
+
+  const outXml = serializeXmlDoc(doc);
+  const warnings = validateVoltaEndings(outXml);
+  return { xml: outXml, warning: warnings[0] };
+}
+
+const NAV_MARKER_LABELS: Record<NavigationMarkerType, string> = {
+  segno: "",
+  coda: "",
+  fine: "Fine",
+  to_coda: "To Coda",
+  dc_al_fine: "D.C. al Fine",
+  dc_al_coda: "D.C. al Coda",
+  ds_al_fine: "D.S. al Fine",
+  ds_al_coda: "D.S. al Coda",
+};
+
+function matchesNavigationDirection(dirEl: Element, marker: NavigationMarkerType): boolean {
+  if (marker === "segno") return dirEl.getElementsByTagName("segno").length > 0;
+  if (marker === "coda") return dirEl.getElementsByTagName("coda").length > 0;
+  const words = Array.from(dirEl.getElementsByTagName("words"))
+    .map((w) => (w.textContent || "").trim().toLowerCase())
+    .join(" ");
+  const soundEl = dirEl.getElementsByTagName("sound")[0];
+  if (marker === "fine") return Boolean(soundEl?.hasAttribute("fine") || words === "fine");
+  if (marker === "to_coda") return Boolean(soundEl?.hasAttribute("tocoda") || words === "to coda");
+  if (marker === "dc_al_fine") return Boolean(soundEl?.hasAttribute("dacapo") && !words.includes("coda"));
+  if (marker === "dc_al_coda") return Boolean(soundEl?.hasAttribute("dacapo") && words.includes("coda"));
+  if (marker === "ds_al_fine") return Boolean(soundEl?.hasAttribute("dalsegno") && !words.includes("coda"));
+  if (marker === "ds_al_coda") return Boolean(soundEl?.hasAttribute("dalsegno") && words.includes("coda"));
+  return false;
+}
+
+export function toggleMeasureNavigationMarker(
+  xmlStr: string,
+  measureNumber: number,
+  marker: NavigationMarkerType,
+): { xml: string; warning?: string } | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+  const partEl = doc.getElementsByTagName("part")[0];
+  if (!partEl) return null;
+
+  const measures = Array.from(partEl.getElementsByTagName("measure"));
+  const m = measures.find((el, i) => getMeasureNumber(el, i) === measureNumber);
+  if (!m) return null;
+
+  const existingDirs = Array.from(m.children).filter(
+    (c) => c.tagName.toLowerCase() === "direction" && matchesNavigationDirection(c, marker),
+  );
+
+  if (existingDirs.length > 0) {
+    for (const d of existingDirs) m.removeChild(d);
+  } else {
+    const dir = doc.createElement("direction");
+    dir.setAttribute("placement", "above");
+    const dt = doc.createElement("direction-type");
+    if (marker === "segno") {
+      dt.appendChild(doc.createElement("segno"));
+    } else if (marker === "coda") {
+      dt.appendChild(doc.createElement("coda"));
+    } else {
+      const words = doc.createElement("words");
+      words.setAttribute("font-weight", "bold");
+      words.textContent = NAV_MARKER_LABELS[marker];
+      dt.appendChild(words);
+    }
+    dir.appendChild(dt);
+
+    const sound = doc.createElement("sound");
+    if (marker === "segno") sound.setAttribute("segno", "segno");
+    else if (marker === "coda") sound.setAttribute("coda", "coda");
+    else if (marker === "fine") sound.setAttribute("fine", "yes");
+    else if (marker === "to_coda") sound.setAttribute("tocoda", "coda");
+    else if (marker === "dc_al_fine" || marker === "dc_al_coda") sound.setAttribute("dacapo", "yes");
+    else if (marker === "ds_al_fine" || marker === "ds_al_coda") sound.setAttribute("dalsegno", "segno");
+    dir.appendChild(sound);
+
+    if (marker === "segno" || marker === "coda") {
+      const attrs = Array.from(m.children).find((c) => c.tagName.toLowerCase() === "attributes");
+      if (attrs && attrs.nextSibling) m.insertBefore(dir, attrs.nextSibling);
+      else m.insertBefore(dir, m.firstChild);
+    } else {
+      const rightBar = Array.from(m.children).find(
+        (c) => c.tagName.toLowerCase() === "barline" && (c.getAttribute("location") || "right") === "right",
+      );
+      if (rightBar) m.insertBefore(dir, rightBar);
+      else m.appendChild(dir);
+    }
+  }
+
+  const outXml = serializeXmlDoc(doc);
+  const navWarnings = validateNavigationMarkers(outXml);
+  return { xml: outXml, warning: navWarnings[0] };
+}
+
 export function addMeasureToAllParts(xmlStr: string, afterMeasureNumber?: number): string | null {
   const doc = parseXmlDoc(xmlStr);
   if (!doc) return null;
@@ -1334,11 +2194,7 @@ export function addMeasureToAllParts(xmlStr: string, afterMeasureNumber?: number
     const measures = Array.from(partEl.getElementsByTagName("measure"));
     const insertIdx =
       afterMeasureNumber !== undefined
-        ? measures.findIndex(
-            (m, idx) =>
-              (Number.parseInt(m.getAttribute("number") || String(idx + 1), 10) || idx + 1) ===
-              afterMeasureNumber,
-          )
+        ? measures.findIndex((m, idx) => getMeasureNumber(m, idx) === afterMeasureNumber)
         : measures.length - 1;
     const refIdx = insertIdx >= 0 ? insertIdx : measures.length - 1;
     const { divisions } = getEffectiveDivisionsAndFifths(partEl, Math.max(0, refIdx));
@@ -1393,9 +2249,7 @@ export function addMeasureToAllParts(xmlStr: string, afterMeasureNumber?: number
       partEl.appendChild(newMeasure);
     }
 
-    Array.from(partEl.getElementsByTagName("measure")).forEach((m, idx) => {
-      m.setAttribute("number", String(idx + 1));
-    });
+    renumberPartMeasures(partEl);
   }
 
   return serializeXmlDoc(doc);
@@ -1412,11 +2266,7 @@ export function deleteMeasureFromAllParts(xmlStr: string, measureNumber: number)
     const measures = Array.from(partEl.getElementsByTagName("measure"));
     if (measures.length <= 1) return null;
 
-    const delIdx = measures.findIndex(
-      (m, idx) =>
-        (Number.parseInt(m.getAttribute("number") || String(idx + 1), 10) || idx + 1) ===
-        measureNumber,
-    );
+    const delIdx = measures.findIndex((m, idx) => getMeasureNumber(m, idx) === measureNumber);
     if (delIdx < 0) continue;
 
     const removed = measures[delIdx];
@@ -1462,10 +2312,11 @@ export function deleteMeasureFromAllParts(xmlStr: string, measureNumber: number)
     }
 
     partEl.removeChild(removed);
+    if (delIdx === 0 && measures[1]) {
+      measures[1].removeAttribute("implicit");
+    }
+    renumberPartMeasures(partEl);
     const remaining = Array.from(partEl.getElementsByTagName("measure"));
-    remaining.forEach((m, idx) => {
-      m.setAttribute("number", String(idx + 1));
-    });
     if (removedBarline && remaining.length > 0) {
       const newLast = remaining[remaining.length - 1];
       if (newLast.getElementsByTagName("barline").length === 0) {
@@ -1621,7 +2472,7 @@ export function insertStepMidiNotesIntoXml(
   const nextPart = nextDoc.getElementsByTagName("part")[partIndex] || nextDoc.getElementsByTagName("part")[0];
   const nextMeasures = Array.from(nextPart.getElementsByTagName("measure"));
   const curMeasure = nextMeasures[measureIdx];
-  const curMeasureNum = Number.parseInt(curMeasure?.getAttribute("number") || String(measureIdx + 1), 10) || measureIdx + 1;
+  const curMeasureNum = curMeasure ? getMeasureNumber(curMeasure, measureIdx) : measureIdx + 1;
 
   let nextCursorTarget: XmlNoteTarget | null = null;
   if (remainderRests.length > 0) {
@@ -1644,7 +2495,7 @@ export function insertStepMidiNotesIntoXml(
   } else {
     for (let mI = measureIdx + 1; mI < nextMeasures.length; mI++) {
       const m = nextMeasures[mI];
-      const mNum = Number.parseInt(m.getAttribute("number") || String(mI + 1), 10) || mI + 1;
+      const mNum = getMeasureNumber(m, mI);
       const mNotes = Array.from(m.children).filter((c) => c.tagName.toLowerCase() === "note");
       const slot = mNotes.find((n) => targetStaff === null || getNoteStaffNumber(n) === targetStaff);
       if (slot) {
@@ -1698,6 +2549,13 @@ export function mergeLiveMidiRecordingIntoXml(
   const stepDivs =
     options.snapMode === "1/8" ? divisions / 2 : options.snapMode === "1/16" ? divisions / 4 : Math.max(3, divisions / 8);
 
+  const structure = extractScoreStructure(xmlStr, options.timeSignature);
+  const existingMeasureDivs = Array.from(partEl.getElementsByTagName("measure")).map((m, idx) => {
+    const mInfo = structure.measures[idx];
+    const barQuarters = mInfo ? mInfo.actualQuarters : (beats * 4) / beatType;
+    return Math.max(1, Math.round(barQuarters * divisions));
+  });
+
   const quantizedEvents = recordedNotes.map((n) => {
     const rawStart = Math.max(0, Math.round((n.onset_sec * divPerSec) / stepDivs) * stepDivs);
     const rawEnd = Math.max(rawStart + stepDivs, Math.round((n.offset_sec * divPerSec) / stepDivs) * stepDivs);
@@ -1708,14 +2566,18 @@ export function mergeLiveMidiRecordingIntoXml(
     };
   });
 
+  let cumulativeExistingDivs = existingMeasureDivs.reduce((sum, d) => sum + d, 0);
   const maxEndDiv = quantizedEvents.reduce((m, e) => Math.max(m, e.endDiv), measureDivs);
-  const neededMeasures = Math.max(1, Math.ceil(maxEndDiv / measureDivs));
-  const existingMeasures = Array.from(partEl.getElementsByTagName("measure")).length;
 
   let workingXml = serializeXmlDoc(doc);
-  for (let m = existingMeasures; m < neededMeasures; m++) {
+  let safetyAdd = 0;
+  while (cumulativeExistingDivs < maxEndDiv && safetyAdd < 64) {
     const added = addMeasureToAllParts(workingXml);
-    if (added) workingXml = added;
+    if (!added) break;
+    workingXml = added;
+    existingMeasureDivs.push(measureDivs);
+    cumulativeExistingDivs += measureDivs;
+    safetyAdd += 1;
   }
 
   const nextDoc = parseXmlDoc(workingXml);
@@ -1732,6 +2594,7 @@ export function mergeLiveMidiRecordingIntoXml(
     mEl: Element,
     mStartDiv: number,
     mEndDiv: number,
+    barDivs: number,
     staffEvents: typeof quantizedEvents,
     voice: string,
     staffNumber: number | null,
@@ -1742,7 +2605,7 @@ export function mergeLiveMidiRecordingIntoXml(
       .map((e) => ({
         pitchMidi: e.pitchMidi,
         start: Math.max(0, e.startDiv - mStartDiv),
-        end: Math.min(measureDivs, e.endDiv - mStartDiv),
+        end: Math.min(barDivs, e.endDiv - mStartDiv),
       }))
       .filter((e) => e.end > e.start);
 
@@ -1761,7 +2624,7 @@ export function mergeLiveMidiRecordingIntoXml(
         for (const r of gapRests) mEl.appendChild(r);
         cursor = onset;
       }
-      const nextOnset = i + 1 < sortedOnsets.length ? sortedOnsets[i + 1] : measureDivs;
+      const nextOnset = i + 1 < sortedOnsets.length ? sortedOnsets[i + 1] : barDivs;
       const chordGroup = byOnset.get(onset)!;
       const maxChordEnd = chordGroup.reduce((m, e) => Math.max(m, e.end), onset);
       const availDur = Math.max(stepDivs, Math.min(maxChordEnd, nextOnset) - onset);
@@ -1779,12 +2642,13 @@ export function mergeLiveMidiRecordingIntoXml(
       cursor = onset + Math.round(availDur);
     }
 
-    if (cursor < measureDivs) {
-      const tailRests = buildRestNoteElementsForDuration(nextDoc, measureDivs - cursor, divisions, voice, staffNumber);
+    if (cursor < barDivs) {
+      const tailRests = buildRestNoteElementsForDuration(nextDoc, barDivs - cursor, divisions, voice, staffNumber);
       for (const r of tailRests) mEl.appendChild(r);
     }
   };
 
+  let runningStartDiv = 0;
   measures.forEach((mEl, mIdx) => {
     // Preserve <attributes> and <direction> in measure 1; clear old notes & backups cleanly
     for (const child of Array.from(mEl.children)) {
@@ -1793,19 +2657,21 @@ export function mergeLiveMidiRecordingIntoXml(
         mEl.removeChild(child);
       }
     }
-    const mStartDiv = mIdx * measureDivs;
-    const mEndDiv = mStartDiv + measureDivs;
+    const barDivs = existingMeasureDivs[mIdx] ?? measureDivs;
+    const mStartDiv = runningStartDiv;
+    const mEndDiv = mStartDiv + barDivs;
+    runningStartDiv = mEndDiv;
 
     if (hasTwoStaves) {
       const rhEvents = quantizedEvents.filter((e) => e.pitchMidi >= splitMidi);
       const lhEvents = quantizedEvents.filter((e) => e.pitchMidi < splitMidi);
-      populateStaffInMeasure(mEl, mStartDiv, mEndDiv, rhEvents, "1", 1);
+      populateStaffInMeasure(mEl, mStartDiv, mEndDiv, barDivs, rhEvents, "1", 1);
       const backupEl = nextDoc.createElement("backup");
-      setElementText(nextDoc, backupEl, "duration", String(measureDivs));
+      setElementText(nextDoc, backupEl, "duration", String(barDivs));
       mEl.appendChild(backupEl);
-      populateStaffInMeasure(mEl, mStartDiv, mEndDiv, lhEvents, "2", 2);
+      populateStaffInMeasure(mEl, mStartDiv, mEndDiv, barDivs, lhEvents, "2", 2);
     } else {
-      populateStaffInMeasure(mEl, mStartDiv, mEndDiv, quantizedEvents, "1", null);
+      populateStaffInMeasure(mEl, mStartDiv, mEndDiv, barDivs, quantizedEvents, "1", null);
     }
   });
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
@@ -31,6 +31,7 @@ import { ExportCenter } from "@/features/editor/ExportCenter";
 import { LyricsPanel } from "@/features/editor/LyricsPanel";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { KeySignatureControl, type KeyChangeAction } from "@/features/editor/KeySignatureControl";
+import { type PendingOverflowWarning } from "@/features/editor/MeasureMeterControl";
 import { metronomeEngine } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
 import {
@@ -38,8 +39,14 @@ import {
   extractKeySignatureFromXml,
   musicXmlToScoreNotes,
   type PlaygroundClefMode,
+  setScorePickupMeasure,
   updateXmlScoreHeader,
 } from "@/features/editor/musicXmlEditor";
+import { extractScoreStructure, getBeatUnitQuarters } from "@/features/editor/musicXmlStructure";
+import {
+  buildPlaybackSequence,
+  mapPlaybackSecToPhysicalSec,
+} from "@/features/editor/playbackSequence";
 import { parseKeySignature, respellChordSymbol, type KeyMode } from "@/lib/keySignature";
 import { applyScoreTitleToMusicXml } from "@/features/editor/musicXmlNormalization";
 import {
@@ -69,6 +76,9 @@ export function ProjectStudioPage() {
   const [isCreatingPlaygroundCopy, setIsCreatingPlaygroundCopy] = useState(false);
   const [activeTab, setActiveTab] = useState<StudioTab>("notation");
   const [isFocusMode, setIsFocusMode] = useState(false);
+  const [pickupPendingOverflow, setPickupPendingOverflow] = useState<PendingOverflowWarning | null>(null);
+  const [customPickupMode, setCustomPickupMode] = useState(false);
+  const [customPickupInput, setCustomPickupInput] = useState("2");
 
   useEffect(() => {
     if (!isFocusMode) return;
@@ -672,12 +682,18 @@ export function ProjectStudioPage() {
 
   const handleMusicXmlChange = (nextXml: string) => {
     if (!scoreData) return;
+    const structure = extractScoreStructure(nextXml, scoreData.time_signature);
     const synced = musicXmlToScoreNotes(nextXml, scoreData.tracks, scoreData.tempo_bpm);
     mutateScore(
       (prev) => ({
         ...prev,
+        time_signature: structure.baseTimeSignature || prev.time_signature,
         notes: synced.notes,
         duration_seconds: Math.max(synced.durationSeconds, 0.5),
+        analysis: {
+          ...prev.analysis,
+          structure,
+        },
       }),
       nextXml,
     );
@@ -855,6 +871,20 @@ export function ProjectStudioPage() {
     trimTotalDuration,
   ]);
 
+  const scoreStructure = useMemo(
+    () => extractScoreStructure(musicxml, scoreData?.time_signature || "4/4"),
+    [musicxml, scoreData?.time_signature],
+  );
+  const playbackSequence = useMemo(
+    () =>
+      buildPlaybackSequence(
+        musicxml,
+        scoreData?.notes || [],
+        scoreData?.tempo_bpm || 120,
+      ),
+    [musicxml, scoreData?.notes, scoreData?.tempo_bpm],
+  );
+
   const isMidiPlayground = Boolean(
     project?.transcription_mode === "midi_playground" ||
       scoreData?.analysis?.source_type === "midi_playground",
@@ -973,6 +1003,36 @@ export function ProjectStudioPage() {
     );
   };
 
+  const handlePickupChange = (pickupBeats: number | null, forceTruncate = false) => {
+    if (!scoreData || !musicxml) return;
+    const res = setScorePickupMeasure(musicxml, pickupBeats, { forceTruncate });
+    if (!res) return;
+    if (res.requiresOverflowConfirmation) {
+      setPickupPendingOverflow({
+        message: res.overflowMessage || "Changing the pickup measure will truncate existing notes.",
+        onConfirmTruncate: () => {
+          setPickupPendingOverflow(null);
+          handlePickupChange(pickupBeats, true);
+        },
+      });
+      return;
+    }
+    const nextStructure = extractScoreStructure(res.xml, scoreData.time_signature);
+    const synced = musicXmlToScoreNotes(res.xml, scoreData.tracks, scoreData.tempo_bpm);
+    mutateScore(
+      (prev) => ({
+        ...prev,
+        notes: synced.notes,
+        duration_seconds: Math.max(synced.durationSeconds, 0.5),
+        analysis: {
+          ...prev.analysis,
+          structure: nextStructure,
+        },
+      }),
+      res.xml,
+    );
+  };
+
   const handlePlaygroundConfigChange = (updates: {
     keySignature?: string;
     timeSignature?: string;
@@ -982,6 +1042,7 @@ export function ProjectStudioPage() {
     if (!scoreData || !musicxml) return;
     const nextXml = updateXmlScoreHeader(musicxml, updates) ?? musicxml;
     const nextTempo = updates.tempoBpm ?? scoreData.tempo_bpm;
+    const nextStructure = extractScoreStructure(nextXml, updates.timeSignature ?? scoreData.time_signature);
     const synced = musicXmlToScoreNotes(nextXml, scoreData.tracks, nextTempo);
     mutateScore(
       (prev) => ({
@@ -993,6 +1054,7 @@ export function ProjectStudioPage() {
         duration_seconds: Math.max(synced.durationSeconds, 0.5),
         analysis: {
           ...prev.analysis,
+          structure: nextStructure,
           playground_config: {
             ...((prev.analysis?.playground_config as Record<string, unknown> | undefined) || {}),
             ...(updates.clefMode ? { clef_mode: updates.clefMode } : {}),
@@ -1337,6 +1399,13 @@ export function ProjectStudioPage() {
               mediaAssetId={isScoreProject ? null : waveformMediaAssetId}
               isScoreOnly={isScoreProject}
               notes={scoreData?.notes || []}
+              playbackNotes={playbackSequence.playbackNotes}
+              playbackDurationSec={
+                playbackSequence.totalPlaybackSec > 0 ? playbackSequence.totalPlaybackSec : undefined
+              }
+              metronomeBeatSchedule={playbackSequence.metronomeBeats}
+              pickupBeats={scoreStructure.hasPickup ? scoreStructure.pickupBeatsInUnit : 0}
+              beatUnitQuarters={getBeatUnitQuarters(scoreStructure.baseBeatType)}
               durationSeconds={scoreData?.duration_seconds || activeAudioAsset?.duration_seconds || project.duration_seconds || 0}
               tempoBpm={scoreData?.tempo_bpm || 120}
               playheadSec={playheadSec}
@@ -1440,11 +1509,84 @@ export function ProjectStudioPage() {
                       onChange={(e) => handlePlaygroundConfigChange({ timeSignature: e.target.value })}
                       className="h-7 rounded-md border border-stone-300 bg-white px-2 text-xs text-stone-900 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#F5F3FF]"
                     >
-                      {["4/4", "3/4", "2/4", "6/8", "3/8", "12/8"].map((ts) => (
+                      {["4/4", "3/4", "2/4", "6/8", "3/8", "12/8", "2/2", "5/4"].map((ts) => (
                         <option key={ts} value={ts}>{ts}</option>
                       ))}
                     </select>
                   </label>
+                  <div
+                    data-testid="playground-pickup-control"
+                    className="inline-flex items-center gap-1 text-stone-700 dark:text-[#C4C4D4]"
+                  >
+                    <label className="inline-flex items-center gap-1">
+                      Pickup
+                      <select
+                        aria-label="Playground pickup measure"
+                        value={(() => {
+                          if (customPickupMode) return "custom";
+                          if (!scoreStructure.hasPickup) return "none";
+                          const b = Number(scoreStructure.pickupBeatsInUnit.toFixed(2));
+                          if ([0.5, 1, 1.5, 2, 3].includes(b)) return String(b);
+                          return "custom";
+                        })()}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === "none") {
+                            setCustomPickupMode(false);
+                            handlePickupChange(null);
+                          } else if (v === "custom") {
+                            setCustomPickupMode(true);
+                            if (scoreStructure.hasPickup) {
+                              setCustomPickupInput(String(Number(scoreStructure.pickupBeatsInUnit.toFixed(2))));
+                            }
+                          } else {
+                            setCustomPickupMode(false);
+                            const parsed = Number.parseFloat(v);
+                            if (Number.isFinite(parsed) && parsed > 0) handlePickupChange(parsed);
+                          }
+                        }}
+                        className="h-7 rounded-md border border-stone-300 bg-white px-2 text-xs text-stone-900 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#F5F3FF]"
+                      >
+                        <option value="none">None</option>
+                        <option value="0.5">1/2 beat</option>
+                        <option value="1">1 beat</option>
+                        <option value="1.5">1.5 beats</option>
+                        <option value="2">2 beats</option>
+                        <option value="3">3 beats</option>
+                        <option value="custom">Custom...</option>
+                      </select>
+                    </label>
+                    {(customPickupMode ||
+                      (scoreStructure.hasPickup &&
+                        ![0.5, 1, 1.5, 2, 3].includes(Number(scoreStructure.pickupBeatsInUnit.toFixed(2))))) && (
+                      <div className="inline-flex items-center gap-1">
+                        <input
+                          type="number"
+                          min={0.25}
+                          max={12}
+                          step={0.25}
+                          aria-label="Custom pickup beats"
+                          data-testid="playground-pickup-custom-input"
+                          value={customPickupInput}
+                          onChange={(e) => setCustomPickupInput(e.target.value)}
+                          className="h-7 w-16 rounded-md border border-stone-300 bg-white px-1.5 font-mono text-xs text-stone-900 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#F5F3FF]"
+                        />
+                        <button
+                          type="button"
+                          data-testid="playground-pickup-custom-apply"
+                          onClick={() => {
+                            const val = Number.parseFloat(customPickupInput);
+                            if (Number.isFinite(val) && val > 0) {
+                              handlePickupChange(val);
+                            }
+                          }}
+                          className="h-7 rounded-md border border-violet-500 bg-violet-600 px-2 text-[11px] font-medium text-white hover:bg-violet-700"
+                        >
+                          Set
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   <label className="inline-flex items-center gap-1 text-stone-700 dark:text-[#C4C4D4]">
                     Staff
                     <select
@@ -1683,6 +1825,7 @@ export function ProjectStudioPage() {
                     isFocusMode={isFocusMode}
                     onToggleFocusMode={() => setIsFocusMode((v) => !v)}
                     onMusicXmlChange={handleMusicXmlChange}
+                    playbackSequence={playbackSequence}
                   />
                 ))}
 
@@ -1706,7 +1849,11 @@ export function ProjectStudioPage() {
                     tempoBpm={scoreData.tempo_bpm}
                     timeSignature={scoreData.time_signature}
                     keyFifths={activeKeySignature.fifths}
-                    playheadSec={playheadSec}
+                    playheadSec={
+                      playbackSequence.hasRepeatsOrNavigation
+                        ? mapPlaybackSecToPhysicalSec(playbackSequence, playheadSec).physicalSec
+                        : playheadSec
+                    }
                     selectedNoteId={selectedNoteId}
                     onSelectNote={setSelectedNoteId}
                     onChangeNotes={handleNotesChange}
@@ -1797,6 +1944,43 @@ export function ProjectStudioPage() {
           </section>
         </div>
       </div>
+      {pickupPendingOverflow && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          data-testid="pickup-overflow-dialog"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs"
+        >
+          <div className="w-full max-w-md rounded-xl border border-amber-400/60 bg-white p-5 shadow-2xl space-y-4 dark:border-amber-500/40 dark:bg-[#11111B]">
+            <h2 className="text-sm font-semibold text-stone-900 dark:text-white">
+              Pickup Measure Contains Notes
+            </h2>
+            <p className="text-xs text-stone-600 dark:text-[#A1A1AA]">
+              {pickupPendingOverflow.message}
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                data-testid="pickup-overflow-cancel-btn"
+                onClick={() => setPickupPendingOverflow(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="danger"
+                data-testid="pickup-overflow-confirm-btn"
+                onClick={pickupPendingOverflow.onConfirmTruncate}
+              >
+                Truncate &amp; Apply
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </AppShell>
   );
 }

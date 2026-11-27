@@ -11,6 +11,7 @@ import {
   saveMetronomeSettings,
 } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
+import type { PlaybackMetronomeBeat } from "@/features/editor/playbackSequence";
 import { API_BASE_URL, api } from "@/services/api";
 import type { ScoreNote } from "@/types/api";
 
@@ -18,6 +19,11 @@ interface WaveformPlayerProps {
   mediaAssetId: string | null;
   isScoreOnly?: boolean;
   notes: ScoreNote[];
+  playbackNotes?: ScoreNote[];
+  playbackDurationSec?: number;
+  metronomeBeatSchedule?: PlaybackMetronomeBeat[];
+  pickupBeats?: number;
+  beatUnitQuarters?: number;
   durationSeconds: number;
   tempoBpm: number;
   playheadSec: number;
@@ -49,6 +55,11 @@ export function WaveformPlayer({
   mediaAssetId,
   isScoreOnly = false,
   notes,
+  playbackNotes,
+  playbackDurationSec,
+  metronomeBeatSchedule,
+  pickupBeats = 0,
+  beatUnitQuarters = 1,
   durationSeconds,
   tempoBpm,
   playheadSec,
@@ -232,6 +243,7 @@ export function WaveformPlayer({
         playbackRate,
         scoreTimeSignature: timeSignature,
         settings: metronomeSettings,
+        beatSchedule: sourceMode === "midi" ? metronomeBeatSchedule : undefined,
         onBeatChange: setActiveBeat,
       });
     } else {
@@ -241,10 +253,11 @@ export function WaveformPlayer({
         playbackRate,
         scoreTimeSignature: timeSignature,
         settings: metronomeSettings,
+        beatSchedule: sourceMode === "midi" ? metronomeBeatSchedule : undefined,
         onBeatChange: setActiveBeat,
       });
     }
-  }, [isPlaying, sourceMode, metronomeSettings, tempoBpm, playbackRate, timeSignature]);
+  }, [isPlaying, sourceMode, metronomeSettings, tempoBpm, playbackRate, timeSignature, metronomeBeatSchedule]);
 
   const playAttemptRef = useRef(0);
 
@@ -257,13 +270,16 @@ export function WaveformPlayer({
       if (attemptId !== playAttemptRef.current) return;
     }
 
+    const effectiveNotes = playbackNotes && playbackNotes.length > 0 ? playbackNotes : notes;
+    const effectiveDur = playbackDurationSec && playbackDurationSec > 0 ? playbackDurationSec : durationSeconds;
+
     const beginSynth = () => {
       if (attemptId !== playAttemptRef.current) return;
       setIsPlaying(true);
       void midiSynth.start({
-        notes,
+        notes: effectiveNotes,
         fromSec,
-        durationSec: durationSeconds,
+        durationSec: effectiveDur,
         tempoBpm,
         playbackRate,
         volume,
@@ -286,6 +302,8 @@ export function WaveformPlayer({
         bars: metronomeSettings.countInBars,
         bpm: tempoBpm,
         scoreTimeSignature: timeSignature,
+        pickupBeats,
+        beatUnitQuarters,
         settings: metronomeSettings,
         onBeatChange: setActiveBeat,
         onComplete: beginSynth,

@@ -728,7 +728,9 @@ function stripArtificialPickupPadding(doc: Document): void {
   const effectivePickupQl = Math.max(...partInfos.map((p) => p.lastPitchedEndQl));
   if (effectivePickupQl <= 1e-4 || effectivePickupQl >= nominalQl - 1e-4) return;
 
-  const hasTrailingPadding = partInfos.some((p) => p.totalQl > effectivePickupQl + 1e-4);
+  const hasTrailingPadding = partInfos.some(
+    (p) => p.totalQl >= nominalQl - 1e-4 && p.totalQl > effectivePickupQl + 1e-4,
+  );
   if (!hasTrailingPadding) return;
 
   for (const info of partInfos) {

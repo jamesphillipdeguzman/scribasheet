@@ -14,6 +14,7 @@ import {
   type PlaygroundClefMode,
   type XmlNoteTarget,
 } from "@/features/editor/musicXmlEditor";
+import { extractScoreStructure, getBeatUnitQuarters } from "@/features/editor/musicXmlStructure";
 import {
   loadMidiMonitorPreference,
   saveMidiMonitorPreference,
@@ -244,10 +245,13 @@ export function NotationMidiBar({
     if (countInEnabled && metronomeSettings) {
       setCountingIn(true);
       setIsRecording(true);
+      const structure = extractScoreStructure(activeXmlRef.current, timeSignature);
       metronomeEngine.startCountIn({
         bars: 1,
         bpm: tempoBpm,
         scoreTimeSignature: timeSignature,
+        pickupBeats: structure.hasPickup ? structure.pickupBeatsInUnit : 0,
+        beatUnitQuarters: getBeatUnitQuarters(structure.baseBeatType),
         settings: { ...metronomeSettings, enabled: true },
         onComplete: beginCapture,
       });

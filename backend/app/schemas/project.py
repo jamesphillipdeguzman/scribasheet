@@ -20,6 +20,7 @@ class PlaygroundProjectCreateRequest(BaseModel):
     tempo_bpm: float = Field(default=120.0, ge=30.0, le=240.0)
     clef_mode: Literal["grand", "treble", "bass"] = "grand"
     measures: int = Field(default=4, ge=1, le=64)
+    pickup_beats: float | None = Field(default=None, ge=0.0, le=12.0)
 
     @field_validator("title")
     @classmethod

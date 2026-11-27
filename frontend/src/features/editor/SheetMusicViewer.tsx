@@ -18,6 +18,7 @@ import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
 import { type MetronomeSettings } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
 import { KeySignatureControl, type KeyChangeAction } from "@/features/editor/KeySignatureControl";
+import { type MeasureMeterChangePayload, type PendingOverflowWarning } from "@/features/editor/MeasureMeterControl";
 import { NotationCommandPalette } from "@/features/editor/NotationCommandPalette";
 import { NotationMidiBar } from "@/features/editor/NotationMidiBar";
 import {
@@ -32,10 +33,15 @@ import {
   formatPitchLabel,
   getXmlNoteInfo,
   type PlaygroundClefMode,
+  setMeasureBeatsOrMeter,
+  setMeasureRepeatCount,
+  setMeasureVoltaEnding,
   setXmlNoteAccidental,
   setXmlNoteDuration,
   setXmlNotePitch,
   setXmlNoteVoice,
+  toggleMeasureNavigationMarker,
+  toggleMeasureRepeatBarline,
   toggleXmlNoteArticulation,
   toggleXmlNoteDot,
   toggleXmlNoteSlur,
@@ -47,6 +53,12 @@ import {
   type XmlNoteInfo,
   type XmlNoteTarget,
 } from "@/features/editor/musicXmlEditor";
+import { extractScoreStructure, type NavigationMarkerType } from "@/features/editor/musicXmlStructure";
+import {
+  mapPhysicalSecToPlaybackSec,
+  mapPlaybackSecToPhysicalSec,
+  type PlaybackSequence,
+} from "@/features/editor/playbackSequence";
 import { cleanDisplayScoreTitle, normalizeScorePayload, prepareDisplayMusicXml } from "@/features/editor/musicXmlNormalization";
 import { injectChordsIntoMusicXml } from "@/features/editor/musicXmlChords";
 import type { KeyMode } from "@/lib/keySignature";
@@ -143,6 +155,7 @@ interface SheetMusicViewerProps {
   isPrintingPdf?: boolean;
   canPrintPdf?: boolean;
   printError?: string | null;
+  playbackSequence?: PlaybackSequence | null;
 }
 
 function buildStaffIndexMapping(xmlStr: string | null | undefined): Array<{ partIndex: number; staffNumber: number }> {
@@ -226,6 +239,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   isPrintingPdf = false,
   canPrintPdf = false,
   printError = null,
+  playbackSequence = null,
 }: SheetMusicViewerProps) {
   const [engine, setEngine] = useState<"alphatab" | "osmd">(() =>
     defaultEditMode || isMidiPlayground ? "osmd" : getInitialNotationEngine(defaultEngine),
@@ -314,6 +328,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const selectedMeasureNumberRef = useRef<number | null>(null);
   selectedMeasureNumberRef.current = selectedMeasureNumber;
   const [selectedMeasureRect, setSelectedMeasureRect] = useState<MeasureBoundingRect | null>(null);
+  const [pendingOverflow, setPendingOverflow] = useState<PendingOverflowWarning | null>(null);
   const lastEditedXmlRef = useRef<string | null>(null);
 
   interface DragSession {
@@ -353,6 +368,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     setSelectedTarget(null);
     setSelectedMeasureNumber(null);
     setSelectedMeasureRect(null);
+    setPaletteStatusMsg(null);
   }, [musicxml]);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
@@ -527,9 +543,10 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   };
 
   const syncCursorToSeconds = useCallback(
-    (sec: number, allowAutoScroll: boolean, force = false) => {
+    (rawSec: number, allowAutoScroll: boolean, force = false) => {
       const osmd = osmdRef.current;
       if (!osmd) return;
+      const sec = playbackSequence ? mapPlaybackSecToPhysicalSec(playbackSequence, rawSec).physicalSec : rawSec;
 
       // Primary path: drive both SATB notehead highlighting and vertical playhead from canonical rendered events
       const renderedEvents = renderedEventsRef.current;
@@ -738,7 +755,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         // Ignore OSMD cursor boundary exceptions during re-render
       }
     },
-    [notes, timeline, tempoBpm, tracks, satbMutedVoices, satbSoloVoice, followCursor, isPlaying],
+    [notes, timeline, tempoBpm, tracks, satbMutedVoices, satbSoloVoice, followCursor, isPlaying, playbackSequence],
   );
 
   // Build OSMD iterator timeline & SVG notehead -> XmlNoteTarget map after render
@@ -1402,7 +1419,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   }, [isPlaying, isRendering]);
 
   const applyXmlEdit = useCallback(
-    (resultXml: string | null, nextTarget?: XmlNoteTarget | null) => {
+    (resultXml: string | null, nextTarget?: XmlNoteTarget | null, statusMsg?: string | null) => {
       if (!resultXml || !onMusicXmlChange) return;
       if (isPlaying) {
         onTogglePlay?.();
@@ -1417,7 +1434,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       if (nextTarget !== undefined) {
         setSelectedTarget(nextTarget);
       }
-      setPaletteStatusMsg(null);
+      setPaletteStatusMsg(statusMsg ?? null);
       lastEditedXmlRef.current = resultXml;
       onMusicXmlChange(resultXml);
     },
@@ -1820,7 +1837,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     }
 
     if (Number.isFinite(bestDist) && bestDist < Infinity) {
-      const targetSec = wholeNotesToTimeSec(timeline, bestWhole, tempoBpm);
+      const physicalSec = wholeNotesToTimeSec(timeline, bestWhole, tempoBpm);
+      const targetSec = playbackSequence ? mapPhysicalSecToPlaybackSec(playbackSequence, physicalSec) : physicalSec;
       onSeek(targetSec);
     }
   };
@@ -2035,6 +2053,35 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       {/* MuseScore-Style Notation Command Palette & Inline MIDI Controls */}
       {editMode && (() => {
         const noteInfo = selectedTarget && activeXml ? getXmlNoteInfo(activeXml, selectedTarget) : null;
+        const scoreStructure = activeXml ? extractScoreStructure(activeXml, timeSignature) : null;
+        const focusedMeasureNum = selectedTarget?.measureNumber ?? selectedMeasureNumber;
+        const activeMeasureInfo =
+          focusedMeasureNum !== null && focusedMeasureNum !== undefined && scoreStructure
+            ? scoreStructure.measures.find((m) => m.measureNumber === focusedMeasureNum) ?? null
+            : null;
+        const applyMeterChange = (payload: MeasureMeterChangePayload) => {
+          const res = setMeasureBeatsOrMeter(activeXml, {
+            measureNumber: payload.measureNumber,
+            mode: payload.mode,
+            beats: payload.beats,
+            beatType: payload.beatType,
+            showMeterChange: payload.showMeterChange,
+            forceTruncate: payload.forceTruncate,
+          });
+          if (!res) return;
+          if (res.requiresOverflowConfirmation) {
+            setPendingOverflow({
+              message: res.overflowMessage || "Shortening this measure will truncate notes.",
+              onConfirmTruncate: () => {
+                setPendingOverflow(null);
+                applyMeterChange({ ...payload, forceTruncate: true });
+              },
+            });
+            return;
+          }
+          setPaletteStatusMsg(null);
+          applyXmlEdit(res.xml, selectedTarget);
+        };
         return (
           <div className="space-y-2 shrink-0">
             <NotationCommandPalette
@@ -2053,6 +2100,29 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
               canRedo={canRedo}
               onUndo={onUndo}
               onRedo={onRedo}
+              activeMeasureInfo={activeMeasureInfo}
+              pendingOverflow={pendingOverflow}
+              onDismissOverflow={() => setPendingOverflow(null)}
+              onApplyMeasureMeter={applyMeterChange}
+              onToggleRepeatBarline={(measureNum, kind, count) => {
+                const res = toggleMeasureRepeatBarline(activeXml, measureNum, kind, count);
+                if (!res) return;
+                applyXmlEdit(res.xml, selectedTarget, res.message ?? null);
+              }}
+              onSetRepeatCount={(measureNum, count) => {
+                const next = setMeasureRepeatCount(activeXml, measureNum, count);
+                if (next) applyXmlEdit(next, selectedTarget);
+              }}
+              onSetVoltaEnding={(measureNum, action) => {
+                const res = setMeasureVoltaEnding(activeXml, measureNum, action);
+                if (!res) return;
+                applyXmlEdit(res.xml, selectedTarget, res.warning ?? null);
+              }}
+              onToggleNavigationMarker={(measureNum, marker: NavigationMarkerType) => {
+                const res = toggleMeasureNavigationMarker(activeXml, measureNum, marker);
+                if (!res) return;
+                applyXmlEdit(res.xml, selectedTarget, res.warning ?? null);
+              }}
               onSelectDuration={(dur) => {
                 setActiveDuration(dur);
                 if (!selectedTarget) return;

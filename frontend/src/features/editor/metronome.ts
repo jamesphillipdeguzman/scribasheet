@@ -1,3 +1,5 @@
+import type { PlaybackMetronomeBeat } from "@/features/editor/playbackSequence";
+
 export type MetronomeSound = "woodblock" | "studio_beep" | "stick_rimshot";
 export type MetronomeSubdivision = "quarter" | "eighth";
 export type MetronomeCountInBars = 0 | 1 | 2;
@@ -211,6 +213,7 @@ type SyncConfig = {
   playbackRate: number;
   scoreTimeSignature: string;
   settings: MetronomeSettings;
+  beatSchedule?: PlaybackMetronomeBeat[];
   onBeatChange?: (beat: number | null) => void;
 };
 
@@ -228,6 +231,8 @@ type CountInConfig = {
   bars: 1 | 2;
   bpm: number;
   scoreTimeSignature: string;
+  pickupBeats?: number;
+  beatUnitQuarters?: number;
   settings: MetronomeSettings;
   onBeatChange?: (beat: number | null) => void;
   onComplete: () => void;
@@ -331,9 +336,15 @@ class MetronomeEngine {
       config.scoreTimeSignature,
       config.settings.timeSignatureOverride,
     );
-    const { beatsPerBar } = parseTimeSignature(effSig);
-    const beatSec = 60 / Math.max(20, config.bpm);
-    const totalCountInMs = Math.round(config.bars * beatsPerBar * beatSec * 1000);
+    const { beatsPerBar, beatUnit } = parseTimeSignature(effSig);
+    const unitQ = config.beatUnitQuarters ?? (4 / Math.max(1, beatUnit));
+    const beatSec = unitQ * (60 / Math.max(20, config.bpm));
+    const rawPickupBeats = Math.max(0, config.pickupBeats ?? 0);
+    let totalCountInBeats = config.bars * beatsPerBar - rawPickupBeats;
+    if (rawPickupBeats > 0 && totalCountInBeats < 1) {
+      totalCountInBeats += beatsPerBar;
+    }
+    const totalCountInMs = Math.max(100, Math.round(totalCountInBeats * beatSec * 1000));
 
     this.startLoop();
     this.countInTimerId = window.setTimeout(() => {
@@ -387,10 +398,48 @@ class MetronomeEngine {
 
       if (s.mode === "synced") {
         const songSec = Math.max(0, s.getSongSec());
-        const songBeatSec = 60 / Math.max(20, s.bpm);
-        const songStepSec = songBeatSec / subMult;
         const rate = Math.max(0.25, s.playbackRate || 1);
         const lookAheadSongSec = 0.1 * rate;
+
+        if (s.beatSchedule && s.beatSchedule.length > 0) {
+          const filtered = s.beatSchedule.filter((b) => subMult === 2 || !b.isSubdivision);
+          const windowEnd = songSec + lookAheadSongSec;
+          const prevActiveIdx = this.lastScheduledStep;
+          // Detect loop wrap-around when playback seeks backward
+          if (prevActiveIdx >= 0 && prevActiveIdx < filtered.length && filtered[prevActiveIdx].sec > windowEnd + 0.08) {
+            this.lastScheduledStep = -1;
+          }
+          for (let i = Math.max(0, this.lastScheduledStep + 1); i < filtered.length; i++) {
+            const ev = filtered[i];
+            if (ev.sec < songSec - 0.04) {
+              this.lastScheduledStep = i;
+              continue;
+            }
+            if (ev.sec > windowEnd) break;
+            const deltaRealSec = Math.max(0, (ev.sec - songSec) / rate);
+            const isDownbeat = !ev.isSubdivision && s.settings.accentBeatOne && ev.isDownbeat;
+            if (ctx) {
+              const handle = scheduleMetronomeClickNode(ctx, ctx.currentTime + deltaRealSec, {
+                sound: s.settings.sound,
+                isDownbeat,
+                isSubdivision: ev.isSubdivision,
+                volume: s.settings.volume,
+              });
+              if (handle) {
+                this.activeNodes.add(handle);
+                window.setTimeout(() => this.activeNodes.delete(handle), Math.ceil((deltaRealSec + 0.08) * 1000));
+              }
+            }
+            if (!ev.isSubdivision) {
+              s.onBeatChange?.(ev.beatInBar);
+            }
+            this.lastScheduledStep = i;
+          }
+          return;
+        }
+
+        const songBeatSec = 60 / Math.max(20, s.bpm);
+        const songStepSec = songBeatSec / subMult;
 
         // Handle loop wrap-around cleanly
         const currentStep = Math.floor(songSec / songStepSec);
@@ -439,7 +488,10 @@ class MetronomeEngine {
 
       for (let step = startStep; step <= maxStep; step++) {
         if (s.mode === "count_in") {
-          const maxCountInSteps = s.bars * beatsPerBar * subMult;
+          const rawPickupBeats = Math.max(0, s.pickupBeats ?? 0);
+          let countInBeats = s.bars * beatsPerBar - rawPickupBeats;
+          if (rawPickupBeats > 0 && countInBeats < 1) countInBeats += beatsPerBar;
+          const maxCountInSteps = Math.round(countInBeats * subMult);
           if (step >= maxCountInSteps) break;
         }
         const deltaSec = Math.max(0, step * stepSec - elapsedSec);

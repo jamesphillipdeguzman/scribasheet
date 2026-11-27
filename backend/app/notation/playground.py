@@ -112,6 +112,40 @@ def _whole_measure_rest_type(beats: int, beat_type: int) -> tuple[str, bool]:
     return "whole", False
 
 
+def _build_rest_notes_for_divs(
+    total_divs: int,
+    divisions: int,
+    voice: str,
+    staff_num: int | None,
+) -> list[str]:
+    candidates = [
+        (divisions * 4, "whole", False),
+        (divisions * 3, "half", True),
+        (divisions * 2, "half", False),
+        (int(round(divisions * 1.5)), "quarter", True),
+        (divisions, "quarter", False),
+        (int(round(divisions * 0.75)), "eighth", True),
+        (int(round(divisions * 0.5)), "eighth", False),
+        (int(round(divisions * 0.25)), "16th", False),
+        (int(round(divisions * 0.125)), "32nd", False),
+    ]
+    out: list[str] = []
+    remaining = max(1, int(round(total_divs)))
+    guard = 0
+    while remaining > 0 and guard < 12:
+        guard += 1
+        match = next(((d, t, dot) for d, t, dot in candidates if d > 0 and d <= remaining), (remaining, "16th", False))
+        used_divs, r_type, r_dot = match
+        dot_xml = "<dot/>" if r_dot else ""
+        staff_xml = f"<staff>{staff_num}</staff>" if staff_num is not None else ""
+        out.append(
+            f"      <note><rest/><duration>{used_divs}</duration><voice>{voice}</voice>"
+            f"<type>{r_type}</type>{dot_xml}{staff_xml}</note>"
+        )
+        remaining -= used_divs
+    return out
+
+
 def build_blank_playground_score(
     *,
     title: str = "Untitled Playground",
@@ -120,6 +154,7 @@ def build_blank_playground_score(
     tempo_bpm: float = 120.0,
     clef_mode: str = "grand",
     measures: int = 4,
+    pickup_beats: float | None = None,
 ) -> tuple[ScoreData, str]:
     """Create a blank ScoreData and valid grand-staff/treble/bass MusicXML document."""
     safe_clef_mode = clef_mode if clef_mode in ("grand", "treble", "bass") else "grand"
@@ -129,12 +164,18 @@ def build_blank_playground_score(
     beats, beat_type, norm_time = parse_time_signature(time_signature)
 
     divisions = 48
-    measure_divs = max(1, int(round(divisions * beats * (4.0 / beat_type))))
+    beat_unit_q = 4.0 / beat_type
+    measure_divs = max(1, int(round(divisions * beats * beat_unit_q)))
+    has_pickup = pickup_beats is not None and float(pickup_beats) > 0.0
+    pickup_beats_val = float(pickup_beats) if has_pickup else 0.0
+    pickup_quarters = pickup_beats_val * beat_unit_q if has_pickup else 0.0
+    pickup_divs = max(6, int(round(divisions * pickup_quarters))) if has_pickup else 0
+
     rest_type, rest_dotted = _whole_measure_rest_type(beats, beat_type)
     rest_dot_xml = "<dot/>" if rest_dotted else ""
     safe_title = resolve_project_score_title(title)
 
-    quarter_beats_total = safe_measures * beats * (4.0 / beat_type)
+    quarter_beats_total = pickup_quarters + safe_measures * beats * beat_unit_q
     duration_seconds = round(quarter_beats_total * (60.0 / safe_tempo), 3)
 
     lines: list[str] = [
@@ -158,49 +199,62 @@ def build_blank_playground_score(
         '  <part id="P1">',
     ]
 
+    def _opening_attrs_and_dir_lines() -> list[str]:
+        out_lines = [
+            "      <attributes>",
+            f"        <divisions>{divisions}</divisions>",
+            "        <key>",
+            f"          <fifths>{fifths}</fifths>",
+            f"          <mode>{mode}</mode>",
+            "        </key>",
+            "        <time>",
+            f"          <beats>{beats}</beats>",
+            f"          <beat-type>{beat_type}</beat-type>",
+            "        </time>",
+        ]
+        if safe_clef_mode == "grand":
+            out_lines.extend(
+                [
+                    "        <staves>2</staves>",
+                    '        <clef number="1"><sign>G</sign><line>2</line></clef>',
+                    '        <clef number="2"><sign>F</sign><line>4</line></clef>',
+                ]
+            )
+        elif safe_clef_mode == "treble":
+            out_lines.append("        <clef><sign>G</sign><line>2</line></clef>")
+        else:
+            out_lines.append("        <clef><sign>F</sign><line>4</line></clef>")
+        out_lines.extend(
+            [
+                "      </attributes>",
+                '      <direction placement="above">',
+                "        <direction-type>",
+                '          <metronome parentheses="no">',
+                "            <beat-unit>quarter</beat-unit>",
+                f"            <per-minute>{int(round(safe_tempo))}</per-minute>",
+                "          </metronome>",
+                "        </direction-type>",
+                f'        <sound tempo="{int(round(safe_tempo))}"/>',
+                "      </direction>",
+            ]
+        )
+        return out_lines
+
+    if has_pickup:
+        lines.append('    <measure number="0" implicit="yes">')
+        lines.extend(_opening_attrs_and_dir_lines())
+        if safe_clef_mode == "grand":
+            lines.extend(_build_rest_notes_for_divs(pickup_divs, divisions, "1", 1))
+            lines.append(f"      <backup><duration>{pickup_divs}</duration></backup>")
+            lines.extend(_build_rest_notes_for_divs(pickup_divs, divisions, "2", 2))
+        else:
+            lines.extend(_build_rest_notes_for_divs(pickup_divs, divisions, "1", None))
+        lines.append("    </measure>")
+
     for m_num in range(1, safe_measures + 1):
         lines.append(f'    <measure number="{m_num}">')
-        if m_num == 1:
-            lines.extend(
-                [
-                    "      <attributes>",
-                    f"        <divisions>{divisions}</divisions>",
-                    "        <key>",
-                    f"          <fifths>{fifths}</fifths>",
-                    f"          <mode>{mode}</mode>",
-                    "        </key>",
-                    "        <time>",
-                    f"          <beats>{beats}</beats>",
-                    f"          <beat-type>{beat_type}</beat-type>",
-                    "        </time>",
-                ]
-            )
-            if safe_clef_mode == "grand":
-                lines.extend(
-                    [
-                        "        <staves>2</staves>",
-                        '        <clef number="1"><sign>G</sign><line>2</line></clef>',
-                        '        <clef number="2"><sign>F</sign><line>4</line></clef>',
-                    ]
-                )
-            elif safe_clef_mode == "treble":
-                lines.append("        <clef><sign>G</sign><line>2</line></clef>")
-            else:
-                lines.append("        <clef><sign>F</sign><line>4</line></clef>")
-            lines.extend(
-                [
-                    "      </attributes>",
-                    '      <direction placement="above">',
-                    "        <direction-type>",
-                    '          <metronome parentheses="no">',
-                    "            <beat-unit>quarter</beat-unit>",
-                    f"            <per-minute>{int(round(safe_tempo))}</per-minute>",
-                    "          </metronome>",
-                    "        </direction-type>",
-                    f'        <sound tempo="{int(round(safe_tempo))}"/>',
-                    "      </direction>",
-                ]
-            )
+        if m_num == 1 and not has_pickup:
+            lines.extend(_opening_attrs_and_dir_lines())
 
         if safe_clef_mode == "grand":
             lines.extend(
@@ -241,6 +295,55 @@ def build_blank_playground_score(
     else:
         tracks = [ScoreTrack(index=0, name="Piano Bass", instrument="piano", clef="bass", program=0)]
 
+    structure_measures: list[dict[str, object]] = []
+    if has_pickup:
+        structure_measures.append(
+            {
+                "measureIndex": 0,
+                "measureNumber": 0,
+                "isImplicit": True,
+                "isPickup": True,
+                "isIrregular": False,
+                "timeBeats": beats,
+                "timeBeatType": beat_type,
+                "hasExplicitTimeChange": False,
+                "nominalQuarters": beats * beat_unit_q,
+                "actualQuarters": pickup_quarters,
+                "beatsInActiveUnit": pickup_beats_val,
+                "forwardRepeat": False,
+                "backwardRepeat": False,
+                "repeatCount": 2,
+                "endingStart": None,
+                "endingStop": None,
+                "endingDiscontinue": None,
+                "navigationMarkers": [],
+            }
+        )
+    for m_idx_offset in range(safe_measures):
+        m_num = m_idx_offset + 1
+        structure_measures.append(
+            {
+                "measureIndex": m_idx_offset + (1 if has_pickup else 0),
+                "measureNumber": m_num,
+                "isImplicit": False,
+                "isPickup": False,
+                "isIrregular": False,
+                "timeBeats": beats,
+                "timeBeatType": beat_type,
+                "hasExplicitTimeChange": False,
+                "nominalQuarters": beats * beat_unit_q,
+                "actualQuarters": beats * beat_unit_q,
+                "beatsInActiveUnit": float(beats),
+                "forwardRepeat": False,
+                "backwardRepeat": False,
+                "repeatCount": 2,
+                "endingStart": None,
+                "endingStop": None,
+                "endingDiscontinue": None,
+                "navigationMarkers": [],
+            }
+        )
+
     score_data = ScoreData(
         title=safe_title,
         tempo_bpm=safe_tempo,
@@ -259,6 +362,16 @@ def build_blank_playground_score(
             "playground_config": {
                 "clef_mode": safe_clef_mode,
                 "measures": safe_measures,
+                "pickup_beats": pickup_beats_val if has_pickup else None,
+            },
+            "structure": {
+                "hasPickup": has_pickup,
+                "pickupBeatsInUnit": pickup_beats_val,
+                "pickupQuarterBeats": pickup_quarters,
+                "baseTimeSignature": norm_time,
+                "baseBeats": beats,
+                "baseBeatType": beat_type,
+                "measures": structure_measures,
             },
         },
     )

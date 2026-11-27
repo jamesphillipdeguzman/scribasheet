@@ -11,12 +11,19 @@ import {
   Undo2,
 } from "lucide-react";
 import {
+  MeasureMeterControl,
+  type MeasureMeterChangePayload,
+  type PendingOverflowWarning,
+} from "@/features/editor/MeasureMeterControl";
+import {
   type EditableNoteType,
   type XmlAccidentalType,
   type XmlArticulationType,
   type XmlNoteInfo,
   type XmlNoteTarget,
 } from "@/features/editor/musicXmlEditor";
+import { type MeasureStructureInfo, type NavigationMarkerType } from "@/features/editor/musicXmlStructure";
+import { RepeatPaletteControl } from "@/features/editor/RepeatPaletteControl";
 import { midiToNoteName } from "@/lib/utils";
 
 const DURATION_PALETTE_ITEMS: Array<{
@@ -87,6 +94,14 @@ interface NotationCommandPaletteProps {
   onTranspose: (semitones: number) => void;
   onAddMeasure: () => void;
   onDeleteMeasure: () => void;
+  activeMeasureInfo?: MeasureStructureInfo | null;
+  pendingOverflow?: PendingOverflowWarning | null;
+  onDismissOverflow?: () => void;
+  onApplyMeasureMeter?: (payload: MeasureMeterChangePayload) => void;
+  onToggleRepeatBarline?: (measureNumber: number, kind: "forward" | "backward" | "both", repeatCount: number) => void;
+  onSetRepeatCount?: (measureNumber: number, repeatCount: number) => void;
+  onSetVoltaEnding?: (measureNumber: number, action: "start_1" | "start_2" | "end_ending" | "clear_ending") => void;
+  onToggleNavigationMarker?: (measureNumber: number, marker: NavigationMarkerType) => void;
 }
 
 export function NotationCommandPalette({
@@ -118,6 +133,14 @@ export function NotationCommandPalette({
   onTranspose,
   onAddMeasure,
   onDeleteMeasure,
+  activeMeasureInfo = null,
+  pendingOverflow = null,
+  onDismissOverflow,
+  onApplyMeasureMeter,
+  onToggleRepeatBarline,
+  onSetRepeatCount,
+  onSetVoltaEnding,
+  onToggleNavigationMarker,
 }: NotationCommandPaletteProps) {
   const [showShortcuts, setShowShortcuts] = useState(false);
 
@@ -409,6 +432,23 @@ export function NotationCommandPalette({
             >
               <Trash2 className="h-3 w-3" /> Bar
             </button>
+            {onApplyMeasureMeter && (
+              <MeasureMeterControl
+                measureInfo={activeMeasureInfo}
+                pendingOverflow={pendingOverflow}
+                onDismissOverflow={onDismissOverflow}
+                onApply={onApplyMeasureMeter}
+              />
+            )}
+            {onToggleRepeatBarline && onSetRepeatCount && onSetVoltaEnding && onToggleNavigationMarker && (
+              <RepeatPaletteControl
+                measureInfo={activeMeasureInfo}
+                onToggleRepeatBarline={onToggleRepeatBarline}
+                onSetRepeatCount={onSetRepeatCount}
+                onSetVoltaEnding={onSetVoltaEnding}
+                onToggleNavigationMarker={onToggleNavigationMarker}
+              />
+            )}
           </div>
         </div>
 
@@ -418,9 +458,9 @@ export function NotationCommandPalette({
             className="font-mono text-[11px] text-amber-950 font-medium dark:text-amber-200"
           >
             {selectedTarget
-              ? `Selected: ${selectedTarget.pitchMidi !== null ? midiToNoteName(selectedTarget.pitchMidi, keyFifths) : "Rest"} (${durLabel}${currentDotted ? "." : ""}) • m.${selectedTarget.measureNumber}`
+              ? `Selected: ${selectedTarget.pitchMidi !== null ? midiToNoteName(selectedTarget.pitchMidi, keyFifths) : "Rest"} (${durLabel}${currentDotted ? "." : ""}) • ${selectedTarget.measureNumber === 0 ? "Pickup (m.0)" : `m.${selectedTarget.measureNumber}`}`
               : selectedMeasureNumber !== null
-                ? `Selected: Measure ${selectedMeasureNumber} (Press Delete/Backspace to remove)`
+                ? `Selected: ${selectedMeasureNumber === 0 ? "Measure 0 (Pickup)" : `Measure ${selectedMeasureNumber}`} (Press Delete/Backspace to remove)`
                 : "Click a notehead to edit"}
           </span>
           {onUndo && (

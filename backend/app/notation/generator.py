@@ -1786,13 +1786,69 @@ def render_score_pdf(
     sec_per_beat = 60.0 / max(20.0, score.tempo_bpm)
     try:
         beats_per_measure = max(1, int(score.time_signature.split("/")[0]))
+        beat_type_denom = max(1, int(score.time_signature.split("/")[1]))
     except Exception:
         beats_per_measure = 4
-    sec_per_measure = sec_per_beat * beats_per_measure
-    total_measures = max(
-        4,
-        int(np.ceil((max((n.offset_sec for n in score.notes), default=4.0)) / sec_per_measure)),
+        beat_type_denom = 4
+    sec_per_measure = sec_per_beat * beats_per_measure * (4.0 / beat_type_denom)
+
+    raw_structure = score.analysis.get("structure") if isinstance(score.analysis, dict) else None
+    raw_struct_measures = (
+        raw_structure.get("measures")
+        if isinstance(raw_structure, dict) and isinstance(raw_structure.get("measures"), list)
+        else []
     )
+    measure_metas: list[dict[str, object]] = []
+    if raw_struct_measures:
+        cursor_sec = 0.0
+        for idx, m_item in enumerate(raw_struct_measures):
+            if not isinstance(m_item, dict):
+                continue
+            q_len = float(m_item.get("actualQuarters") or (beats_per_measure * (4.0 / beat_type_denom)))
+            dur_s = max(0.05, q_len * sec_per_beat)
+            measure_metas.append(
+                {
+                    "measureNumber": int(m_item.get("measureNumber", idx + 1)),
+                    "isPickup": bool(m_item.get("isPickup")),
+                    "startSec": cursor_sec,
+                    "endSec": cursor_sec + dur_s,
+                    "hasExplicitTimeChange": bool(m_item.get("hasExplicitTimeChange")),
+                    "timeBeats": int(m_item.get("timeBeats") or beats_per_measure),
+                    "timeBeatType": int(m_item.get("timeBeatType") or beat_type_denom),
+                    "forwardRepeat": bool(m_item.get("forwardRepeat")),
+                    "backwardRepeat": bool(m_item.get("backwardRepeat")),
+                    "repeatCount": int(m_item.get("repeatCount") or 2),
+                    "endingStart": m_item.get("endingStart") or [],
+                    "endingStop": m_item.get("endingStop") or [],
+                    "endingDiscontinue": m_item.get("endingDiscontinue") or [],
+                    "navigationMarkers": m_item.get("navigationMarkers") or [],
+                }
+            )
+            cursor_sec += dur_s
+    else:
+        total_measures = max(
+            4,
+            int(np.ceil((max((n.offset_sec for n in score.notes), default=4.0)) / sec_per_measure)),
+        )
+        for idx in range(total_measures):
+            measure_metas.append(
+                {
+                    "measureNumber": idx + 1,
+                    "isPickup": False,
+                    "startSec": idx * sec_per_measure,
+                    "endSec": (idx + 1) * sec_per_measure,
+                    "hasExplicitTimeChange": False,
+                    "timeBeats": beats_per_measure,
+                    "timeBeatType": beat_type_denom,
+                    "forwardRepeat": False,
+                    "backwardRepeat": False,
+                    "repeatCount": 2,
+                    "endingStart": [],
+                    "endingStop": [],
+                    "endingDiscontinue": [],
+                    "navigationMarkers": [],
+                }
+            )
 
     measures_per_sys = 4
     system_advance = (126.0 if aligned_note_lyrics else 114.0) if is_grand else (90.0 if aligned_note_lyrics else 78.0)
@@ -1801,40 +1857,118 @@ def render_score_pdf(
     treble_notes, bass_notes = _split_rh_lh_notes(score.notes) if is_grand else (score.notes, [])
     treble_ids = {n.id for n in treble_notes}
 
-    for sys_start_m in range(0, total_measures, measures_per_sys):
+    nav_labels_map = {
+        "segno": "Segno",
+        "coda": "Coda",
+        "fine": "Fine",
+        "to_coda": "To Coda",
+        "dc_al_fine": "D.C. al Fine",
+        "dc_al_coda": "D.C. al Coda",
+        "ds_al_fine": "D.S. al Fine",
+        "ds_al_coda": "D.S. al Coda",
+    }
+
+    active_volta_num: int | None = None
+
+    def _map_sec_to_sys_x(sec_val: float, sys_bars: list[dict[str, object]], col_w: float) -> float | None:
+        for local_i, bm in enumerate(sys_bars):
+            b0 = float(bm["startSec"])
+            b1 = float(bm["endSec"])
+            if b0 - 1e-4 <= sec_val < b1 + 1e-4:
+                frac = max(0.0, min(0.98, (sec_val - b0) / max(0.01, b1 - b0)))
+                return note_area_left + (local_i + frac) * col_w
+        return None
+
+    for sys_start_m in range(0, len(measure_metas), measures_per_sys):
         if y_cursor < min_y_cursor:
             c.showPage()
             page_num += 1
             y_cursor = draw_header(page_num)
 
-        draw_staff_system(y_cursor, measures_per_sys)
-        # Measure number placed cleanly in top-left gutter above chord lane
-        c.setFont("Helvetica", 7)
-        c.drawString(left_margin, y_cursor + 24, f"m. {sys_start_m + 1}")
+        sys_bars = measure_metas[sys_start_m : sys_start_m + measures_per_sys]
+        sys_count = max(1, len(sys_bars))
+        col_w = usable_w / float(sys_count)
+        draw_staff_system(y_cursor, sys_count)
 
-        sys_start_sec = sys_start_m * sec_per_measure
-        sys_dur_sec = measures_per_sys * sec_per_measure
-        sys_end_sec = sys_start_sec + sys_dur_sec
+        # Measure number placed cleanly in top-left gutter above chord lane
+        first_bar = sys_bars[0]
+        bar_label = "Pickup" if first_bar["isPickup"] else f"m. {first_bar['measureNumber']}"
+        c.setFont("Helvetica", 7)
+        c.drawString(left_margin, y_cursor + 24, bar_label)
+
+        y_treble_bottom = y_cursor - staff_height
+        y_bass_bottom = (y_cursor - bass_offset) - staff_height
+        y_bottom_bar = y_bass_bottom if is_grand else y_treble_bottom
+
+        # Draw per-measure meter changes, repeats, volta brackets, and navigation markings
+        for local_i, bm in enumerate(sys_bars):
+            bx0 = note_area_left + local_i * col_w
+            bx1 = bx0 + col_w
+            if local_i > 0 and not bm["isPickup"]:
+                c.setFont("Helvetica", 6.5)
+                c.drawString(bx0 + 2, y_cursor + 24, str(bm["measureNumber"]))
+
+            if bm["hasExplicitTimeChange"]:
+                ts_txt = f"{bm['timeBeats']}/{bm['timeBeatType']}"
+                c.setFont("Helvetica-Bold", 8)
+                c.drawString(bx0 + 3, y_cursor - 10, ts_txt)
+                if is_grand:
+                    c.drawString(bx0 + 3, y_cursor - bass_offset - 10, ts_txt)
+
+            if bm["forwardRepeat"]:
+                c.setLineWidth(1.5)
+                c.line(bx0 + 2, y_cursor, bx0 + 2, y_bottom_bar)
+                c.setLineWidth(0.6)
+                c.circle(bx0 + 6, y_cursor - 9, 1.1, stroke=1, fill=1)
+                c.circle(bx0 + 6, y_cursor - 15, 1.1, stroke=1, fill=1)
+
+            if bm["backwardRepeat"]:
+                c.setLineWidth(1.5)
+                c.line(bx1 - 2, y_cursor, bx1 - 2, y_bottom_bar)
+                c.setLineWidth(0.6)
+                c.circle(bx1 - 6, y_cursor - 9, 1.1, stroke=1, fill=1)
+                c.circle(bx1 - 6, y_cursor - 15, 1.1, stroke=1, fill=1)
+                if int(bm["repeatCount"]) > 2:
+                    c.setFont("Helvetica-Bold", 7)
+                    c.drawRightString(bx1 - 2, y_cursor + 12, f"{bm['repeatCount']}x")
+
+            e_starts = bm["endingStart"] or []
+            if e_starts:
+                active_volta_num = int(e_starts[0])
+            if active_volta_num is not None:
+                c.setLineWidth(0.8)
+                c.line(bx0, y_cursor + 18, bx1, y_cursor + 18)
+                if e_starts or local_i == 0:
+                    c.line(bx0, y_cursor + 10, bx0, y_cursor + 18)
+                    c.setFont("Helvetica-Bold", 7.5)
+                    c.drawString(bx0 + 3, y_cursor + 11, f"{active_volta_num}.")
+                e_closes = (bm["endingStop"] or []) + (bm["endingDiscontinue"] or [])
+                if e_closes:
+                    c.line(bx1, y_cursor + 10, bx1, y_cursor + 18)
+                    active_volta_num = None
+
+            navs = bm["navigationMarkers"] or []
+            if navs:
+                nav_str = "  ".join(nav_labels_map.get(nv, nv) for nv in navs)
+                c.setFont("Helvetica-Bold", 7.5)
+                c.drawRightString(bx1 - 4, y_cursor + 24, nav_str)
 
         # Draw chords in dedicated lane above treble staff (no collision with measure numbers)
         if include_chords:
             last_chord_x = -100.0
             for ch in score.chords:
-                if sys_start_sec <= ch.onset_sec < sys_end_sec:
-                    x = note_area_left + ((ch.onset_sec - sys_start_sec) / sys_dur_sec) * usable_w
+                x = _map_sec_to_sys_x(ch.onset_sec, sys_bars, col_w)
+                if x is not None:
                     if x - last_chord_x < 24.0:
                         x = last_chord_x + 24.0
                     c.setFont("Helvetica-Bold", 8.5)
                     c.drawString(x, y_cursor + 12, ch.symbol)
                     last_chord_x = x
 
-        y_treble_bottom = y_cursor - staff_height
-        y_bass_bottom = (y_cursor - bass_offset) - staff_height
-
         for n in score.notes:
-            if not (sys_start_sec <= n.onset_sec < sys_end_sec):
+            x = _map_sec_to_sys_x(n.onset_sec, sys_bars, col_w)
+            if x is None:
                 continue
-            x = note_area_left + ((n.onset_sec - sys_start_sec) / sys_dur_sec) * usable_w
             use_treble = (not is_grand) or (n.id in treble_ids)
             if use_treble:
                 steps_above = _midi_to_diatonic_step(n.pitch_midi) - treble_e4_step

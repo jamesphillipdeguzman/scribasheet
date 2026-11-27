@@ -1054,7 +1054,10 @@ def _strip_artificial_pickup_padding(root: ET.Element) -> bool:
     if effective_pickup_ql <= 1e-4 or effective_pickup_ql >= nominal_ql - 1e-4:
         return False
 
-    has_trailing_padding = any(info["total_ql"] > effective_pickup_ql + 1e-4 for info in part_infos)
+    has_trailing_padding = any(
+        info["total_ql"] >= nominal_ql - 1e-4 and info["total_ql"] > effective_pickup_ql + 1e-4
+        for info in part_infos
+    )
     if not has_trailing_padding:
         return False
 

@@ -197,6 +197,7 @@ def create_playground_project(
         tempo_bpm=payload.tempo_bpm,
         clef_mode=payload.clef_mode,
         measures=payload.measures,
+        pickup_beats=payload.pickup_beats,
     )
 
     project = Project(
