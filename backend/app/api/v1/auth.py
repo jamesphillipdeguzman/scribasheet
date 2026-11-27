@@ -18,7 +18,7 @@ from app.core.security import (
     verify_password,
 )
 from app.db.session import get_db
-from app.models import MediaAsset, User
+from app.models import Export, MediaAsset, Project, ProjectScore, User
 from app.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
@@ -187,12 +187,27 @@ def delete_my_account(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    assets = db.query(MediaAsset).filter(MediaAsset.user_id == current_user.id).all()
-    for asset in assets:
-        try:
-            storage_service.delete(asset.storage_path)
-        except Exception:
-            pass
+    asset_keys = [
+        r[0] for r in db.query(MediaAsset.storage_path).filter(MediaAsset.user_id == current_user.id).all() if r[0]
+    ]
+    export_keys = [
+        r[0] for r in db.query(Export.storage_path).filter(Export.user_id == current_user.id).all() if r[0]
+    ]
+    score_rows = (
+        db.query(ProjectScore.musicxml_path, ProjectScore.midi_path)
+        .join(Project, Project.id == ProjectScore.project_id)
+        .filter(Project.user_id == current_user.id)
+        .all()
+    )
+    score_keys = [k for pair in score_rows for k in pair if k]
+    all_keys = list(dict.fromkeys([*asset_keys, *export_keys, *score_keys]))
+
     db.delete(current_user)
     db.commit()
+
+    for key in all_keys:
+        try:
+            storage_service.delete(key)
+        except Exception:
+            pass
     return None

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import PLAN_LIMITS, get_current_user, get_owned_project, is_user_unlimited
+from app.api.deps import get_current_user, get_owned_project
 from app.api.v1.worker import ACTIVE_WORKER_STATUSES
 from app.audio.extraction_service import ensure_extracted_audio_asset
 from app.core.config import get_settings
@@ -67,17 +67,6 @@ def list_projects(
         .all()
     )
     return ProjectListResponse(items=items, total=total, page=page, page_size=page_size)
-
-
-def _enforce_project_quota(current_user: User, db: Session) -> None:
-    if not is_user_unlimited(current_user):
-        limits = PLAN_LIMITS.get(current_user.plan_tier, PLAN_LIMITS["free"])
-        current_count = db.query(Project).filter(Project.user_id == current_user.id).count()
-        if current_count >= int(limits["projects"]):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Project limit reached ({limits['projects']}) for your {current_user.plan_tier} plan.",
-            )
 
 
 def _clone_score_for_copy(
@@ -164,8 +153,6 @@ def create_project(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _enforce_project_quota(current_user, db)
-
     project = Project(
         user_id=current_user.id,
         title=payload.title.strip(),
@@ -187,8 +174,6 @@ def create_playground_project(
     db: Session = Depends(get_db),
 ):
     """Create a standalone blank MIDI Playground project with an initialized grand/treble/bass MusicXML score."""
-    _enforce_project_quota(current_user, db)
-
     title = payload.title.strip() or "Untitled Playground"
     score_data, musicxml_str = build_blank_playground_score(
         title=title,
@@ -212,26 +197,38 @@ def create_playground_project(
     db.add(project)
     db.flush()
 
-    xml_key = storage_service.build_key(current_user.id, project.id, "musicxml", "score.musicxml")
-    storage_service.save_bytes(
-        xml_key,
-        musicxml_str.encode("utf-8"),
-        content_type="application/vnd.recordare.musicxml+xml",
-    )
-    midi_bytes = score_data_to_midi_bytes(score_data)
-    midi_key = storage_service.build_key(current_user.id, project.id, "midi", "score.mid")
-    storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
-
-    db.add(
-        ProjectScore(
-            project_id=project.id,
-            version=1,
-            score_json=score_data.model_dump(),
-            musicxml_path=xml_key,
-            midi_path=midi_key,
+    written_keys: list[str] = []
+    try:
+        xml_key = storage_service.build_key(current_user.id, project.id, "musicxml", "score.musicxml")
+        storage_service.save_bytes(
+            xml_key,
+            musicxml_str.encode("utf-8"),
+            content_type="application/vnd.recordare.musicxml+xml",
         )
-    )
-    db.commit()
+        written_keys.append(xml_key)
+        midi_bytes = score_data_to_midi_bytes(score_data)
+        midi_key = storage_service.build_key(current_user.id, project.id, "midi", "score.mid")
+        storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
+        written_keys.append(midi_key)
+
+        db.add(
+            ProjectScore(
+                project_id=project.id,
+                version=1,
+                score_json=score_data.model_dump(),
+                musicxml_path=xml_key,
+                midi_path=midi_key,
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        for key in written_keys:
+            try:
+                storage_service.delete(key)
+            except Exception:
+                pass
+        raise
     db.refresh(project)
     return project
 
@@ -295,7 +292,6 @@ def duplicate_project(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _enforce_project_quota(current_user, db)
     copy_title = f"{project.title} (Copy)"[:120]
     copy = Project(
         user_id=current_user.id,
@@ -309,17 +305,27 @@ def duplicate_project(
     db.add(copy)
     db.flush()
 
-    if project.score:
-        db.add(
-            _clone_score_for_copy(
+    cloned_score: ProjectScore | None = None
+    try:
+        if project.score:
+            cloned_score = _clone_score_for_copy(
                 project.score,
                 owner_id=current_user.id,
                 target_project_id=copy.id,
                 target_title=copy_title,
             )
-        )
-
-    db.commit()
+            db.add(cloned_score)
+        db.commit()
+    except Exception:
+        db.rollback()
+        if cloned_score:
+            for key in (cloned_score.musicxml_path, cloned_score.midi_path):
+                if key:
+                    try:
+                        storage_service.delete(key)
+                    except Exception:
+                        pass
+        raise
     db.refresh(copy)
     return copy
 
@@ -337,7 +343,6 @@ def create_playground_copy(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project does not have a score to open in the MIDI Playground yet.",
         )
-    _enforce_project_quota(current_user, db)
 
     copy_title = (payload.title.strip() if payload.title else f"{project.title} (Playground Copy)")[:120]
     copy = Project(
@@ -352,8 +357,9 @@ def create_playground_copy(
     db.add(copy)
     db.flush()
 
-    db.add(
-        _clone_score_for_copy(
+    cloned_score: ProjectScore | None = None
+    try:
+        cloned_score = _clone_score_for_copy(
             project.score,
             owner_id=current_user.id,
             target_project_id=copy.id,
@@ -361,9 +367,18 @@ def create_playground_copy(
             mark_playground=True,
             copied_from_project_id=project.id,
         )
-    )
-
-    db.commit()
+        db.add(cloned_score)
+        db.commit()
+    except Exception:
+        db.rollback()
+        if cloned_score:
+            for key in (cloned_score.musicxml_path, cloned_score.midi_path):
+                if key:
+                    try:
+                        storage_service.delete(key)
+                    except Exception:
+                        pass
+        raise
     db.refresh(copy)
     return copy
 
@@ -523,11 +538,25 @@ def delete_project(
     project: Project = Depends(get_owned_project),
     db: Session = Depends(get_db),
 ):
+    keys_to_delete: list[str] = []
     for asset in project.media_assets:
-        try:
-            storage_service.delete(asset.storage_path)
-        except Exception:
-            pass
+        if asset.storage_path:
+            keys_to_delete.append(asset.storage_path)
+    for export_row in project.exports:
+        if export_row.storage_path:
+            keys_to_delete.append(export_row.storage_path)
+    if project.score:
+        if project.score.musicxml_path:
+            keys_to_delete.append(project.score.musicxml_path)
+        if project.score.midi_path:
+            keys_to_delete.append(project.score.midi_path)
+
     db.delete(project)
     db.commit()
+
+    for key in dict.fromkeys(keys_to_delete):
+        try:
+            storage_service.delete(key)
+        except Exception:
+            pass
     return None

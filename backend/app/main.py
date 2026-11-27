@@ -17,6 +17,7 @@ from app.api.v1 import api_v1_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, request_id_ctx
 from app.db.session import SessionLocal
+from app.storage.service import StorageCapacityError, StorageError, StoragePermissionError
 from app.workers.ws_manager import job_ws_manager
 
 configure_logging()
@@ -47,6 +48,30 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(StorageCapacityError)
+async def storage_capacity_exception_handler(_request: Request, exc: StorageCapacityError):
+    return JSONResponse(
+        status_code=507,
+        content={"detail": str(exc), "error_code": "STORAGE_CAPACITY_EXCEEDED"},
+    )
+
+
+@app.exception_handler(StoragePermissionError)
+async def storage_permission_exception_handler(_request: Request, exc: StoragePermissionError):
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc), "error_code": "STORAGE_PERMISSION_ERROR"},
+    )
+
+
+@app.exception_handler(StorageError)
+async def storage_backend_exception_handler(_request: Request, exc: StorageError):
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc), "error_code": "STORAGE_BACKEND_ERROR"},
+    )
 
 @app.middleware("http")
 async def request_context_and_security_headers(request: Request, call_next):

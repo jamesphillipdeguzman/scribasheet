@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_owned_project
+from app.api.deps import delete_unreferenced_storage_keys, get_current_user, get_owned_project
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import Project, ProjectScore, User
@@ -135,18 +135,38 @@ def update_project_score(
         musicxml_str = score_data_to_musicxml(score_payload)
     midi_bytes = score_data_to_midi_bytes(score_payload)
 
+    old_xml_key = score.musicxml_path
+    old_midi_key = score.midi_path
     xml_key = storage_service.build_key(current_user.id, project.id, "musicxml", "score.musicxml")
     storage_service.save_bytes(xml_key, musicxml_str.encode("utf-8"), content_type="application/vnd.recordare.musicxml+xml")
 
-    midi_key = storage_service.build_key(current_user.id, project.id, "midi", "score.mid")
-    storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
+    midi_key: str | None = None
+    try:
+        midi_key = storage_service.build_key(current_user.id, project.id, "midi", "score.mid")
+        storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
 
-    score.version += 1
-    score.score_json = score_payload.model_dump()
-    score.musicxml_path = xml_key
-    score.midi_path = midi_key
-    db.commit()
+        score.version += 1
+        score.score_json = score_payload.model_dump()
+        score.musicxml_path = xml_key
+        score.midi_path = midi_key
+        db.commit()
+    except Exception:
+        db.rollback()
+        for new_key in (xml_key, midi_key):
+            if new_key:
+                try:
+                    storage_service.delete(new_key)
+                except Exception:
+                    pass
+        raise
     db.refresh(score)
+    delete_unreferenced_storage_keys(
+        db,
+        [
+            old_xml_key if old_xml_key != xml_key else None,
+            old_midi_key if old_midi_key != midi_key else None,
+        ],
+    )
 
     return ProjectScoreResponse(
         id=score.id,
@@ -377,21 +397,41 @@ def regenerate_project_arrangement(
     musicxml_str = score_data_to_musicxml(new_score)
     midi_bytes = score_data_to_midi_bytes(new_score)
 
+    old_xml_key = score_row.musicxml_path
+    old_midi_key = score_row.midi_path
     xml_key = storage_service.build_key(current_user.id, project.id, "musicxml", "score.musicxml")
     storage_service.save_bytes(
         xml_key,
         musicxml_str.encode("utf-8"),
         content_type="application/vnd.recordare.musicxml+xml",
     )
-    midi_key = storage_service.build_key(current_user.id, project.id, "midi", "score.mid")
-    storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
+    midi_key: str | None = None
+    try:
+        midi_key = storage_service.build_key(current_user.id, project.id, "midi", "score.mid")
+        storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
 
-    score_row.version = int(score_row.version or 1) + 1
-    score_row.score_json = new_score.model_dump()
-    score_row.musicxml_path = xml_key
-    score_row.midi_path = midi_key
-    db.commit()
+        score_row.version = int(score_row.version or 1) + 1
+        score_row.score_json = new_score.model_dump()
+        score_row.musicxml_path = xml_key
+        score_row.midi_path = midi_key
+        db.commit()
+    except Exception:
+        db.rollback()
+        for new_key in (xml_key, midi_key):
+            if new_key:
+                try:
+                    storage_service.delete(new_key)
+                except Exception:
+                    pass
+        raise
     db.refresh(score_row)
+    delete_unreferenced_storage_keys(
+        db,
+        [
+            old_xml_key if old_xml_key != xml_key else None,
+            old_midi_key if old_midi_key != midi_key else None,
+        ],
+    )
 
     return ProjectScoreResponse(
         id=score_row.id,
@@ -445,6 +485,7 @@ def update_satb_assignments(
     analysis["satb"] = satb_meta
     score.analysis = analysis
 
+    old_midi_key = score_row.midi_path
     midi_bytes = score_data_to_midi_bytes(score)
     midi_key = storage_service.build_key(current_user.id, project.id, "midi", "score.mid")
     storage_service.save_bytes(midi_key, midi_bytes, content_type="audio/midi")
@@ -453,11 +494,20 @@ def update_satb_assignments(
     if score_row.musicxml_path and storage_service.exists(score_row.musicxml_path):
         musicxml_str = storage_service.read_bytes(score_row.musicxml_path).decode("utf-8")
 
-    score_row.version = int(score_row.version or 1) + 1
-    score_row.score_json = score.model_dump()
-    score_row.midi_path = midi_key
-    db.commit()
+    try:
+        score_row.version = int(score_row.version or 1) + 1
+        score_row.score_json = score.model_dump()
+        score_row.midi_path = midi_key
+        db.commit()
+    except Exception:
+        db.rollback()
+        try:
+            storage_service.delete(midi_key)
+        except Exception:
+            pass
+        raise
     db.refresh(score_row)
+    delete_unreferenced_storage_keys(db, [old_midi_key if old_midi_key != midi_key else None])
 
     return ProjectScoreResponse(
         id=score_row.id,

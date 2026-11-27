@@ -63,6 +63,13 @@ class UsageSummaryResponse(BaseModel):
     monthly_minutes_used: float
     monthly_minutes_limit: float
     project_count: int
-    project_limit: int
+    project_limit: int | None = None
+    file_count: int = 0
+    storage_used_bytes: int = 0
     storage_used_mb: float
-    storage_limit_mb: float
+    storage_limit_mb: float | None = None
+    storage_quota_enforced: bool = False
+    storage_backend: str = "local"
+    storage_status: str = "available"
+    storage_volume_free_mb: float | None = None
+    storage_volume_total_mb: float | None = None

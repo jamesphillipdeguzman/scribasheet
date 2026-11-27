@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.api.deps import PLAN_LIMITS, get_current_user, is_user_unlimited
+from app.api.deps import get_current_user
 from app.api.v1.worker import ACTIVE_WORKER_STATUSES
 from app.audio.processor import (
     MediaValidationError,
@@ -20,7 +20,12 @@ from app.db.session import get_db
 from app.models import MediaAsset, Project, TranscriptionJob, User
 from app.notation.omr import OMRError, validate_pdf_bytes
 from app.schemas.project import MediaAssetResponse
-from app.storage.service import sanitize_download_title, sanitize_filename, storage_service
+from app.storage.service import (
+    sanitize_download_title,
+    sanitize_filename,
+    storage_service,
+    translate_os_storage_error,
+)
 
 router = APIRouter(prefix="/uploads", tags=["Uploads"])
 
@@ -42,27 +47,6 @@ class ConfirmUploadRequest(BaseModel):
     filename: str
     content_type: str
     size_bytes: int
-
-
-def _enforce_storage_quota(db: Session, user: User, incoming_bytes: int, *, credit_bytes: int = 0) -> None:
-    if is_user_unlimited(user):
-        return
-    limits = PLAN_LIMITS.get(user.plan_tier, PLAN_LIMITS["free"])
-    limit_bytes = int(float(limits["storage_mb"]) * 1024 * 1024)
-    from sqlalchemy import func
-
-    used_bytes = (
-        db.query(func.coalesce(func.sum(MediaAsset.size_bytes), 0))
-        .filter(MediaAsset.user_id == user.id)
-        .scalar()
-        or 0
-    )
-    projected_bytes = max(0, int(used_bytes) - max(0, int(credit_bytes))) + int(incoming_bytes)
-    if projected_bytes > limit_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Storage quota reached ({limits['storage_mb']} MB) for your {user.plan_tier} plan.",
-        )
 
 
 def _is_video_asset(asset: MediaAsset) -> bool:
@@ -176,7 +160,6 @@ def confirm_presigned_upload(
             )
 
     asset_bytes = actual_size if actual_size is not None else payload.size_bytes
-    _enforce_storage_quota(db, current_user, asset_bytes)
 
     asset = MediaAsset(
         project_id=project.id,
@@ -257,12 +240,13 @@ async def upload_media(
         except MediaValidationError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
 
-    # Stream to temp file with strict size limit enforcement
+    # Stream to temp file with per-file payload safeguard
     total_bytes = 0
     suffix = Path(safe_name).suffix.lower()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp_path = Path(tmp.name)
-        try:
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = Path(tmp.name)
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
@@ -274,13 +258,21 @@ async def upload_media(
                         detail=f"File exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
                     )
                 tmp.write(chunk)
-        except HTTPException:
+    except HTTPException:
+        if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
-            raise
+        raise
+    except OSError as exc:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise translate_os_storage_error(exc, "upload buffering", safe_name) from exc
+    except Exception:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
 
-    credit_bytes = int(replace_target.size_bytes) if (will_delete_replaced and replace_target) else 0
+    storage_key: str | None = None
     try:
-        _enforce_storage_quota(db, current_user, total_bytes, credit_bytes=credit_bytes)
         if is_pdf:
             validate_pdf_bytes(tmp_path.read_bytes())
             duration_sec = None
@@ -318,7 +310,8 @@ async def upload_media(
         detail_msg = exc.message if hasattr(exc, "message") else str(exc)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail_msg)
     finally:
-        tmp_path.unlink(missing_ok=True)
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
     asset = MediaAsset(
         project_id=project.id,
@@ -335,7 +328,16 @@ async def upload_media(
     if duration_sec is not None:
         project.duration_seconds = duration_sec
     db.add(asset)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        if storage_key:
+            try:
+                storage_service.delete(storage_key)
+            except Exception:
+                pass
+        raise
     db.refresh(asset)
 
     # Remove replaced non-video original ONLY after new trimmed asset is committed safely

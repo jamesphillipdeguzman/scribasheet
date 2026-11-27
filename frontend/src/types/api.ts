@@ -24,9 +24,16 @@ export interface UsageSummary {
   monthly_minutes_used: number;
   monthly_minutes_limit: number;
   project_count: number;
-  project_limit: number;
+  project_limit?: number | null;
+  file_count?: number;
+  storage_used_bytes?: number;
   storage_used_mb: number;
-  storage_limit_mb: number;
+  storage_limit_mb?: number | null;
+  storage_quota_enforced?: boolean;
+  storage_backend?: string;
+  storage_status?: string;
+  storage_volume_free_mb?: number | null;
+  storage_volume_total_mb?: number | null;
 }
 
 export interface MediaAsset {

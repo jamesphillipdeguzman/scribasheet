@@ -1,6 +1,9 @@
+import errno
 import logging
 import os
 import re
+import shutil
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -11,10 +14,35 @@ from app.core.security import create_signed_download_token
 logger = logging.getLogger(__name__)
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _UNSAFE_DOWNLOAD_CHARS_RE = re.compile(r'[<>:"/\\|?*;\x00-\x1f\x7f]+')
+_LOW_DISK_THRESHOLD_BYTES = 256 * 1024 * 1024
+_FULL_DISK_THRESHOLD_BYTES = 16 * 1024 * 1024
 
 
 class StorageError(RuntimeError):
     """Raised when an object storage operation fails without falling back silently."""
+
+
+class StorageCapacityError(StorageError):
+    """Raised when underlying persistent storage capacity (e.g. ENOSPC) is exhausted."""
+
+
+class StoragePermissionError(StorageError):
+    """Raised when persistent storage cannot be written due to OS/filesystem permissions."""
+
+
+def translate_os_storage_error(exc: OSError, operation: str, key: str = "") -> StorageError:
+    """Translate OS/filesystem errors into structured infrastructure storage errors."""
+    win_err = getattr(exc, "winerror", None)
+    if exc.errno in (errno.ENOSPC, errno.EDQUOT) or win_err in (39, 112):
+        logger.error("Storage volume full during %s for key '%s': %s", operation, key, exc)
+        return StorageCapacityError(
+            "Server storage capacity has been reached. Unable to save file because the underlying storage volume is full."
+        )
+    if isinstance(exc, PermissionError) or exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+        logger.error("Storage permission error during %s for key '%s': %s", operation, key, exc)
+        return StoragePermissionError("Storage permission error while writing to persistent storage.")
+    logger.error("Persistent storage %s failed for key '%s': %s", operation, key, exc)
+    return StorageError(f"Persistent storage {operation} failed: {exc.strerror or type(exc).__name__}")
 
 
 class _CountingStream:
@@ -87,9 +115,46 @@ class StorageService:
         _validate_storage_key(key)
         root = get_settings().storage_root_path
         resolved = (root / key).resolve()
-        if not str(resolved).startswith(str(root)):
-            raise ValueError("Invalid storage key path traversal attempt")
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Invalid storage key path traversal attempt") from exc
         return resolved
+
+    def _atomic_write_local(self, dest: Path, key: str, write_fn: Any) -> int:
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise translate_os_storage_error(exc, "directory creation", key) from exc
+
+        tmp_path: Path | None = None
+        written = 0
+        try:
+            fd_handle = tempfile.NamedTemporaryFile(
+                dir=dest.parent,
+                prefix=f".{dest.name}.",
+                suffix=".tmp",
+                delete=False,
+            )
+            tmp_path = Path(fd_handle.name)
+            with fd_handle as f:
+                written = int(write_fn(f))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, dest)
+            return written
+        except StorageError:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            raise translate_os_storage_error(exc, "write", key) from exc
+        except Exception:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            raise
 
     def save_bytes(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
         _validate_storage_key(key)
@@ -109,8 +174,12 @@ class StorageService:
             return key
 
         dest = self._local_path(key)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
+
+        def _write(f: Any) -> int:
+            f.write(data)
+            return len(data)
+
+        self._atomic_write_local(dest, key, _write)
         return key
 
     def save_stream(
@@ -137,15 +206,18 @@ class StorageService:
             return key, counting.bytes_read
 
         dest = self._local_path(key)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        total = 0
-        with dest.open("wb") as f:
+
+        def _write_stream(f: Any) -> int:
+            total = 0
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
                     break
                 f.write(chunk)
                 total += len(chunk)
+            return total
+
+        total = self._atomic_write_local(dest, key, _write_stream)
         return key, total
 
     def read_bytes(self, key: str) -> bytes:
@@ -210,6 +282,48 @@ class StorageService:
         """Return object byte size from R2/S3 head_object or local file stat, if available."""
         meta = self.get_object_metadata(key)
         return meta["size_bytes"] if meta else None
+
+    def get_storage_health(self) -> dict[str, Any]:
+        """Inspect actual storage backend health and infrastructure capacity where available."""
+        if self.is_object_storage:
+            return {
+                "backend": self.backend,
+                "writable": True,
+                "status": "available",
+                "volume_total_bytes": None,
+                "volume_free_bytes": None,
+                "volume_used_bytes": None,
+            }
+        try:
+            root = get_settings().storage_root_path
+            usage = shutil.disk_usage(root)
+            writable = os.access(root, os.W_OK)
+            if not writable:
+                status_val = "unavailable"
+            elif usage.free < _FULL_DISK_THRESHOLD_BYTES:
+                status_val = "full"
+            elif usage.free < _LOW_DISK_THRESHOLD_BYTES or (usage.total > 0 and usage.free / usage.total < 0.05):
+                status_val = "low_space"
+            else:
+                status_val = "available"
+            return {
+                "backend": self.backend,
+                "writable": writable,
+                "status": status_val,
+                "volume_total_bytes": int(usage.total),
+                "volume_free_bytes": int(usage.free),
+                "volume_used_bytes": int(usage.used),
+            }
+        except OSError as exc:
+            logger.warning("Unable to inspect local storage disk usage: %s", exc)
+            return {
+                "backend": self.backend,
+                "writable": False,
+                "status": "unavailable",
+                "volume_total_bytes": None,
+                "volume_free_bytes": None,
+                "volume_used_bytes": None,
+            }
 
     def delete(self, key: str) -> None:
         _validate_storage_key(key)

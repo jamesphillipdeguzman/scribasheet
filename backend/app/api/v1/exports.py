@@ -37,7 +37,7 @@ from app.notation.generator import (
 from app.notation.omr import sanitize_omr_musicxml
 from app.schemas.export import ExportCreateRequest, ExportResponse
 from app.schemas.score import ScoreData
-from app.storage.service import sanitize_download_title, sanitize_filename, storage_service
+from app.storage.service import StorageError, sanitize_download_title, sanitize_filename, storage_service
 
 router = APIRouter(tags=["Exports"])
 
@@ -365,6 +365,12 @@ def create_export(
         db.refresh(export)
     except HTTPException:
         export.status = "failed"
+        export.completed_at = datetime.now(UTC)
+        db.commit()
+        raise
+    except StorageError as exc:
+        export.status = "failed"
+        export.error_message = str(exc)
         export.completed_at = datetime.now(UTC)
         db.commit()
         raise

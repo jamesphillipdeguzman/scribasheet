@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_owned_project
+from app.api.deps import delete_unreferenced_storage_keys, get_current_user, get_owned_project
 from app.api.v1.worker import get_worker_availability
 from app.db.session import get_db
 from app.models import (
@@ -148,6 +148,8 @@ def update_project_lyrics(
         }
     )
 
+    old_xml_key: str | None = None
+    new_xml_key: str | None = None
     score_row = db.query(ProjectScore).filter(ProjectScore.project_id == project.id).first()
     if score_row:
         score_dict = dict(score_row.score_json or {})
@@ -173,6 +175,7 @@ def update_project_lyrics(
 
         if score_dict.get("notes"):
             try:
+                old_xml_key = score_row.musicxml_path
                 validated = ScoreData(**score_dict)
                 xml_str = score_data_to_musicxml(validated)
                 xml_key = storage_service.build_key(current_user.id, project.id, "musicxml", "score.musicxml")
@@ -181,6 +184,7 @@ def update_project_lyrics(
                     xml_str.encode("utf-8"),
                     content_type="application/vnd.recordare.musicxml+xml",
                 )
+                new_xml_key = xml_key
                 score_row.musicxml_path = xml_key
             except Exception:
                 pass
@@ -202,7 +206,18 @@ def update_project_lyrics(
             )
         )
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        if new_xml_key:
+            try:
+                storage_service.delete(new_xml_key)
+            except Exception:
+                pass
+        raise
+    if new_xml_key and old_xml_key and old_xml_key != new_xml_key:
+        delete_unreferenced_storage_keys(db, [old_xml_key])
     return updated
 
 

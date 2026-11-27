@@ -375,7 +375,7 @@ export function LandingPage() {
                 name: "Studio",
                 badge: "Configurable Tier",
                 desc: "For composers and multi-instrument production workflows.",
-                features: ["1,500 monthly transcription minutes", "25 GB private media storage", "Multi-instrument & stem workflows", "Priority background workers"],
+                features: ["1,500 monthly transcription minutes", "Uncapped private project & media storage", "Multi-instrument & stem workflows", "Priority background workers"],
               },
             ].map((plan) => (
               <div key={plan.name} className="rounded-xl border border-[#27273A] bg-[#11111B] p-6 flex flex-col justify-between">

@@ -6,7 +6,33 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { useAuth } from "@/features/auth/AuthContext";
+import { formatBytes } from "@/lib/utils";
 import { api } from "@/services/api";
+
+function getStorageStatusMeta(status?: string): { label: string; className: string } {
+  switch (status) {
+    case "full":
+      return {
+        label: "Volume Full",
+        className: "border-red-500/40 bg-red-500/15 text-red-300",
+      };
+    case "low_space":
+      return {
+        label: "Low Server Space",
+        className: "border-amber-500/40 bg-amber-500/15 text-amber-200",
+      };
+    case "unavailable":
+      return {
+        label: "Storage Unavailable",
+        className: "border-red-500/40 bg-red-500/15 text-red-300",
+      };
+    default:
+      return {
+        label: "Available",
+        className: "border-emerald-500/35 bg-emerald-500/10 text-emerald-300",
+      };
+  }
+}
 
 export function SettingsPage() {
   const { user, usage, refreshUser, logout } = useAuth();
@@ -66,33 +92,61 @@ export function SettingsPage() {
           </CardContent>
         </Card>
 
-        {usage && (
-          <Card>
-            <CardHeader>
-              <CardTitle>Plan &amp; Usage ({usage.plan_tier.toUpperCase()})</CardTitle>
-            </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-3 text-sm">
-              <div className="rounded-lg border border-[#27273A] bg-[#09090F] p-4">
-                <div className="text-xs text-[#A1A1AA]">Monthly Minutes</div>
-                <div className="mt-1 text-lg font-semibold">
-                  {usage.monthly_minutes_used} / {usage.monthly_minutes_limit}
+        {usage && (() => {
+          const isUnlimited = Boolean(usage.is_unlimited || user?.is_unlimited);
+          const planLabel = usage.plan_label || (isUnlimited ? "UNLIMITED" : usage.plan_tier.toUpperCase());
+          const storageUsedDisplay =
+            typeof usage.storage_used_bytes === "number"
+              ? formatBytes(usage.storage_used_bytes)
+              : `${usage.storage_used_mb} MB`;
+          const statusMeta = getStorageStatusMeta(usage.storage_status);
+          return (
+            <Card>
+              <CardHeader>
+                <CardTitle>Plan &amp; Usage ({planLabel})</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid gap-4 sm:grid-cols-3 text-sm">
+                  <div className="rounded-lg border border-[#27273A] bg-[#09090F] p-4">
+                    <div className="text-xs text-[#A1A1AA]">Monthly Minutes</div>
+                    <div className="mt-1 text-lg font-semibold">
+                      {isUnlimited
+                        ? `${usage.monthly_minutes_used} min used`
+                        : `${usage.monthly_minutes_used} / ${usage.monthly_minutes_limit} min`}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-[#27273A] bg-[#09090F] p-4">
+                    <div className="text-xs text-[#A1A1AA]">Stored Projects</div>
+                    <div className="mt-1 text-lg font-semibold">{usage.project_count}</div>
+                    <div className="mt-1 text-xs text-[#A1A1AA]">No application project cap</div>
+                  </div>
+                  <div className="rounded-lg border border-[#27273A] bg-[#09090F] p-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs text-[#A1A1AA]">Private Storage Used</span>
+                      <span
+                        data-testid="storage-health-badge"
+                        className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusMeta.className}`}
+                      >
+                        {statusMeta.label}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-lg font-semibold" data-testid="private-storage-used">
+                      {storageUsedDisplay}
+                    </div>
+                    {typeof usage.file_count === "number" && (
+                      <div className="mt-1 text-xs text-[#A1A1AA]">
+                        {usage.file_count} stored {usage.file_count === 1 ? "file" : "files"}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-              <div className="rounded-lg border border-[#27273A] bg-[#09090F] p-4">
-                <div className="text-xs text-[#A1A1AA]">Projects</div>
-                <div className="mt-1 text-lg font-semibold">
-                  {usage.project_count} / {usage.project_limit}
-                </div>
-              </div>
-              <div className="rounded-lg border border-[#27273A] bg-[#09090F] p-4">
-                <div className="text-xs text-[#A1A1AA]">Private Storage</div>
-                <div className="mt-1 text-lg font-semibold">
-                  {usage.storage_used_mb} / {usage.storage_limit_mb} MB
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
+                <p className="text-xs text-[#A1A1AA]" data-testid="storage-policy-note">
+                  No application storage quota. You can store projects and supported files without an artificial per-user cap, subject to available server storage capacity.
+                </p>
+              </CardContent>
+            </Card>
+          );
+        })()}
 
         <Card className="border-red-500/30">
           <CardHeader>

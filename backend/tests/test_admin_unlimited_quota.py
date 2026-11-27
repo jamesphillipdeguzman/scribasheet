@@ -170,16 +170,14 @@ def test_free_and_pro_limits_and_client_spoof_rejection(client, db_session, monk
     db_session.add(UsageRecord(user_id=free_user_id, operation="transcription_minutes", quantity=30.0))
     db_session.commit()
 
-    # Create 15 FREE projects -> 16th fails with 403
+    # Create 16 FREE projects -> allowed (uncapped at application level)
     p_ids: list[str] = []
-    for i in range(15):
+    for i in range(16):
         pr = client.post("/api/v1/projects", headers=free_headers, json={"title": f"Free {i}"})
-        assert pr.status_code == 201
+        assert pr.status_code == 201, pr.text
         p_ids.append(pr.json()["id"])
-    over_proj = client.post("/api/v1/projects", headers=free_headers, json={"title": "Free 16"})
-    assert over_proj.status_code == 403
 
-    # Storage limit (250 MB) enforced on upload
+    # Uploads beyond 250 MB are allowed (no arbitrary 250 MB private storage ceiling)
     db_session.add(
         MediaAsset(
             project_id=p_ids[0],
@@ -188,7 +186,7 @@ def test_free_and_pro_limits_and_client_spoof_rejection(client, db_session, monk
             storage_path=f"users/{free_user_id}/projects/{p_ids[0]}/originals/big.wav",
             original_filename="big.wav",
             mime_type="audio/wav",
-            size_bytes=250 * 1024 * 1024,
+            size_bytes=260 * 1024 * 1024,
         )
     )
     db_session.commit()
@@ -198,7 +196,15 @@ def test_free_and_pro_limits_and_client_spoof_rejection(client, db_session, monk
         data={"project_id": p_ids[0]},
         files={"file": ("over.wav", _make_wav_bytes(), "audio/wav")},
     )
-    assert over_storage.status_code == 403
+    assert over_storage.status_code == 201, over_storage.text
+
+    usage_res = client.get("/api/v1/users/me/usage", headers=free_headers)
+    assert usage_res.status_code == 200
+    assert usage_res.json()["project_count"] == 16
+    assert usage_res.json()["project_limit"] is None
+    assert usage_res.json()["storage_limit_mb"] is None
+    assert usage_res.json()["storage_quota_enforced"] is False
+    assert usage_res.json()["storage_used_mb"] >= 260.0
 
     # Monthly minute limit enforced on transcription start
     over_min = client.post(

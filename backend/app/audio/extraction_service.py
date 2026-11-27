@@ -10,14 +10,13 @@ from typing import Literal
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.v1.uploads import _enforce_storage_quota
 from app.audio.processor import (
     MediaValidationError,
     extract_audio_from_video,
     is_supported_video_file,
 )
 from app.models import MediaAsset, Project, User
-from app.storage.service import sanitize_download_title, storage_service
+from app.storage.service import sanitize_download_title, storage_service, translate_os_storage_error
 
 EXTRACTED_AUDIO_MIME_TYPES: dict[Literal["mp3", "wav"], str] = {
     "mp3": "audio/mpeg",
@@ -95,27 +94,28 @@ def ensure_extracted_audio_asset(
             ) from exc
 
         mime_type = EXTRACTED_AUDIO_MIME_TYPES[fmt]
-        with tempfile.TemporaryDirectory(prefix="scriba_extract_") as tmpdir:
-            out_path = Path(tmpdir) / f"extracted.{fmt}"
-            try:
-                out_meta = extract_audio_from_video(local_video_path, out_path, fmt)
-            except MediaValidationError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=exc.message,
-                ) from exc
+        try:
+            with tempfile.TemporaryDirectory(prefix="scriba_extract_") as tmpdir:
+                out_path = Path(tmpdir) / f"extracted.{fmt}"
+                try:
+                    out_meta = extract_audio_from_video(local_video_path, out_path, fmt)
+                except MediaValidationError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=exc.message,
+                    ) from exc
 
-            out_size = out_path.stat().st_size
-            _enforce_storage_quota(db, user, out_size)
-
-            storage_key = storage_service.build_key(
-                user.id,
-                project.id,
-                f"extracted/{source_asset.id}",
-                f"audio.{fmt}",
-            )
-            with out_path.open("rb") as f:
-                storage_service.save_stream(storage_key, f, content_type=mime_type)
+                out_size = out_path.stat().st_size
+                storage_key = storage_service.build_key(
+                    user.id,
+                    project.id,
+                    f"extracted/{source_asset.id}",
+                    f"audio.{fmt}",
+                )
+                with out_path.open("rb") as f:
+                    storage_service.save_stream(storage_key, f, content_type=mime_type)
+        except OSError as exc:
+            raise translate_os_storage_error(exc, "audio extraction") from exc
 
         download_name = f"{sanitize_download_title(project.title)}.{fmt}"
         if existing is not None and force:
@@ -127,7 +127,15 @@ def ensure_extracted_audio_asset(
             existing.duration_seconds = out_meta.duration_seconds
             existing.sample_rate = out_meta.sample_rate
             existing.channels = out_meta.channels
-            db.commit()
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                try:
+                    storage_service.delete(storage_key)
+                except Exception:
+                    pass
+                raise
             db.refresh(existing)
             if old_key != storage_key:
                 try:
@@ -149,6 +157,14 @@ def ensure_extracted_audio_asset(
             channels=out_meta.channels,
         )
         db.add(extracted)
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            try:
+                storage_service.delete(storage_key)
+            except Exception:
+                pass
+            raise
         db.refresh(extracted)
         return extracted

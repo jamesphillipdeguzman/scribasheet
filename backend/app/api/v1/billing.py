@@ -50,7 +50,7 @@ def list_plans():
                 "limits": PLAN_LIMITS["studio"],
                 "features": [
                     "1,500 monthly transcription minutes",
-                    "Expanded private media storage (25 GB)",
+                    "Uncapped private project & media storage (infrastructure capacity applies)",
                     "Multi-instrument & stem separation workflows",
                     "Dedicated priority worker capacity",
                 ],

@@ -23,7 +23,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { useAuth } from "@/features/auth/AuthContext";
-import { formatDuration, formatLocalDateTime, SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
+import { formatBytes, formatDuration, formatLocalDateTime, SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
 import { api } from "@/services/api";
 import type { Project } from "@/types/api";
 
@@ -199,21 +199,44 @@ export function DashboardPage() {
               <Card>
                 <CardContent className="p-4">
                   <div className="text-xs text-[#A1A1AA]">Active Projects</div>
-                  <div className="mt-1 text-xl font-semibold">
-                    {usage.project_count}{" "}
-                    {!isUnlimited && (
-                      <span className="text-sm font-normal text-[#A1A1AA]">/ {usage.project_limit}</span>
-                    )}
+                  <div className="mt-1 flex items-baseline justify-between">
+                    <span className="text-xl font-semibold">
+                      {usage.project_count}{" "}
+                      <span className="text-sm font-normal text-[#A1A1AA]">stored</span>
+                    </span>
+                    <span className="text-[11px] text-[#A1A1AA]">Uncapped</span>
                   </div>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="p-4">
-                  <div className="text-xs text-[#A1A1AA]">Private Media Storage</div>
-                  <div className="mt-1 text-xl font-semibold">
-                    {usage.storage_used_mb}{" "}
-                    <span className="text-sm font-normal text-[#A1A1AA]">
-                      {isUnlimited ? "MB" : `/ ${usage.storage_limit_mb} MB`}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-[#A1A1AA]">Private Media Storage</span>
+                    {(usage.storage_status === "low_space" ||
+                      usage.storage_status === "full" ||
+                      usage.storage_status === "unavailable") && (
+                      <span
+                        data-testid="dashboard-storage-warning"
+                        className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-200"
+                      >
+                        {usage.storage_status === "full"
+                          ? "Volume Full"
+                          : usage.storage_status === "unavailable"
+                            ? "Unavailable"
+                            : "Low Disk Space"}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 flex items-baseline justify-between gap-2">
+                    <span className="text-xl font-semibold" data-testid="dashboard-storage-used">
+                      {typeof usage.storage_used_bytes === "number"
+                        ? formatBytes(usage.storage_used_bytes)
+                        : `${usage.storage_used_mb} MB`}
+                    </span>
+                    <span className="text-[11px] text-[#A1A1AA]">
+                      {typeof usage.file_count === "number"
+                        ? `${usage.file_count} ${usage.file_count === 1 ? "file" : "files"}`
+                        : "No app quota"}
                     </span>
                   </div>
                 </CardContent>
