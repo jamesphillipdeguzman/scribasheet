@@ -30,6 +30,7 @@ interface NotationMidiBarProps {
   activeDuration: EditableNoteType;
   activeDotted: boolean;
   activeVoice: "1" | "2";
+  restInputMode?: boolean;
   selectedTarget: XmlNoteTarget | null;
   metronomeSettings?: MetronomeSettings;
   onMetronomeSettingsChange?: (next: MetronomeSettings) => void;
@@ -48,6 +49,7 @@ export function NotationMidiBar({
   activeDuration,
   activeDotted,
   activeVoice,
+  restInputMode = false,
   selectedTarget,
   metronomeSettings,
   onMetronomeSettingsChange,
@@ -82,9 +84,10 @@ export function NotationMidiBar({
 
     const effectiveStaff: 1 | 2 = clefMode === "bass" ? 2 : targetStaff;
     const res = insertStepMidiNotesIntoXml(activeXmlRef.current, {
-      pitchesMidi: pitches,
+      pitchesMidi: restInputMode ? [] : pitches,
       durationType: activeDuration,
       dotted: activeDotted,
+      isRest: restInputMode,
       voice: activeVoice,
       staffNumber: effectiveStaff,
       cursorTarget: selectedTargetRef.current,
@@ -92,7 +95,7 @@ export function NotationMidiBar({
     if (res) {
       onCommitXml(res.xml, res.nextCursorTarget);
     }
-  }, [activeDuration, activeDotted, activeVoice, clefMode, onCommitXml, targetStaff]);
+  }, [activeDuration, activeDotted, activeVoice, clefMode, onCommitXml, restInputMode, targetStaff]);
 
   const stopRecordingInternal = useCallback(
     (commit: boolean) => {

@@ -40,13 +40,14 @@ import {
   setXmlNoteDuration,
   setXmlNotePitch,
   setXmlNoteVoice,
+  stepNoteDurationType,
   toggleMeasureNavigationMarker,
   toggleMeasureRepeatBarline,
   toggleXmlNoteArticulation,
   toggleXmlNoteDot,
   toggleXmlNoteSlur,
   toggleXmlNoteTie,
-  toggleXmlNoteTriplet,
+  toggleXmlNoteTuplet,
   transposeXmlNote,
   type XmlAccidentalType,
   type XmlArticulationType,
@@ -290,6 +291,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const highlightedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
   const selectedSvgRef = useRef<Array<{ el: Element; origFill: string | null }>>([]);
   const svgNoteTargetMapRef = useRef<WeakMap<Element, XmlNoteTarget>>(new WeakMap());
+  const renderedNoteHitboxesRef = useRef<Array<{ el: Element; target: XmlNoteTarget }>>([]);
   const staffLineSpacingMapRef = useRef<Map<string, number>>(new Map());
   interface MeasureBoundingRect {
     measureNumber: number;
@@ -317,6 +319,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const [followCursor, setFollowCursor] = useState(true);
   const [editMode, setEditMode] = useState(Boolean(defaultEditMode));
   const [noteInputMode, setNoteInputMode] = useState(false);
+  const [restInputMode, setRestInputMode] = useState(false);
+  const [activeTupletActual, setActiveTupletActual] = useState<number | null>(null);
   const [activeDuration, setActiveDuration] = useState<EditableNoteType>("quarter");
   const [activeDotted, setActiveDotted] = useState(false);
   const [activeVoice, setActiveVoice] = useState<"1" | "2">("1");
@@ -915,6 +919,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
 
     // Map rendered SVG notehead elements to XmlNoteTarget AND build canonical event -> SVG notehead index
     const newMap = new WeakMap<Element, XmlNoteTarget>();
+    const newHitboxes: Array<{ el: Element; target: XmlNoteTarget }> = [];
     const newSpacingMap = new Map<string, number>();
     const measureBoundsMap = new Map<number, { minX: number; minY: number; maxX: number; maxY: number }>();
     const staffMapping = buildStaffIndexMapping(resolvedXml ?? musicxml);
@@ -1048,27 +1053,57 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
               const timelineSec = wholeNotesToTimeSec(activeTimeline, scoreWhole, tempoBpm);
 
               for (const gve of se.graphicalVoiceEntries || []) {
+                let gveNoteIdx = 0;
                 for (const gn of gve.notes || []) {
+                  const noteIdxInEntry = gveNoteIdx++;
                   const svgEl = gn.getSVGGElement?.();
                   if (!svgEl) continue;
                   const isRest = typeof gn.sourceNote?.isRest === "function" ? gn.sourceNote.isRest() : false;
                   const halfTone = gn.sourceNote?.Pitch?.halfTone;
                   const midi = typeof halfTone === "number" ? halfTone + 12 : null;
+                  const stableId = `p${staffLoc.partIndex}:m${mNum}:s${staffLoc.staffNumber}:o${Math.round(scoreWhole * 1000)}:p${midi ?? "rest"}`;
                   const target: XmlNoteTarget = {
                     partIndex: staffLoc.partIndex,
                     measureNumber: mNum,
-                    onsetWhole: rawOnsetWhole,
+                    onsetWhole: scoreWhole,
                     pitchMidi: midi,
                     staffNumber: staffLoc.staffNumber,
+                    noteId: stableId,
                   };
-                  newMap.set(svgEl, target);
-                  svgEl.setAttribute("data-mxml-note", "true");
-                  // Also map individual child noteheads (e.g., g.vf-notehead inside g.vf-stavenote)
-                  for (const nh of Array.from(svgEl.querySelectorAll("g.vf-notehead"))) {
-                    if (!newMap.has(nh)) {
-                      newMap.set(nh, target);
+
+                  const gnExt = gn as unknown as {
+                    getNoteheadSVGs?: () => Element[];
+                    vfnoteIndex?: number;
+                  };
+                  const explicitHeads =
+                    typeof gnExt.getNoteheadSVGs === "function" ? gnExt.getNoteheadSVGs() : [];
+                  const fallbackHeads = Array.from(svgEl.querySelectorAll("g.vf-notehead"));
+                  const headIdx =
+                    typeof gnExt.vfnoteIndex === "number" ? gnExt.vfnoteIndex : noteIdxInEntry;
+                  const specificHeadEl =
+                    explicitHeads[0] ??
+                    fallbackHeads[headIdx] ??
+                    (!isRest && fallbackHeads.length === 1 ? fallbackHeads[0] : null);
+
+                  if (specificHeadEl) {
+                    newMap.set(specificHeadEl, target);
+                    specificHeadEl.setAttribute("data-mxml-note", "true");
+                    if (specificHeadEl instanceof SVGElement || specificHeadEl instanceof HTMLElement) {
+                      specificHeadEl.style.pointerEvents = "all";
+                      specificHeadEl.style.cursor = "pointer";
                     }
-                    nh.setAttribute("data-mxml-note", "true");
+                    newHitboxes.push({ el: specificHeadEl, target });
+                  }
+                  if (!newMap.has(svgEl)) {
+                    newMap.set(svgEl, target);
+                    svgEl.setAttribute("data-mxml-note", "true");
+                    if (svgEl instanceof SVGElement || svgEl instanceof HTMLElement) {
+                      svgEl.style.pointerEvents = "all";
+                      svgEl.style.cursor = "pointer";
+                    }
+                    if (!specificHeadEl) {
+                      newHitboxes.push({ el: svgEl, target });
+                    }
                   }
 
                   if (isRest) continue;
@@ -1131,6 +1166,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       // Ignore graphic indexing errors
     }
     svgNoteTargetMapRef.current = newMap;
+    renderedNoteHitboxesRef.current = newHitboxes;
     staffLineSpacingMapRef.current = newSpacingMap;
     measureRectsRef.current = Array.from(measureBoundsMap.entries()).map(([measureNumber, b]) => ({
       measureNumber,
@@ -1151,18 +1187,25 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
 
     const activeSel = selectedTargetRef.current;
     if (activeSel && containerRef.current) {
-      for (const el of Array.from(containerRef.current.querySelectorAll('[data-mxml-note="true"]'))) {
-        const mapped = newMap.get(el);
-        if (
-          mapped &&
-          mapped.partIndex === activeSel.partIndex &&
-          mapped.measureNumber === activeSel.measureNumber &&
-          Math.abs(mapped.onsetWhole - activeSel.onsetWhole) < 0.015 &&
-          mapped.pitchMidi === activeSel.pitchMidi
-        ) {
-          applySelectedHighlight(el);
-          break;
-        }
+      const candidates = newHitboxes.length > 0
+        ? newHitboxes
+        : Array.from(containerRef.current.querySelectorAll('[data-mxml-note="true"]'))
+            .map((el) => ({ el, target: newMap.get(el) }))
+            .filter((item): item is { el: Element; target: XmlNoteTarget } => Boolean(item.target));
+      const matched =
+        (activeSel.noteId
+          ? candidates.find((c) => c.target.noteId === activeSel.noteId)
+          : undefined) ??
+        candidates.find(
+          (c) =>
+            c.target.partIndex === activeSel.partIndex &&
+            c.target.measureNumber === activeSel.measureNumber &&
+            Math.abs(c.target.onsetWhole - activeSel.onsetWhole) < 0.025 &&
+            c.target.pitchMidi === activeSel.pitchMidi &&
+            (activeSel.staffNumber === undefined || c.target.staffNumber === activeSel.staffNumber),
+        );
+      if (matched) {
+        applySelectedHighlight(matched.el);
       }
     }
   };
@@ -1182,6 +1225,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     }
     renderedEventsRef.current = [];
     svgNoteTargetMapRef.current = new WeakMap();
+    renderedNoteHitboxesRef.current = [];
     staffLineSpacingMapRef.current = new Map();
     measureRectsRef.current = [];
     setSelectedMeasureNumber(null);
@@ -1452,6 +1496,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       "5": "quarter",
       "6": "half",
       "7": "whole",
+      "8": "breve",
+      "9": "long",
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1474,10 +1520,21 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         return;
       }
 
-      if ((e.ctrlKey || e.metaKey) && e.key === "3" && selectedTarget) {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && /^[2-9]$/.test(e.key)) {
         e.preventDefault();
-        const res = toggleXmlNoteTriplet(resolvedXml, selectedTarget);
-        if (res) applyXmlEdit(res.xml, selectedTarget);
+        const actualNotes = Number.parseInt(e.key, 10);
+        if (selectedTarget) {
+          const res = toggleXmlNoteTuplet(resolvedXml, selectedTarget, actualNotes, {
+            rebalanceMeasure: true,
+          });
+          if (res) {
+            setActiveTupletActual(res.actualNotes);
+            if (res.warning) setPaletteStatusMsg(res.warning);
+            else applyXmlEdit(res.xml, res.nextTarget);
+          }
+        } else {
+          setActiveTupletActual((prev) => (prev === actualNotes ? null : actualNotes));
+        }
         return;
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1492,28 +1549,70 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         const dur = shortcutDurMap[e.key];
         setActiveDuration(dur);
         if (selectedTarget) {
-          const res = setXmlNoteDuration(resolvedXml, selectedTarget, dur);
-          if (res) applyXmlEdit(res.xml, res.nextTarget);
+          const res = setXmlNoteDuration(resolvedXml, selectedTarget, dur, {
+            rebalanceMeasure: true,
+          });
+          if (res) {
+            if (res.changed) applyXmlEdit(res.xml, res.nextTarget);
+            else if (res.warning) setPaletteStatusMsg(res.warning);
+          }
+        }
+        return;
+      }
+      if (lower === "w" || lower === "q") {
+        e.preventDefault();
+        const dir = lower === "w" ? "double" : "halve";
+        if (selectedTarget) {
+          const info = getXmlNoteInfo(resolvedXml, selectedTarget);
+          const curDur = info?.durationType ?? activeDuration;
+          const nextDur = stepNoteDurationType(curDur, dir);
+          setActiveDuration(nextDur);
+          const res = setXmlNoteDuration(resolvedXml, selectedTarget, nextDur, {
+            rebalanceMeasure: true,
+          });
+          if (res) {
+            if (res.changed) applyXmlEdit(res.xml, res.nextTarget);
+            else if (res.warning) setPaletteStatusMsg(res.warning);
+          }
+        } else {
+          setActiveDuration((prev) => stepNoteDurationType(prev, dir));
         }
         return;
       }
       if (e.key === ".") {
         e.preventDefault();
         if (selectedTarget) {
-          const res = toggleXmlNoteDot(resolvedXml, selectedTarget);
+          const res = toggleXmlNoteDot(resolvedXml, selectedTarget, { rebalanceMeasure: true });
           if (res) {
             setActiveDotted(res.dotted);
-            applyXmlEdit(res.xml, selectedTarget);
+            if (res.changed) applyXmlEdit(res.xml, res.nextTarget);
+            else if (res.warning) setPaletteStatusMsg(res.warning);
           }
         } else {
           setActiveDotted((v) => !v);
         }
         return;
       }
+      if (e.key === "0") {
+        e.preventDefault();
+        if (selectedTarget) {
+          const info = getXmlNoteInfo(resolvedXml, selectedTarget);
+          if (info && !info.isRest) {
+            const res = convertXmlNoteToRest(resolvedXml, selectedTarget);
+            if (res) applyXmlEdit(res.xml, res.nextTarget);
+            return;
+          }
+        }
+        setRestInputMode((v) => !v);
+        return;
+      }
       if (e.key === "Escape") {
-        if (noteInputMode || selectedTarget || selectedMeasureNumber !== null) {
+        if (noteInputMode) {
           e.preventDefault();
           setNoteInputMode(false);
+          setRestInputMode(false);
+        } else if (selectedTarget || selectedMeasureNumber !== null) {
+          e.preventDefault();
           clearSelectedHighlight();
           setSelectedTarget(null);
           setSelectedMeasureNumber(null);
@@ -1525,7 +1624,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         if (selectedTarget) {
           e.preventDefault();
           const res = deleteXmlNote(resolvedXml, selectedTarget);
-          if (res) applyXmlEdit(res.xml, null);
+          if (res) applyXmlEdit(res.xml, res.nextTarget);
         } else if (selectedMeasureNumber !== null) {
           e.preventDefault();
           const nextXml = deleteMeasureFromAllParts(resolvedXml, selectedMeasureNumber);
@@ -1539,10 +1638,10 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       }
       if (!selectedTarget) return;
 
-      if (lower === "t") {
+      if (lower === "t" || e.key === "+") {
         e.preventDefault();
         const res = toggleXmlNoteTie(resolvedXml, selectedTarget);
-        if (res.changed) applyXmlEdit(res.xml, selectedTarget);
+        if (res.changed) applyXmlEdit(res.xml, res.nextTarget ?? selectedTarget);
         else if (res.message) setPaletteStatusMsg(res.message);
       } else if (lower === "s") {
         e.preventDefault();
@@ -1553,10 +1652,6 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         e.preventDefault();
         const res = flipXmlNoteStem(resolvedXml, selectedTarget);
         if (res) applyXmlEdit(res.xml, selectedTarget);
-      } else if (e.key === "0") {
-        e.preventDefault();
-        const res = convertXmlNoteToRest(resolvedXml, selectedTarget);
-        if (res) applyXmlEdit(res.xml, null);
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         const res = transposeXmlNote(resolvedXml, selectedTarget, e.shiftKey ? 12 : 1);
@@ -1569,7 +1664,16 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [editMode, selectedTarget, selectedMeasureNumber, resolvedXml, applyXmlEdit, noteInputMode, isActiveTab]);
+  }, [
+    editMode,
+    selectedTarget,
+    selectedMeasureNumber,
+    resolvedXml,
+    activeDuration,
+    applyXmlEdit,
+    noteInputMode,
+    isActiveTab,
+  ]);
 
   const stopPreviewAudio = useCallback(() => {
     if (activePreviewPitchRef.current !== null) {
@@ -1601,53 +1705,96 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     };
   }, [cleanupDragVisuals]);
 
+  const resolveNoteTargetAtEvent = useCallback(
+    (e: { target: EventTarget | null; clientX: number; clientY: number }): { el: Element; target: XmlNoteTarget } | null => {
+      let ancestorMatch: { el: Element; target: XmlNoteTarget } | null = null;
+      let node: Element | null = e.target as Element | null;
+      while (node && node !== containerRef.current) {
+        const mapped = svgNoteTargetMapRef.current.get(node);
+        if (mapped) {
+          const isSharedChordGroup =
+            node.classList?.contains("vf-stavenote") && node.querySelectorAll("g.vf-notehead").length > 1;
+          if (!isSharedChordGroup) {
+            return { el: node, target: mapped };
+          }
+          if (!ancestorMatch) ancestorMatch = { el: node, target: mapped };
+        }
+        node = node.parentElement;
+      }
+
+      if (Number.isFinite(e.clientX) && Number.isFinite(e.clientY)) {
+        const hitboxes = renderedNoteHitboxesRef.current;
+        let best: { el: Element; target: XmlNoteTarget; distSq: number } | null = null;
+        for (const hb of hitboxes) {
+          if (typeof hb.el.getBoundingClientRect !== "function") continue;
+          const rect = hb.el.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) continue;
+          const pad = 6;
+          if (
+            e.clientX >= rect.left - pad &&
+            e.clientX <= rect.right + pad &&
+            e.clientY >= rect.top - pad &&
+            e.clientY <= rect.bottom + pad
+          ) {
+            const cx = (rect.left + rect.right) / 2;
+            const cy = (rect.top + rect.bottom) / 2;
+            const distSq = (e.clientX - cx) ** 2 + (e.clientY - cy) ** 2;
+            if (!best || distSq < best.distSq) {
+              best = { el: hb.el, target: hb.target, distSq };
+            }
+          }
+        }
+        if (best) return { el: best.el, target: best.target };
+      }
+
+      return ancestorMatch;
+    },
+    [],
+  );
+
   const handleScorePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!editMode || !onMusicXmlChange || (e.button !== undefined && e.button !== 0) || isPlaying) return;
     const currentXml = resolvedXml ?? musicxml;
     if (!currentXml) return;
 
-    let node: Element | null = e.target as Element | null;
-    while (node && node !== containerRef.current) {
-      const mapped = svgNoteTargetMapRef.current.get(node);
-      if (mapped) {
-        const info = getXmlNoteInfo(currentXml, mapped);
-        if (!info || info.isRest || !info.step || info.octave === null) return;
+    const hit = resolveNoteTargetAtEvent(e);
+    if (!hit) return;
 
-        const key = `${mapped.partIndex}:${mapped.staffNumber ?? 1}`;
-        const lineSpacingPx = staffLineSpacingMapRef.current.get(key) ?? Math.max(6, 10 * zoom);
-        const originLabel = formatPitchLabel(info.step, info.alter, info.octave);
-        const initialPitch = computeDiatonicDragPitch(
-          { step: info.step, octave: info.octave, alter: info.alter },
-          0,
-          info.keyFifths,
-        );
+    const mapped = hit.target;
+    const info = getXmlNoteInfo(currentXml, mapped);
+    if (!info || info.isRest || !info.step || info.octave === null) return;
 
-        dragSessionRef.current = {
-          pointerId: e.pointerId,
-          noteEl: node as HTMLElement,
-          target: mapped,
-          originInfo: info,
-          originLabel,
-          startClientY: e.clientY,
-          lineSpacingPx,
-          moved: false,
-          stepDelta: 0,
-          previewPitch: initialPitch,
-        };
+    const key = `${mapped.partIndex}:${mapped.staffNumber ?? 1}`;
+    const lineSpacingPx = staffLineSpacingMapRef.current.get(key) ?? Math.max(6, 10 * zoom);
+    const originLabel = formatPitchLabel(info.step, info.alter, info.octave);
+    const initialPitch = computeDiatonicDragPitch(
+      { step: info.step, octave: info.octave, alter: info.alter },
+      0,
+      info.keyFifths,
+    );
 
-        applySelectedHighlight(node);
-        setSelectedTarget(mapped);
-        setSelectedMeasureNumber(null);
-        setSelectedMeasureRect(null);
+    dragSessionRef.current = {
+      pointerId: e.pointerId,
+      noteEl: hit.el as HTMLElement,
+      target: mapped,
+      originInfo: info,
+      originLabel,
+      startClientY: e.clientY,
+      lineSpacingPx,
+      moved: false,
+      stepDelta: 0,
+      previewPitch: initialPitch,
+    };
 
-        try {
-          scrollContainerRef.current?.setPointerCapture?.(e.pointerId);
-        } catch {
-          // Ignore pointer capture restriction in tests/jsdom
-        }
-        return;
-      }
-      node = node.parentElement;
+    applySelectedHighlight(hit.el);
+    setSelectedTarget(mapped);
+    setSelectedMeasureNumber(null);
+    setSelectedMeasureRect(null);
+
+    try {
+      scrollContainerRef.current?.setPointerCapture?.(e.pointerId);
+    } catch {
+      // Ignore pointer capture restriction in tests/jsdom
     }
   };
 
@@ -1753,21 +1900,17 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     }
     // Direct single-notehead selection works even before Edit Notation is toggled on
     if (onMusicXmlChange) {
-      let node: Element | null = e.target as Element | null;
-      while (node && node !== containerRef.current) {
-        const mapped = svgNoteTargetMapRef.current.get(node);
-        if (mapped) {
-          if (isPlaying) {
-            onTogglePlay?.();
-          }
-          setEditMode(true);
-          applySelectedHighlight(node);
-          setSelectedTarget(mapped);
-          setSelectedMeasureNumber(null);
-          setSelectedMeasureRect(null);
-          return;
+      const hit = resolveNoteTargetAtEvent(e);
+      if (hit) {
+        if (isPlaying) {
+          onTogglePlay?.();
         }
-        node = node.parentElement;
+        setEditMode(true);
+        applySelectedHighlight(hit.el);
+        setSelectedTarget(hit.target);
+        setSelectedMeasureNumber(null);
+        setSelectedMeasureRect(null);
+        return;
       }
       if (editMode) {
         clearSelectedHighlight();
@@ -2088,6 +2231,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
               isPlaying={isPlaying}
               noteInputMode={noteInputMode}
               onToggleNoteInputMode={() => setNoteInputMode((v) => !v)}
+              restInputMode={restInputMode}
+              activeTupletActual={activeTupletActual}
               activeDuration={activeDuration}
               activeDotted={activeDotted}
               activeVoice={activeVoice}
@@ -2126,24 +2271,38 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
               onSelectDuration={(dur) => {
                 setActiveDuration(dur);
                 if (!selectedTarget) return;
-                const res = setXmlNoteDuration(activeXml, selectedTarget, dur);
-                if (res) applyXmlEdit(res.xml, res.nextTarget);
+                const res = setXmlNoteDuration(activeXml, selectedTarget, dur, {
+                  rebalanceMeasure: true,
+                });
+                if (res) {
+                  if (res.changed) applyXmlEdit(res.xml, res.nextTarget);
+                  else if (res.warning) setPaletteStatusMsg(res.warning);
+                }
               }}
               onToggleDot={() => {
                 if (selectedTarget) {
-                  const res = toggleXmlNoteDot(activeXml, selectedTarget);
+                  const res = toggleXmlNoteDot(activeXml, selectedTarget, {
+                    rebalanceMeasure: true,
+                  });
                   if (res) {
                     setActiveDotted(res.dotted);
-                    applyXmlEdit(res.xml, selectedTarget);
+                    if (res.changed) applyXmlEdit(res.xml, res.nextTarget);
+                    else if (res.warning) setPaletteStatusMsg(res.warning);
                   }
                 } else {
                   setActiveDotted((v) => !v);
                 }
               }}
               onToggleRest={() => {
-                if (!selectedTarget) return;
-                const res = convertXmlNoteToRest(activeXml, selectedTarget);
-                if (res) applyXmlEdit(res.xml, null);
+                if (selectedTarget) {
+                  const info = getXmlNoteInfo(activeXml, selectedTarget);
+                  if (info && !info.isRest) {
+                    const res = convertXmlNoteToRest(activeXml, selectedTarget);
+                    if (res) applyXmlEdit(res.xml, res.nextTarget);
+                    return;
+                  }
+                }
+                setRestInputMode((v) => !v);
               }}
               onSelectAccidental={(acc: XmlAccidentalType) => {
                 if (!selectedTarget) return;
@@ -2153,7 +2312,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
               onToggleTie={() => {
                 if (!selectedTarget) return;
                 const res = toggleXmlNoteTie(activeXml, selectedTarget);
-                if (res.changed) applyXmlEdit(res.xml, selectedTarget);
+                if (res.changed) applyXmlEdit(res.xml, res.nextTarget ?? selectedTarget);
                 else if (res.message) setPaletteStatusMsg(res.message);
               }}
               onToggleSlur={() => {
@@ -2168,9 +2327,18 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
                 if (res) applyXmlEdit(res.xml, selectedTarget);
               }}
               onToggleTriplet={() => {
-                if (!selectedTarget) return;
-                const res = toggleXmlNoteTriplet(activeXml, selectedTarget);
-                if (res) applyXmlEdit(res.xml, selectedTarget);
+                if (!selectedTarget) {
+                  setActiveTupletActual((prev) => (prev === 3 ? null : 3));
+                  return;
+                }
+                const res = toggleXmlNoteTuplet(activeXml, selectedTarget, 3, {
+                  rebalanceMeasure: true,
+                });
+                if (res) {
+                  setActiveTupletActual(res.actualNotes);
+                  if (res.warning) setPaletteStatusMsg(res.warning);
+                  else applyXmlEdit(res.xml, res.nextTarget);
+                }
               }}
               onFlipStem={() => {
                 if (!selectedTarget) return;
@@ -2219,6 +2387,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
                 activeDuration={activeDuration}
                 activeDotted={activeDotted}
                 activeVoice={activeVoice}
+                restInputMode={restInputMode}
                 selectedTarget={selectedTarget}
                 metronomeSettings={metronomeSettings}
                 onMetronomeSettingsChange={onMetronomeSettingsChange}

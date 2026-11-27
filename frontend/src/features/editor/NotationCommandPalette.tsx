@@ -39,6 +39,8 @@ const DURATION_PALETTE_ITEMS: Array<{
   { type: "quarter", label: "Quarter", glyph: "♩", shortcut: "5" },
   { type: "half", label: "Half", glyph: "𝅗𝅥", shortcut: "6" },
   { type: "whole", label: "Whole", glyph: "𝅝", shortcut: "7" },
+  { type: "breve", label: "Breve", glyph: "𝅜", shortcut: "8" },
+  { type: "long", label: "Longa", glyph: "𝅛", shortcut: "9" },
 ];
 
 const ACCIDENTAL_ITEMS: Array<{
@@ -69,6 +71,8 @@ interface NotationCommandPaletteProps {
   isPlaying: boolean;
   noteInputMode: boolean;
   onToggleNoteInputMode: () => void;
+  restInputMode?: boolean;
+  activeTupletActual?: number | null;
   activeDuration: EditableNoteType;
   activeDotted: boolean;
   activeVoice: "1" | "2";
@@ -108,6 +112,8 @@ export function NotationCommandPalette({
   isPlaying,
   noteInputMode,
   onToggleNoteInputMode,
+  restInputMode = false,
+  activeTupletActual = null,
   activeDuration,
   activeDotted,
   activeVoice,
@@ -231,11 +237,11 @@ export function NotationCommandPalette({
           </button>
           <button
             type="button"
-            disabled={!hasSelection}
+            disabled={!hasSelection && !noteInputMode}
             aria-label="Convert note to rest"
-            title="Convert to Rest (0 / Delete)"
+            title="Rest mode in Note Input, or convert note to rest (0)"
             data-testid="palette-rest-btn"
-            className={btnClass(Boolean(noteInfo?.isRest), !hasSelection)}
+            className={btnClass(Boolean(noteInfo?.isRest || ((!hasSelection || noteInfo?.isRest) && restInputMode)), !hasSelection && !noteInputMode)}
             onClick={onToggleRest}
           >
             <span>Rest</span>
@@ -511,20 +517,41 @@ export function NotationCommandPalette({
       {showShortcuts && (
         <div
           data-testid="notation-shortcuts-popover"
-          className="grid grid-cols-2 sm:grid-cols-4 gap-2 rounded-lg border border-stone-300 bg-white p-2.5 text-[11px] text-stone-700 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#C4C4D4]"
+          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 rounded-lg border border-stone-300 bg-white p-3 text-[11px] text-stone-700 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#C4C4D4]"
         >
-          <div><strong>N</strong> Note Input</div>
-          <div><strong>1–7</strong> 64th .. Whole</div>
-          <div><strong>.</strong> Augmentation Dot</div>
-          <div><strong>0 / Del</strong> Rest</div>
-          <div><strong>T</strong> Tie (same pitch)</div>
-          <div><strong>S</strong> Slur</div>
-          <div><strong>X</strong> Flip Stem</div>
-          <div><strong>Ctrl+3</strong> Triplet</div>
-          <div><strong>↑ / ↓</strong> Semitone (Shift: 8va)</div>
-          <div><strong>Drag Note</strong> Diatonic Pitch</div>
-          <div><strong>Ctrl+Z / Y</strong> Undo / Redo</div>
-          <div><strong>Esc</strong> Exit / Deselect</div>
+          <div className="space-y-1">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500 dark:text-[#A1A1AA]">
+              Note Durations (1–9)
+            </div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">1</kbd> 64th &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">2</kbd> 32nd &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">3</kbd> 16th</div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">4</kbd> Eighth &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">5</kbd> Quarter &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">6</kbd> Half</div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">7</kbd> Whole &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">8</kbd> Breve &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">9</kbd> Longa</div>
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500 dark:text-[#A1A1AA]">
+              Rest, Dot, Tie &amp; Scaling
+            </div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">0</kbd> Rest Mode / Convert Note to Rest</div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">.</kbd> Toggle Augmentation Dot</div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">T</kbd> / <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">+</kbd> Tie Same Pitch / Add Tied Continuation</div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">W</kbd> Double Duration &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Q</kbd> Halve Duration</div>
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500 dark:text-[#A1A1AA]">
+              Tuplets &amp; Editor Modes
+            </div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+3</kbd> Triplet (3:2) &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+2..9</kbd> Tuplets</div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">N</kbd> Toggle Note Input &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Esc</kbd> Exit Input / Deselect</div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Del</kbd> / <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Backspace</kbd> Delete Note or Measure</div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">S</kbd> Slur &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">X</kbd> Flip Stem &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">↑/↓</kbd> Pitch &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl+Z/Y</kbd> Undo/Redo</div>
+            {activeTupletActual && (
+              <div className="text-violet-700 dark:text-violet-300 font-medium">
+                Active Tuplet Input: {activeTupletActual}-tuplet
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

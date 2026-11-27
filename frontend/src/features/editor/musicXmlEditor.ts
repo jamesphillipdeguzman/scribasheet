@@ -24,10 +24,41 @@ import {
 } from "@/lib/keySignature";
 import type { ScoreNote, ScoreTrack } from "@/types/api";
 
-export type EditableNoteType = "64th" | "32nd" | "16th" | "eighth" | "quarter" | "half" | "whole";
+export type EditableNoteType =
+  | "64th"
+  | "32nd"
+  | "16th"
+  | "eighth"
+  | "quarter"
+  | "half"
+  | "whole"
+  | "breve"
+  | "long";
+export const DURATION_ORDER: readonly EditableNoteType[] = [
+  "64th",
+  "32nd",
+  "16th",
+  "eighth",
+  "quarter",
+  "half",
+  "whole",
+  "breve",
+  "long",
+];
 export type XmlAccidentalType = "flat-flat" | "flat" | "natural" | "sharp" | "double-sharp";
 export type XmlArticulationType = "marcato" | "accent" | "tenuto" | "staccato";
 export type PlaygroundClefMode = "grand" | "treble" | "bass";
+
+export const TUPLET_RATIOS: Record<number, { actual: number; normal: number }> = {
+  2: { actual: 2, normal: 3 },
+  3: { actual: 3, normal: 2 },
+  4: { actual: 4, normal: 3 },
+  5: { actual: 5, normal: 4 },
+  6: { actual: 6, normal: 4 },
+  7: { actual: 7, normal: 4 },
+  8: { actual: 8, normal: 6 },
+  9: { actual: 9, normal: 8 },
+};
 
 export interface XmlNoteTarget {
   partIndex: number;
@@ -37,6 +68,7 @@ export interface XmlNoteTarget {
   staffNumber?: number;
   voice?: string;
   noteIndex?: number;
+  noteId?: string;
 }
 
 export interface XmlNoteInfo {
@@ -49,6 +81,8 @@ export interface XmlNoteInfo {
   hasSlurStop: boolean;
   articulations: XmlArticulationType[];
   isTriplet: boolean;
+  tupletActual: number | null;
+  tupletNormal: number | null;
   stem: "up" | "down" | null;
   voice: string;
   staff: number;
@@ -72,6 +106,8 @@ export interface DiatonicPitchResult {
 const DIATONIC_STEPS = ["C", "D", "E", "F", "G", "A", "B"] as const;
 
 export const TYPE_TO_QUARTERS: Record<EditableNoteType, number> = {
+  long: 16,
+  breve: 8,
   whole: 4,
   half: 2,
   quarter: 1,
@@ -80,6 +116,19 @@ export const TYPE_TO_QUARTERS: Record<EditableNoteType, number> = {
   "32nd": 0.125,
   "64th": 0.0625,
 };
+
+export function stepNoteDurationType(
+  current: EditableNoteType,
+  direction: "double" | "halve",
+): EditableNoteType {
+  const idx = DURATION_ORDER.indexOf(current);
+  const safeIdx = idx >= 0 ? idx : DURATION_ORDER.indexOf("quarter");
+  const nextIdx =
+    direction === "double"
+      ? Math.min(DURATION_ORDER.length - 1, safeIdx + 1)
+      : Math.max(0, safeIdx - 1);
+  return DURATION_ORDER[nextIdx];
+}
 
 export { formatPitchLabel, getKeySignatureAlterForStep };
 
@@ -383,7 +432,9 @@ export function getXmlNoteInfo(xmlStr: string, target: XmlNoteTarget): XmlNoteIn
     rawType === "eighth" ||
     rawType === "quarter" ||
     rawType === "half" ||
-    rawType === "whole"
+    rawType === "whole" ||
+    rawType === "breve" ||
+    rawType === "long"
       ? rawType
       : null;
 
@@ -426,8 +477,17 @@ export function getXmlNoteInfo(xmlStr: string, target: XmlNoteTarget): XmlNoteIn
   }
 
   const timeMod = noteEl.getElementsByTagName("time-modification")[0];
-  const isTriplet =
-    Boolean(timeMod) && timeMod.getElementsByTagName("actual-notes")[0]?.textContent?.trim() === "3";
+  const tupletActualRaw = Number.parseInt(
+    timeMod?.getElementsByTagName("actual-notes")[0]?.textContent?.trim() || "",
+    10,
+  );
+  const tupletNormalRaw = Number.parseInt(
+    timeMod?.getElementsByTagName("normal-notes")[0]?.textContent?.trim() || "",
+    10,
+  );
+  const tupletActual = Number.isFinite(tupletActualRaw) && tupletActualRaw > 0 ? tupletActualRaw : null;
+  const tupletNormal = Number.isFinite(tupletNormalRaw) && tupletNormalRaw > 0 ? tupletNormalRaw : null;
+  const isTriplet = tupletActual === 3;
 
   const stemTxt = (noteEl.getElementsByTagName("stem")[0]?.textContent || "").trim().toLowerCase();
   const stem: "up" | "down" | null = stemTxt === "up" || stemTxt === "down" ? stemTxt : null;
@@ -452,6 +512,8 @@ export function getXmlNoteInfo(xmlStr: string, target: XmlNoteTarget): XmlNoteIn
     hasSlurStop,
     articulations,
     isTriplet,
+    tupletActual,
+    tupletNormal,
     stem,
     voice,
     staff: staffNumber,
@@ -639,78 +701,357 @@ export function setXmlNoteAccidental(
   };
 }
 
-export function setXmlNoteDuration(
-  xmlStr: string,
-  target: XmlNoteTarget,
+function readNoteTupletRatio(noteEl: Element): { actual: number; normal: number } | null {
+  const tm = noteEl.getElementsByTagName("time-modification")[0];
+  if (!tm) return null;
+  const a = Number.parseInt(tm.getElementsByTagName("actual-notes")[0]?.textContent?.trim() || "", 10);
+  const n = Number.parseInt(tm.getElementsByTagName("normal-notes")[0]?.textContent?.trim() || "", 10);
+  if (Number.isFinite(a) && a >= 2 && Number.isFinite(n) && n >= 1) {
+    return { actual: a, normal: n };
+  }
+  return null;
+}
+
+function getTargetChordGroup(measureEl: Element, noteEl: Element): Element[] {
+  const mNotes = Array.from(measureEl.children).filter((c) => c.tagName.toLowerCase() === "note");
+  const idx = mNotes.indexOf(noteEl);
+  if (idx < 0) return [noteEl];
+  let rootIdx = idx;
+  while (rootIdx > 0 && mNotes[rootIdx].getElementsByTagName("chord").length > 0) {
+    rootIdx -= 1;
+  }
+  const group = [mNotes[rootIdx]];
+  for (let i = rootIdx + 1; i < mNotes.length; i++) {
+    if (mNotes[i].getElementsByTagName("chord").length === 0) break;
+    group.push(mNotes[i]);
+  }
+  return group;
+}
+
+function collectConsecutiveFollowingRestsInLane(
+  afterEl: Element,
+  measureEl: Element,
+  staffNumber: number,
+  voice: string,
+): { rests: Element[]; totalDivs: number; blockedByNote: boolean } {
+  const rests: Element[] = [];
+  let totalDivs = 0;
+  let blockedByNote = false;
+  let seenAfter = false;
+
+  for (const child of Array.from(measureEl.children)) {
+    if (!seenAfter) {
+      if (child === afterEl) seenAfter = true;
+      continue;
+    }
+    const tag = child.tagName.toLowerCase();
+    if (tag === "backup" || tag === "forward") break;
+    if (tag !== "note") continue;
+    if (getNoteStaffNumber(child) !== staffNumber || getNoteVoice(child) !== voice) continue;
+    if (child.getElementsByTagName("chord").length > 0) continue;
+    if (child.getElementsByTagName("rest").length > 0) {
+      const d = Math.max(0, Math.round(Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0") || 0));
+      rests.push(child);
+      totalDivs += d;
+    } else {
+      blockedByNote = true;
+      break;
+    }
+  }
+  return { rests, totalDivs, blockedByNote };
+}
+
+function collectLeadingRestsInMeasureLane(
+  measureEl: Element,
+  staffNumber: number,
+  voice: string,
+): { rests: Element[]; totalDivs: number; insertBeforeEl: Element | null } {
+  const rests: Element[] = [];
+  let totalDivs = 0;
+  let insertBeforeEl: Element | null = null;
+
+  for (const child of Array.from(measureEl.children)) {
+    const tag = child.tagName.toLowerCase();
+    if (tag === "backup") break;
+    if (tag !== "note") continue;
+    if (getNoteStaffNumber(child) !== staffNumber || getNoteVoice(child) !== voice) continue;
+    if (child.getElementsByTagName("chord").length > 0) continue;
+    if (child.getElementsByTagName("rest").length > 0) {
+      const d = Math.max(0, Math.round(Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0") || 0));
+      rests.push(child);
+      totalDivs += d;
+      if (!insertBeforeEl) insertBeforeEl = child;
+    } else {
+      break;
+    }
+  }
+  return { rests, totalDivs, insertBeforeEl };
+}
+
+function addTieMarker(doc: Document, el: Element, tieType: "start" | "stop"): void {
+  const existingTie = Array.from(el.getElementsByTagName("tie")).some((t) => t.getAttribute("type") === tieType);
+  if (!existingTie) {
+    const tEl = doc.createElement("tie");
+    tEl.setAttribute("type", tieType);
+    const voiceEl = el.getElementsByTagName("voice")[0];
+    if (voiceEl) el.insertBefore(tEl, voiceEl);
+    else el.appendChild(tEl);
+  }
+  const notEl = getOrCreateChild(doc, el, "notations");
+  const existingTied = Array.from(notEl.getElementsByTagName("tied")).some((t) => t.getAttribute("type") === tieType);
+  if (!existingTied) {
+    const td = doc.createElement("tied");
+    td.setAttribute("type", tieType);
+    notEl.appendChild(td);
+  }
+}
+
+function consumeRestsFromFront(
+  doc: Document,
+  measureEl: Element,
+  rests: Element[],
+  consumeDivs: number,
+  divisions: number,
+  voice: string,
+  staffNumber: number | null,
+): void {
+  let remToConsume = Math.round(consumeDivs);
+  for (const rEl of rests) {
+    if (remToConsume <= 0) break;
+    const rDur = Math.max(0, Math.round(Number.parseFloat(rEl.getElementsByTagName("duration")[0]?.textContent || "0") || 0));
+    if (rDur <= remToConsume) {
+      remToConsume -= rDur;
+      measureEl.removeChild(rEl);
+    } else {
+      const leftover = rDur - remToConsume;
+      remToConsume = 0;
+      const replacements = buildRestNoteElementsForDuration(doc, leftover, divisions, voice, staffNumber);
+      for (const rep of replacements) {
+        measureEl.insertBefore(rep, rEl);
+      }
+      measureEl.removeChild(rEl);
+    }
+  }
+}
+
+function applyDurationAndTypeToNoteGroup(
+  doc: Document,
+  group: Element[],
+  durDivs: number,
   noteType: EditableNoteType,
-  options?: { dotted?: boolean; triplet?: boolean },
-): { xml: string; nextTarget: XmlNoteTarget } | null {
-  const doc = parseXmlDoc(xmlStr);
-  if (!doc) return null;
-  const found = findTargetNoteElement(doc, target);
-  if (!found) return null;
-
-  const { noteEl, partEl, measureEl, measureIdx } = found;
-  const divisions = ensurePartDivisionsAtLeast(doc, partEl, measureIdx, 48);
-
-  const dotted = options?.dotted ?? noteEl.getElementsByTagName("dot").length > 0;
-  const isTriplet =
-    options?.triplet ??
-    noteEl.getElementsByTagName("time-modification")[0]?.getElementsByTagName("actual-notes")[0]?.textContent?.trim() ===
-      "3";
-
-  let newDur = divisions * TYPE_TO_QUARTERS[noteType];
-  if (dotted) newDur *= 1.5;
-  if (isTriplet) newDur *= 2 / 3;
-  const safeDur = Math.max(1, Math.round(newDur));
-
-  const applyToNote = (el: Element) => {
-    setElementText(doc, el, "duration", String(safeDur));
+  dotted: boolean,
+  tupletRatio: { actual: number; normal: number } | null,
+): void {
+  for (const el of group) {
+    setElementText(doc, el, "duration", String(durDivs));
     setElementText(doc, el, "type", noteType);
-    const existingDots = Array.from(el.getElementsByTagName("dot"));
-    for (const d of existingDots) d.parentNode?.removeChild(d);
+    for (const d of Array.from(el.getElementsByTagName("dot"))) d.parentNode?.removeChild(d);
     if (dotted) {
       const typeEl = el.getElementsByTagName("type")[0];
       const dotEl = doc.createElement("dot");
       if (typeEl && typeEl.nextSibling) el.insertBefore(dotEl, typeEl.nextSibling);
       else el.appendChild(dotEl);
     }
-  };
+    for (const tm of Array.from(el.getElementsByTagName("time-modification"))) tm.parentNode?.removeChild(tm);
+    for (const tup of Array.from(el.getElementsByTagName("tuplet"))) tup.parentNode?.removeChild(tup);
+    if (tupletRatio) {
+      const tm = doc.createElement("time-modification");
+      setElementText(doc, tm, "actual-notes", String(tupletRatio.actual));
+      setElementText(doc, tm, "normal-notes", String(tupletRatio.normal));
+      el.appendChild(tm);
+      const notations = getOrCreateChild(doc, el, "notations");
+      const tup = doc.createElement("tuplet");
+      tup.setAttribute("type", "start");
+      tup.setAttribute("bracket", "yes");
+      notations.appendChild(tup);
+    }
+  }
+}
 
-  applyToNote(noteEl);
-  // Keep simultaneous <chord/> sibling notes synchronized in duration & type
-  const siblings = Array.from(measureEl.children).filter((c) => c.tagName.toLowerCase() === "note");
-  const idx = siblings.indexOf(noteEl);
-  if (idx >= 0) {
-    for (let i = idx + 1; i < siblings.length; i++) {
-      if (siblings[i].getElementsByTagName("chord").length === 0) break;
-      applyToNote(siblings[i]);
+export function setXmlNoteDuration(
+  xmlStr: string,
+  target: XmlNoteTarget,
+  noteType: EditableNoteType,
+  options?: {
+    dotted?: boolean;
+    triplet?: boolean;
+    tupletRatio?: { actual: number; normal: number } | null;
+    rebalanceMeasure?: boolean;
+  },
+): { xml: string; nextTarget: XmlNoteTarget; changed: boolean; warning?: string } | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+  const found = findTargetNoteElement(doc, target);
+  if (!found) return null;
+
+  const { noteEl, partEl, measureEl, measureIdx, staffNumber, voice } = found;
+  const divisions = ensurePartDivisionsAtLeast(doc, partEl, measureIdx, 48);
+  const oldDurDivs = Math.max(
+    1,
+    Math.round(Number.parseFloat(noteEl.getElementsByTagName("duration")[0]?.textContent || String(divisions)) || divisions),
+  );
+
+  const dotted = options?.dotted ?? noteEl.getElementsByTagName("dot").length > 0;
+  const existingTuplet = readNoteTupletRatio(noteEl);
+  const effectiveTuplet =
+    options?.tupletRatio !== undefined
+      ? options.tupletRatio
+      : options?.triplet !== undefined
+        ? options.triplet
+          ? { actual: 3, normal: 2 }
+          : null
+        : existingTuplet;
+
+  let newDur = divisions * TYPE_TO_QUARTERS[noteType];
+  if (dotted) newDur *= 1.5;
+  if (effectiveTuplet) newDur *= effectiveTuplet.normal / effectiveTuplet.actual;
+  const safeDur = Math.max(1, Math.round(newDur));
+
+  const chordGroup = getTargetChordGroup(measureEl, noteEl);
+  const groupRoot = chordGroup[0];
+  const groupLast = chordGroup[chordGroup.length - 1];
+  const hasGrand = computePartHasGrandStaves(partEl, measureIdx);
+  const targetStaffNum = hasGrand ? staffNumber : null;
+
+  if (!options?.rebalanceMeasure || safeDur === oldDurDivs) {
+    applyDurationAndTypeToNoteGroup(doc, chordGroup, safeDur, noteType, dotted, effectiveTuplet);
+    recomputePartAccidentals(doc, partEl);
+    return {
+      xml: serializeXmlDoc(doc),
+      nextTarget: target,
+      changed: true,
+    };
+  }
+
+  if (safeDur < oldDurDivs) {
+    applyDurationAndTypeToNoteGroup(doc, chordGroup, safeDur, noteType, dotted, effectiveTuplet);
+    const diff = oldDurDivs - safeDur;
+    const trailingRests = buildRestNoteElementsForDuration(doc, diff, divisions, voice, targetStaffNum);
+    const insertRef = groupLast.nextSibling;
+    for (const r of trailingRests) {
+      if (insertRef) measureEl.insertBefore(r, insertRef);
+      else measureEl.appendChild(r);
+    }
+    recomputePartAccidentals(doc, partEl);
+    return {
+      xml: serializeXmlDoc(doc),
+      nextTarget: target,
+      changed: true,
+    };
+  }
+
+  // Lengthening (safeDur > oldDurDivs) with Measure Auto-Rebalance
+  const extra = safeDur - oldDurDivs;
+  const following = collectConsecutiveFollowingRestsInLane(groupLast, measureEl, staffNumber, voice);
+
+  if (following.totalDivs >= extra) {
+    consumeRestsFromFront(doc, measureEl, following.rests, extra, divisions, voice, targetStaffNum);
+    applyDurationAndTypeToNoteGroup(doc, chordGroup, safeDur, noteType, dotted, effectiveTuplet);
+    recomputePartAccidentals(doc, partEl);
+    return {
+      xml: serializeXmlDoc(doc),
+      nextTarget: target,
+      changed: true,
+    };
+  }
+
+  if (following.blockedByNote) {
+    return {
+      xml: xmlStr,
+      nextTarget: target,
+      changed: false,
+      warning: "Cannot lengthen note: it would overlap the next note in this measure.",
+    };
+  }
+
+  // Reached end of measure: check if pitched note can split across the barline with a tie into leading rests of next bar
+  const isPitched = groupRoot.getElementsByTagName("rest").length === 0;
+  const measures = Array.from(partEl.getElementsByTagName("measure"));
+  const nextMeasure = measures[measureIdx + 1];
+  const overflow = extra - following.totalDivs;
+
+  if (isPitched && nextMeasure && overflow > 0) {
+    const nextLeading = collectLeadingRestsInMeasureLane(nextMeasure, staffNumber, voice);
+    if (nextLeading.totalDivs >= overflow && nextLeading.insertBeforeEl) {
+      const m1TotalDivs = oldDurDivs + following.totalDivs;
+      const m1Spec = durationDivsToBestType(m1TotalDivs, divisions);
+      const m2Spec = durationDivsToBestType(overflow, divisions);
+
+      if (following.rests.length > 0) {
+        consumeRestsFromFront(doc, measureEl, following.rests, following.totalDivs, divisions, voice, targetStaffNum);
+      }
+      applyDurationAndTypeToNoteGroup(doc, chordGroup, m1TotalDivs, m1Spec.type, m1Spec.dotted, effectiveTuplet);
+
+      const contAnchor = nextLeading.insertBeforeEl;
+      for (const srcNote of chordGroup) {
+        addTieMarker(doc, srcNote, "start");
+        const clone = srcNote.cloneNode(true) as Element;
+        for (const t of Array.from(clone.getElementsByTagName("tie"))) clone.removeChild(t);
+        const cloneNots = clone.getElementsByTagName("notations")[0];
+        if (cloneNots) {
+          for (const td of Array.from(cloneNots.getElementsByTagName("tied"))) cloneNots.removeChild(td);
+        }
+        setElementText(doc, clone, "duration", String(overflow));
+        setElementText(doc, clone, "type", m2Spec.type);
+        for (const d of Array.from(clone.getElementsByTagName("dot"))) clone.removeChild(d);
+        if (m2Spec.dotted) {
+          const typeEl = clone.getElementsByTagName("type")[0];
+          const dotEl = doc.createElement("dot");
+          if (typeEl && typeEl.nextSibling) clone.insertBefore(dotEl, typeEl.nextSibling);
+          else clone.appendChild(dotEl);
+        }
+        addTieMarker(doc, clone, "stop");
+        nextMeasure.insertBefore(clone, contAnchor);
+      }
+      consumeRestsFromFront(doc, nextMeasure, nextLeading.rests, overflow, divisions, voice, targetStaffNum);
+      recomputePartAccidentals(doc, partEl);
+      return {
+        xml: serializeXmlDoc(doc),
+        nextTarget: target,
+        changed: true,
+      };
     }
   }
 
   return {
-    xml: serializeXmlDoc(doc),
+    xml: xmlStr,
     nextTarget: target,
+    changed: false,
+    warning: "Duration exceeds remaining beats in this measure.",
   };
 }
 
 export function toggleXmlNoteDot(
   xmlStr: string,
   target: XmlNoteTarget,
-): { xml: string; dotted: boolean } | null {
+  options?: { rebalanceMeasure?: boolean },
+): { xml: string; dotted: boolean; nextTarget: XmlNoteTarget; changed: boolean; warning?: string } | null {
   const info = getXmlNoteInfo(xmlStr, target);
   if (!info) return null;
   const nextDotted = !info.dotted;
   const noteType: EditableNoteType = info.durationType || "quarter";
-  const res = setXmlNoteDuration(xmlStr, target, noteType, { dotted: nextDotted, triplet: info.isTriplet });
+  const res = setXmlNoteDuration(xmlStr, target, noteType, {
+    dotted: nextDotted,
+    tupletRatio:
+      info.tupletActual && info.tupletNormal
+        ? { actual: info.tupletActual, normal: info.tupletNormal }
+        : null,
+    rebalanceMeasure: options?.rebalanceMeasure,
+  });
   if (!res) return null;
-  return { xml: res.xml, dotted: nextDotted };
+  return {
+    xml: res.xml,
+    dotted: res.changed ? nextDotted : info.dotted,
+    nextTarget: res.nextTarget,
+    changed: res.changed,
+    warning: res.warning,
+  };
 }
 
 export function toggleXmlNoteTie(
   xmlStr: string,
   target: XmlNoteTarget,
-): { xml: string; changed: boolean; message?: string } {
+): { xml: string; changed: boolean; nextTarget?: XmlNoteTarget; message?: string } {
   const doc = parseXmlDoc(xmlStr);
   if (!doc) return { xml: xmlStr, changed: false, message: "Unable to parse MusicXML." };
   const found = findTargetNoteElement(doc, target);
@@ -721,31 +1062,6 @@ export function toggleXmlNoteTie(
     return { xml: xmlStr, changed: false, message: "Rests cannot be tied." };
   }
 
-  const nextMatch = findNextPitchedNoteInStream(doc, found);
-  if (!nextMatch) {
-    return { xml: xmlStr, changed: false, message: "No following note found in this voice to tie." };
-  }
-
-  const pitchB = nextMatch.noteEl.getElementsByTagName("pitch")[0];
-  if (!pitchB) {
-    return { xml: xmlStr, changed: false, message: "Ties require two consecutive notes of the same pitch." };
-  }
-
-  const sig = (p: Element) => {
-    const s = (p.getElementsByTagName("step")[0]?.textContent || "C").trim().toUpperCase();
-    const a = (p.getElementsByTagName("alter")[0]?.textContent || "0").trim();
-    const o = (p.getElementsByTagName("octave")[0]?.textContent || "4").trim();
-    return `${s}:${a}:${o}`;
-  };
-
-  if (sig(pitchA) !== sig(pitchB)) {
-    return { xml: xmlStr, changed: false, message: "Ties require two consecutive notes of the same pitch." };
-  }
-
-  const hasStart = Array.from(found.noteEl.getElementsByTagName("tie")).some(
-    (t) => t.getAttribute("type") === "start",
-  );
-
   const removeTieType = (el: Element, tieType: "start" | "stop") => {
     for (const t of Array.from(el.getElementsByTagName("tie"))) {
       if (t.getAttribute("type") === tieType) t.parentNode?.removeChild(t);
@@ -755,28 +1071,116 @@ export function toggleXmlNoteTie(
     }
   };
 
+  const hasStart = Array.from(found.noteEl.getElementsByTagName("tie")).some(
+    (t) => t.getAttribute("type") === "start",
+  );
   if (hasStart) {
+    const nextPitched = findNextPitchedNoteInStream(doc, found);
     removeTieType(found.noteEl, "start");
-    removeTieType(nextMatch.noteEl, "stop");
-  } else {
-    const tStart = doc.createElement("tie");
-    tStart.setAttribute("type", "start");
-    found.noteEl.appendChild(tStart);
-    const notA = getOrCreateChild(doc, found.noteEl, "notations");
-    const tdStart = doc.createElement("tied");
-    tdStart.setAttribute("type", "start");
-    notA.appendChild(tdStart);
-
-    const tStop = doc.createElement("tie");
-    tStop.setAttribute("type", "stop");
-    nextMatch.noteEl.appendChild(tStop);
-    const notB = getOrCreateChild(doc, nextMatch.noteEl, "notations");
-    const tdStop = doc.createElement("tied");
-    tdStop.setAttribute("type", "stop");
-    notB.appendChild(tdStop);
+    if (nextPitched) removeTieType(nextPitched.noteEl, "stop");
+    return { xml: serializeXmlDoc(doc), changed: true, nextTarget: target };
   }
 
-  return { xml: serializeXmlDoc(doc), changed: true };
+  // Inspect immediately following element in this (staff, voice) lane
+  const { partEl, measureEl, measureIdx, staffNumber, voice } = found;
+  const divisions = ensurePartDivisionsAtLeast(doc, partEl, measureIdx, 48);
+  const chordGroup = getTargetChordGroup(measureEl, found.noteEl);
+  const groupLast = chordGroup[chordGroup.length - 1];
+  const hasGrand = computePartHasGrandStaves(partEl, measureIdx);
+  const targetStaffNum = hasGrand ? staffNumber : null;
+
+  const findImmediateNextInLane = (): {
+    el: Element;
+    mEl: Element;
+    mIdx: number;
+    isRest: boolean;
+  } | null => {
+    const measures = Array.from(partEl.getElementsByTagName("measure"));
+    let pastAnchor = false;
+    for (let mIdx = measureIdx; mIdx < measures.length; mIdx++) {
+      const m = measures[mIdx];
+      for (const child of Array.from(m.children)) {
+        if (mIdx === measureIdx && !pastAnchor) {
+          if (child === groupLast) pastAnchor = true;
+          continue;
+        }
+        const tag = child.tagName.toLowerCase();
+        if (tag !== "note") continue;
+        if (child.getElementsByTagName("chord").length > 0) continue;
+        if (getNoteStaffNumber(child) !== staffNumber || getNoteVoice(child) !== voice) continue;
+        return {
+          el: child,
+          mEl: m,
+          mIdx,
+          isRest: child.getElementsByTagName("rest").length > 0,
+        };
+      }
+    }
+    return null;
+  };
+
+  const immediateNext = findImmediateNextInLane();
+  if (!immediateNext) {
+    return { xml: xmlStr, changed: false, message: "No following note or rest space found to tie." };
+  }
+
+  if (immediateNext.isRest) {
+    const srcDur = Math.max(
+      1,
+      Math.round(Number.parseFloat(found.noteEl.getElementsByTagName("duration")[0]?.textContent || String(divisions)) || divisions),
+    );
+    const { rests, totalDivs } =
+      immediateNext.mIdx === measureIdx
+        ? collectConsecutiveFollowingRestsInLane(groupLast, measureEl, staffNumber, voice)
+        : collectLeadingRestsInMeasureLane(immediateNext.mEl, staffNumber, voice);
+    const tieDur = Math.min(srcDur, totalDivs);
+    if (tieDur <= 0 || rests.length === 0) {
+      return { xml: xmlStr, changed: false, message: "No rest space available for tied continuation." };
+    }
+    const spec = durationDivsToBestType(tieDur, divisions);
+    const anchor = rests[0];
+    for (const srcNote of chordGroup) {
+      addTieMarker(doc, srcNote, "start");
+      const clone = srcNote.cloneNode(true) as Element;
+      for (const t of Array.from(clone.getElementsByTagName("tie"))) clone.removeChild(t);
+      const cloneNots = clone.getElementsByTagName("notations")[0];
+      if (cloneNots) {
+        for (const td of Array.from(cloneNots.getElementsByTagName("tied"))) cloneNots.removeChild(td);
+      }
+      setElementText(doc, clone, "duration", String(tieDur));
+      setElementText(doc, clone, "type", spec.type);
+      for (const d of Array.from(clone.getElementsByTagName("dot"))) clone.removeChild(d);
+      if (spec.dotted) {
+        const typeEl = clone.getElementsByTagName("type")[0];
+        const dotEl = doc.createElement("dot");
+        if (typeEl && typeEl.nextSibling) clone.insertBefore(dotEl, typeEl.nextSibling);
+        else clone.appendChild(dotEl);
+      }
+      addTieMarker(doc, clone, "stop");
+      immediateNext.mEl.insertBefore(clone, anchor);
+    }
+    consumeRestsFromFront(doc, immediateNext.mEl, rests, tieDur, divisions, voice, targetStaffNum);
+    recomputePartAccidentals(doc, partEl);
+    return { xml: serializeXmlDoc(doc), changed: true, nextTarget: target };
+  }
+
+  const pitchB = immediateNext.el.getElementsByTagName("pitch")[0];
+  if (!pitchB) {
+    return { xml: xmlStr, changed: false, message: "Ties require two consecutive notes of the same pitch." };
+  }
+  const sig = (p: Element) => {
+    const s = (p.getElementsByTagName("step")[0]?.textContent || "C").trim().toUpperCase();
+    const a = (p.getElementsByTagName("alter")[0]?.textContent || "0").trim();
+    const o = (p.getElementsByTagName("octave")[0]?.textContent || "4").trim();
+    return `${s}:${a}:${o}`;
+  };
+  if (sig(pitchA) !== sig(pitchB)) {
+    return { xml: xmlStr, changed: false, message: "Ties require two consecutive notes of the same pitch." };
+  }
+
+  addTieMarker(doc, found.noteEl, "start");
+  addTieMarker(doc, immediateNext.el, "stop");
+  return { xml: serializeXmlDoc(doc), changed: true, nextTarget: target };
 }
 
 export function toggleXmlNoteSlur(
@@ -858,59 +1262,46 @@ export function toggleXmlNoteArticulation(
   return { xml: serializeXmlDoc(doc), active };
 }
 
+export function toggleXmlNoteTuplet(
+  xmlStr: string,
+  target: XmlNoteTarget,
+  actualNotes = 3,
+  options?: { rebalanceMeasure?: boolean },
+): {
+  xml: string;
+  isTuplet: boolean;
+  actualNotes: number | null;
+  nextTarget: XmlNoteTarget;
+  warning?: string;
+} | null {
+  const ratio = TUPLET_RATIOS[actualNotes] ?? { actual: Math.max(2, Math.min(9, actualNotes)), normal: 2 };
+  const info = getXmlNoteInfo(xmlStr, target);
+  if (!info) return null;
+  const turningOff = info.tupletActual === ratio.actual;
+  const nextRatio = turningOff ? null : ratio;
+  const noteType: EditableNoteType = info.durationType || "eighth";
+  const res = setXmlNoteDuration(xmlStr, target, noteType, {
+    dotted: info.dotted,
+    tupletRatio: nextRatio,
+    rebalanceMeasure: options?.rebalanceMeasure,
+  });
+  if (!res) return null;
+  return {
+    xml: res.xml,
+    isTuplet: res.changed ? !turningOff : info.tupletActual !== null,
+    actualNotes: res.changed ? (turningOff ? null : ratio.actual) : info.tupletActual,
+    nextTarget: res.nextTarget,
+    warning: res.warning,
+  };
+}
+
 export function toggleXmlNoteTriplet(
   xmlStr: string,
   target: XmlNoteTarget,
 ): { xml: string; isTriplet: boolean } | null {
-  const doc = parseXmlDoc(xmlStr);
-  if (!doc) return null;
-  const found = findTargetNoteElement(doc, target);
-  if (!found) return null;
-
-  const { noteEl, partEl, measureIdx } = found;
-  const divisions = ensurePartDivisionsAtLeast(doc, partEl, measureIdx, 48);
-
-  const existingTimeMod = noteEl.getElementsByTagName("time-modification")[0];
-  const wasTriplet =
-    Boolean(existingTimeMod) &&
-    existingTimeMod.getElementsByTagName("actual-notes")[0]?.textContent?.trim() === "3";
-
-  const rawType = (noteEl.getElementsByTagName("type")[0]?.textContent || "eighth").trim().toLowerCase();
-  const baseType: EditableNoteType =
-    rawType in TYPE_TO_QUARTERS ? (rawType as EditableNoteType) : "eighth";
-  const dotted = noteEl.getElementsByTagName("dot").length > 0;
-
-  let baseDur = divisions * TYPE_TO_QUARTERS[baseType];
-  if (dotted) baseDur *= 1.5;
-
-  if (wasTriplet) {
-    if (existingTimeMod) noteEl.removeChild(existingTimeMod);
-    for (const tup of Array.from(noteEl.getElementsByTagName("tuplet"))) {
-      tup.parentNode?.removeChild(tup);
-    }
-    setElementText(doc, noteEl, "duration", String(Math.max(1, Math.round(baseDur))));
-    return { xml: serializeXmlDoc(doc), isTriplet: false };
-  }
-
-  const timeMod = doc.createElement("time-modification");
-  const actual = doc.createElement("actual-notes");
-  actual.textContent = "3";
-  const normal = doc.createElement("normal-notes");
-  normal.textContent = "2";
-  timeMod.appendChild(actual);
-  timeMod.appendChild(normal);
-  noteEl.appendChild(timeMod);
-
-  const notations = getOrCreateChild(doc, noteEl, "notations");
-  if (notations.getElementsByTagName("tuplet").length === 0) {
-    const tuplet = doc.createElement("tuplet");
-    tuplet.setAttribute("type", "start");
-    tuplet.setAttribute("bracket", "yes");
-    notations.appendChild(tuplet);
-  }
-  setElementText(doc, noteEl, "duration", String(Math.max(1, Math.round((baseDur * 2) / 3))));
-
-  return { xml: serializeXmlDoc(doc), isTriplet: true };
+  const res = toggleXmlNoteTuplet(xmlStr, target, 3);
+  if (!res) return null;
+  return { xml: res.xml, isTriplet: res.actualNotes === 3 };
 }
 
 export function flipXmlNoteStem(
@@ -978,13 +1369,29 @@ export function setXmlNoteVoice(
   return { xml: serializeXmlDoc(doc), voice };
 }
 
-export function convertXmlNoteToRest(xmlStr: string, target: XmlNoteTarget): { xml: string } | null {
+export function convertXmlNoteToRest(
+  xmlStr: string,
+  target: XmlNoteTarget,
+): { xml: string; nextTarget: XmlNoteTarget } | null {
   const doc = parseXmlDoc(xmlStr);
   if (!doc) return null;
   const found = findTargetNoteElement(doc, target);
   if (!found) return null;
 
-  const { noteEl, partEl } = found;
+  const { noteEl, partEl, measureEl, staffNumber, voice } = found;
+  const hadTieStart = Array.from(noteEl.getElementsByTagName("tie")).some((t) => t.getAttribute("type") === "start");
+  if (hadTieStart) {
+    const nextPitched = findNextPitchedNoteInStream(doc, found);
+    if (nextPitched) {
+      for (const t of Array.from(nextPitched.noteEl.getElementsByTagName("tie"))) {
+        if (t.getAttribute("type") === "stop") t.parentNode?.removeChild(t);
+      }
+      for (const td of Array.from(nextPitched.noteEl.getElementsByTagName("tied"))) {
+        if (td.getAttribute("type") === "stop") td.parentNode?.removeChild(td);
+      }
+    }
+  }
+
   for (const tag of ["pitch", "chord", "tie", "accidental", "stem"]) {
     for (const el of Array.from(noteEl.getElementsByTagName(tag))) {
       el.parentNode?.removeChild(el);
@@ -998,24 +1405,38 @@ export function convertXmlNoteToRest(xmlStr: string, target: XmlNoteTarget): { x
     noteEl.insertBefore(restEl, noteEl.firstChild);
   }
   recomputePartAccidentals(doc, partEl);
-  return { xml: serializeXmlDoc(doc) };
+  const mNotes = Array.from(measureEl.children).filter((c) => c.tagName.toLowerCase() === "note");
+  const idxAfter = mNotes.indexOf(noteEl);
+  return {
+    xml: serializeXmlDoc(doc),
+    nextTarget: {
+      partIndex: target.partIndex,
+      measureNumber: target.measureNumber,
+      onsetWhole: target.onsetWhole,
+      pitchMidi: null,
+      staffNumber,
+      voice,
+      noteIndex: idxAfter >= 0 ? idxAfter : target.noteIndex,
+    },
+  };
 }
 
 /**
  * Delete an individual selected note or chord tone:
  * - Within a chord: removes ONLY the selected note, promoting the next chord sibling if needed.
- * - Sole note at its onset: converts that rhythmic slot to a rest preserving duration/staff/voice.
+ * - Sole note at its onset: converts that rhythmic slot to an equal-duration rest preserving
+ *   duration/dot/tuplet/staff/voice and keeps the resulting rest selected.
  */
 export function deleteXmlNote(
   xmlStr: string,
   target: XmlNoteTarget,
-): { xml: string; deletedChordTone: boolean } | null {
+): { xml: string; deletedChordTone: boolean; nextTarget: XmlNoteTarget } | null {
   const doc = parseXmlDoc(xmlStr);
   if (!doc) return null;
   const found = findTargetNoteElement(doc, target);
   if (!found) return null;
 
-  const { noteEl, measureEl, partEl } = found;
+  const { noteEl, measureEl, partEl, staffNumber, voice } = found;
   const isChordChild = noteEl.getElementsByTagName("chord").length > 0;
   const nextEl = noteEl.nextElementSibling;
   const hasChordFollower =
@@ -1024,18 +1445,52 @@ export function deleteXmlNote(
     nextEl!.getElementsByTagName("chord").length > 0;
 
   if (isChordChild || hasChordFollower) {
+    let survivingEl: Element | null = null;
     if (!isChordChild && hasChordFollower && nextEl) {
       const followerChordTag = nextEl.getElementsByTagName("chord")[0];
       if (followerChordTag) nextEl.removeChild(followerChordTag);
+      survivingEl = nextEl;
+    } else if (isChordChild) {
+      const prevEl = noteEl.previousElementSibling;
+      if (prevEl && prevEl.tagName.toLowerCase() === "note") survivingEl = prevEl;
     }
     measureEl.removeChild(noteEl);
     recomputePartAccidentals(doc, partEl);
-    return { xml: serializeXmlDoc(doc), deletedChordTone: true };
+    let nextPitch: number | null = null;
+    let nextNoteIdx = target.noteIndex;
+    if (survivingEl) {
+      const mNotes = Array.from(measureEl.children).filter((c) => c.tagName.toLowerCase() === "note");
+      nextNoteIdx = mNotes.indexOf(survivingEl);
+      const pEl = survivingEl.getElementsByTagName("pitch")[0];
+      if (pEl) {
+        const s = (pEl.getElementsByTagName("step")[0]?.textContent || "C").trim().toUpperCase();
+        const a = Number.parseInt(pEl.getElementsByTagName("alter")[0]?.textContent || "0", 10) || 0;
+        const o = Number.parseInt(pEl.getElementsByTagName("octave")[0]?.textContent || "4", 10) || 4;
+        nextPitch = (o + 1) * 12 + (STEP_TO_PC[s] ?? 0) + a;
+      }
+    }
+    return {
+      xml: serializeXmlDoc(doc),
+      deletedChordTone: true,
+      nextTarget: {
+        partIndex: target.partIndex,
+        measureNumber: target.measureNumber,
+        onsetWhole: target.onsetWhole,
+        pitchMidi: nextPitch,
+        staffNumber,
+        voice,
+        noteIndex: nextNoteIdx,
+      },
+    };
   }
 
   const restConverted = convertXmlNoteToRest(xmlStr, target);
   if (!restConverted) return null;
-  return { xml: restConverted.xml, deletedChordTone: false };
+  return {
+    xml: restConverted.xml,
+    deletedChordTone: false,
+    nextTarget: restConverted.nextTarget,
+  };
 }
 
 export function applyKeySignatureToMusicXml(
@@ -1262,6 +1717,10 @@ export function updateXmlScoreHeader(
 function durationDivsToBestType(divs: number, divisions: number): { type: EditableNoteType; dotted: boolean } {
   const q = divs / Math.max(1, divisions);
   const table: Array<[number, EditableNoteType, boolean]> = [
+    [16, "long", false],
+    [12, "breve", true],
+    [8, "breve", false],
+    [6, "whole", true],
     [4, "whole", false],
     [3, "half", true],
     [2, "half", false],
@@ -1274,7 +1733,7 @@ function durationDivsToBestType(divs: number, divisions: number): { type: Editab
     [0.125, "32nd", false],
     [0.0625, "64th", false],
   ];
-  let best = table[4];
+  let best = table[8];
   let bestDiff = Infinity;
   for (const row of table) {
     const diff = Math.abs(q - row[0]);
@@ -1296,6 +1755,8 @@ function buildRestNoteElementsForDuration(
   const out: Element[] = [];
   let remaining = Math.round(totalDivs);
   const candidates: Array<[number, EditableNoteType, boolean]> = [
+    [divisions * 16, "long", false],
+    [divisions * 8, "breve", false],
     [divisions * 4, "whole", false],
     [divisions * 3, "half", true],
     [divisions * 2, "half", false],
