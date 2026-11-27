@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-import music21
-
 from app.schemas.score import ScoreChord
 from app.transcription.base import DetectedNote
 
@@ -47,17 +45,20 @@ class AccompanimentResult:
 
 
 def _parse_chord_pitches(chord: ScoreChord) -> tuple[int, list[int]]:
-    """Return (bass_pc, chord_pcs) for a ScoreChord using music21 with safe fallback."""
+    """Return (bass_pc, chord_pcs) preserving slash-bass inversions and extensions."""
+    from app.notation.harmonic_engine import parse_chord_pcs
+
     symbol = (chord.symbol or "").strip()
     if symbol:
-        try:
-            cs = music21.harmony.ChordSymbol(symbol)
-            pcs = [int(p.pitchClass) for p in cs.pitches]
-            bass_pc = int(cs.bass().pitchClass) if cs.bass() is not None else pcs[0]
-            if pcs:
-                return bass_pc, list(dict.fromkeys(pcs))
-        except Exception:
-            pass
+        root_pc, bass_pc, pcs_set = parse_chord_pcs(
+            symbol,
+            fallback_root=getattr(chord, "root", None),
+            fallback_quality=getattr(chord, "quality", None),
+        )
+        eff_bass = bass_pc if bass_pc is not None else root_pc
+        ordered = [eff_bass] + sorted(pc for pc in pcs_set if pc != eff_bass)
+        if ordered:
+            return eff_bass, ordered
 
     root_name = (chord.root or "C").strip().upper().replace("♭", "B").replace("♯", "#")
     root_pc = _PITCH_CLASS_MAP.get(root_name, 0)

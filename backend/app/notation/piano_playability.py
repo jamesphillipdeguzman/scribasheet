@@ -76,47 +76,21 @@ def _clone_note(n: DetectedNote) -> DetectedNote:
 
 def _chord_symbol_to_pcs(symbol: str) -> tuple[int | None, set[int]]:
     """Extract root pitch-class and chord pitch-classes from a readable chord symbol."""
+    from app.notation.harmonic_engine import parse_chord_pcs
+
     if not symbol:
         return None, set()
-    main = symbol.split("/", 1)[0].strip()
-    if not main:
-        return None, set()
-
-    if len(main) >= 2 and main[1] in ("#", "b"):
-        root_str = main[:2].upper()
-        qual = main[2:].lower()
-    else:
-        root_str = main[:1].upper()
-        qual = main[1:].lower()
-    root_pc = _NOTE_NAME_TO_PC.get(root_str)
-    if root_pc is None:
-        return None, set()
-
-    pcs = {root_pc}
-    if "sus4" in qual:
-        pcs |= {(root_pc + 5) % 12, (root_pc + 7) % 12}
-    elif "sus2" in qual:
-        pcs |= {(root_pc + 2) % 12, (root_pc + 7) % 12}
-    elif "dim7" in qual:
-        pcs |= {(root_pc + 3) % 12, (root_pc + 6) % 12, (root_pc + 9) % 12}
-    elif "m7b5" in qual:
-        pcs |= {(root_pc + 3) % 12, (root_pc + 6) % 12, (root_pc + 10) % 12}
-    elif "dim" in qual:
-        pcs |= {(root_pc + 3) % 12, (root_pc + 6) % 12}
-    elif "aug" in qual:
-        pcs |= {(root_pc + 4) % 12, (root_pc + 8) % 12}
-    elif qual.startswith("m") and not qual.startswith("maj"):
-        pcs |= {(root_pc + 3) % 12, (root_pc + 7) % 12}
-    else:
-        pcs |= {(root_pc + 4) % 12, (root_pc + 7) % 12}
-
-    if "maj7" in qual:
-        pcs.add((root_pc + 11) % 12)
-    elif "7" in qual and "dim7" not in qual:
-        pcs.add((root_pc + 10) % 12)
-    if "6" in qual:
-        pcs.add((root_pc + 9) % 12)
+    root_pc, _bass_pc, pcs = parse_chord_pcs(symbol)
     return root_pc, pcs
+
+
+def _chord_symbol_with_bass_pcs(symbol: str) -> tuple[int | None, int | None, set[int]]:
+    """Extract (root_pc, bass_pc, chord_pcs) including slash-chord bass support."""
+    from app.notation.harmonic_engine import parse_chord_pcs
+
+    if not symbol:
+        return None, None, set()
+    return parse_chord_pcs(symbol)
 
 
 def _slice_span(slice_notes: Sequence[DetectedNote]) -> int:
@@ -160,23 +134,24 @@ def apply_piano_playability(
 
     sec_per_beat = 60.0 / max(30.0, float(tempo_bpm))
     # Parse active chords indexed by onset_sec for chord-aware voicing retention
-    chord_timeline: list[tuple[float, int | None, set[int]]] = []
+    chord_timeline: list[tuple[float, int | None, int | None, set[int]]] = []
     for ch in sorted(list(chords or []), key=lambda c: float(getattr(c, "onset_sec", 0.0))):
         on_s = float(getattr(ch, "onset_sec", 0.0))
         sym = str(getattr(ch, "symbol", ""))
-        r_pc, ch_pcs = _chord_symbol_to_pcs(sym)
+        r_pc, b_pc, ch_pcs = _chord_symbol_with_bass_pcs(sym)
         if ch_pcs:
-            chord_timeline.append((on_s, r_pc, ch_pcs))
+            chord_timeline.append((on_s, r_pc, b_pc, ch_pcs))
 
-    def _active_chord(t_sec: float) -> tuple[int | None, set[int]]:
+    def _active_chord(t_sec: float) -> tuple[int | None, int | None, set[int]]:
         active_r: int | None = None
+        active_b: int | None = None
         active_pcs: set[int] = set()
-        for on_s, r_pc, pcs in chord_timeline:
+        for on_s, r_pc, b_pc, pcs in chord_timeline:
             if on_s <= t_sec + 0.08:
-                active_r, active_pcs = r_pc, pcs
+                active_r, active_b, active_pcs = r_pc, b_pc, pcs
             else:
                 break
-        return active_r, active_pcs
+        return active_r, active_b, active_pcs
 
     # Build temporary ScoreNote proxies so DP hand assignment partitions musically (not fixed C4 split)
     ordered = sorted(cloned, key=lambda n: (n.onset_sec, n.pitch_midi))
@@ -224,7 +199,7 @@ def apply_piano_playability(
 
     for cluster in clusters:
         cluster_t = cluster[0].onset_sec
-        chord_root_pc, chord_pcs = _active_chord(cluster_t)
+        chord_root_pc, chord_bass_pc, chord_pcs = _active_chord(cluster_t)
 
         # Deduplicate identical simultaneous pitches per hand first
         rh_map: dict[int, DetectedNote] = {}
@@ -369,11 +344,14 @@ def apply_piano_playability(
             if len(kept_lh) > max_lh_notes:
                 bass_n = kept_lh[0]
                 root_pc_eff = chord_root_pc if chord_root_pc is not None else (bass_n.pitch_midi % 12)
+                bass_pc_eff = chord_bass_pc if chord_bass_pc is not None else root_pc_eff
                 fifth_pc = (root_pc_eff + 7) % 12
                 ranked_upper = sorted(
                     kept_lh[1:],
                     key=lambda n: (
-                        2 if (n.pitch_midi % 12) in (root_pc_eff, fifth_pc) else (1 if (n.pitch_midi % 12) in chord_pcs else 0),
+                        2
+                        if (n.pitch_midi % 12) in (bass_pc_eff, root_pc_eff, fifth_pc)
+                        else (1 if (n.pitch_midi % 12) in chord_pcs else 0),
                         -abs(n.pitch_midi - prev_lh_center) * 0.25,
                         n.velocity,
                     ),

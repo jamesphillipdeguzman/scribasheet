@@ -1,4 +1,3 @@
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -7,6 +6,7 @@ import librosa
 import music21
 import numpy as np
 
+from app.notation.harmonic_engine import normalize_chord_symbol as normalize_chord_symbol
 from app.schemas.score import ScoreChord, ScoreNote
 from app.transcription.base import DetectedNote
 
@@ -761,225 +761,26 @@ def detect_chords(
     key_signature: str = "C major",
     timing_map=None,
     config: ChordDetectionConfig | None = None,
+    *,
+    audio_path: Path | None = None,
+    bass_stem_path: Path | None = None,
+    harmonic_stem_path: Path | None = None,
+    bass_notes: list[Any] | None = None,
+    diagnostics_out: dict[str, Any] | None = None,
 ) -> list[ScoreChord]:
-    """Identify confidence-aware, key-consistent chord symbols with Viterbi contextual smoothing."""
-    if not notes:
-        return []
-    cfg = config or ChordDetectionConfig()
-    try:
-        num = max(1, int(time_signature.split("/")[0]))
-    except Exception:
-        num = 4
+    """Identify rhythm-locked, bass-aware, Circle-of-Fifths chord progressions."""
+    from app.notation.harmonic_engine import detect_chords_music_theory
 
-    sec_per_beat = 60.0 / max(20.0, tempo_bpm)
-    key_obj = _parse_key_signature_for_analysis(key_signature)
-    key_diatonic_pcs = {int(p.pitchClass) for p in key_obj.pitches}
-
-    def _to_ql(sec: float) -> float:
-        if timing_map is not None:
-            return max(0.0, float(timing_map.seconds_to_ql(sec)))
-        return max(0.0, sec / sec_per_beat)
-
-    def _to_sec(ql: float) -> float:
-        if timing_map is not None:
-            return max(0.0, float(timing_map.ql_to_seconds(ql)))
-        return max(0.0, ql * sec_per_beat)
-
-    note_qls = [
-        (
-            n,
-            _to_ql(n.onset_sec),
-            max(_to_ql(n.onset_sec) + 0.125, _to_ql(n.offset_sec)),
-            (n.offset_sec - n.onset_sec) >= cfg.min_note_duration_sec,
-        )
-        for n in notes
-    ]
-    max_ql = max(off_ql for _, _, off_ql, _ in note_qls)
-    total_beats = max(1, int(np.ceil(max_ql)))
-
-    def _collect_weights(w_start_ql: float, w_end_ql: float) -> tuple[dict[int, float], int | None, bool, bool]:
-        active = [
-            (n, min(off_ql, w_end_ql) - max(on_ql, w_start_ql), on_ql, is_sub)
-            for n, on_ql, off_ql, is_sub in note_qls
-            if min(off_ql, w_end_ql) - max(on_ql, w_start_ql) > 0.05
-        ]
-        if not active:
-            return {}, None, False, False
-        substantive = [(n, ov, on_ql) for n, ov, on_ql, is_sub in active if is_sub]
-        chosen = substantive if substantive else [(n, ov, on_ql) for n, ov, on_ql, _ in active]
-        pc_weights: dict[int, float] = {}
-        lowest_midi: int | None = None
-        lowest_ov: float = 0.0
-        has_new_bass_attack = False
-        for n, ov, on_ql in chosen:
-            conf_factor = float(n.confidence) if n.confidence is not None else 0.75
-            bass_factor = 1.40 if n.pitch_midi < 60 else 1.0
-            sustain_factor = 1.15 if ov >= 0.75 else 1.0
-            # Down-weight brief off-beat passing tones
-            passing_factor = 0.65 if (ov < 0.35 and (on_ql % 1.0) > 0.15) else 1.0
-            pc = n.pitch_midi % 12
-            key_factor = cfg.key_diatonic_weight_boost if pc in key_diatonic_pcs else 1.0
-            w = (
-                ov
-                * (max(1, n.velocity) / 127.0)
-                * max(0.25, conf_factor)
-                * bass_factor
-                * sustain_factor
-                * passing_factor
-                * key_factor
-            )
-            pc_weights[pc] = pc_weights.get(pc, 0.0) + w
-            if lowest_midi is None or n.pitch_midi < lowest_midi:
-                lowest_midi = n.pitch_midi
-                lowest_ov = ov
-            if n.pitch_midi < 58 and (w_start_ql - 0.12) <= on_ql <= (w_start_ql + 0.35):
-                has_new_bass_attack = True
-        if sum(pc_weights.values()) < cfg.min_window_total_weight:
-            return {}, None, False, False
-        return pc_weights, lowest_midi, lowest_ov >= 0.45, has_new_bass_attack
-
-    # Collect per-beat top-K chord candidates using 1-beat + half-measure smoothing fallback
-    beat_cands: list[list[tuple[str, str, str, float, int]]] = []
-    beat_has_bass_attack: list[bool] = []
-    for b_idx in range(total_beats):
-        pc_w, low_midi, low_sustained, bass_att = _collect_weights(float(b_idx), float(b_idx + 1))
-        cands = _score_chord_templates(pc_w, low_midi, low_sustained, key_obj, cfg)
-        if not cands:
-            fb = _analyze_window_chord(pc_w, low_midi, low_sustained, key_obj, cfg)
-            if fb is not None:
-                cands = [(fb[0], fb[1], fb[2], fb[3], 0)]
-        # Try 2-beat window on strong metrical subdivisions when 1-beat window is sparse/ambiguous
-        if (not cands or cands[0][3] < 0.68) and b_idx % 2 == 0 and b_idx + 1 < total_beats:
-            pc_w2, low_midi2, low_sustained2, bass_att2 = _collect_weights(
-                float(b_idx), float(min(total_beats, b_idx + 2))
-            )
-            cands2 = _score_chord_templates(pc_w2, low_midi2, low_sustained2, key_obj, cfg)
-            if cands2 and (not cands or cands2[0][3] > cands[0][3] + 0.03):
-                cands = cands2
-                bass_att = bass_att or bass_att2
-        beat_cands.append(cands)
-        beat_has_bass_attack.append(bass_att)
-
-    active_beats = [b for b, c in enumerate(beat_cands) if c]
-    if not active_beats:
-        return []
-
-    # Viterbi smoothing across beats with metrical transition priors
-    strong_beats = {0} | ({2} if num == 4 else ({3} if num == 6 else set()))
-    dp: dict[int, tuple[float, int | None, int]] = {}  # cand_idx -> (score, prev_idx, run_len)
-    backpointers: list[dict[int, int]] = []
-
-    prev_b = active_beats[0]
-    first_cands = beat_cands[prev_b]
-    dp = {i: (c[3], None, 1) for i, c in enumerate(first_cands)}
-    backpointers.append({i: -1 for i in range(len(first_cands))})
-
-    chosen_seq: list[tuple[int, tuple[str, str, str, float, int]]] = []
-    paths: list[tuple[int, list[tuple[str, str, str, float, int]]]] = [(prev_b, first_cands)]
-    for b_idx in active_beats[1:]:
-        cur_cands = beat_cands[b_idx]
-        prev_cands = paths[-1][1]
-        is_strong_beat = (b_idx % num) in strong_beats
-        gap_beats = b_idx - paths[-1][0]
-        new_bass = beat_has_bass_attack[b_idx]
-
-        # Metric transition penalty: barlines & beat-3 are natural change points;
-        # off-beats require stronger harmonic/bass evidence to switch chords.
-        if gap_beats > 1:
-            base_change_pen = 0.04
-        elif (b_idx % num) == 0:
-            base_change_pen = 0.05
-        elif is_strong_beat:
-            base_change_pen = 0.11 if not new_bass else 0.06
-        else:
-            base_change_pen = 0.24 if not new_bass else 0.14
-
-        new_dp: dict[int, tuple[float, int | None, int]] = {}
-        bp: dict[int, int] = {}
-        for j, cur_c in enumerate(cur_cands):
-            best_score = -1e9
-            best_prev = 0
-            best_run = 1
-            for i, prev_c in enumerate(prev_cands):
-                prev_score, _, prev_run = dp[i]
-                same_sym = cur_c[0] == prev_c[0]
-                same_root = cur_c[1] == prev_c[1]
-                if same_sym:
-                    pen = -0.02  # small continuity bonus for staying in same harmony
-                    run_len = prev_run + 1
-                elif same_root and "suspended" in cur_c[2] and prev_c[2] in ("major", "minor"):
-                    # Discourage transient same-root sus embellishment over clean triad
-                    pen = base_change_pen + 0.12
-                    run_len = 1
-                else:
-                    # Slight extra smoothing if previous chord only lasted 1 beat
-                    short_chatter_pen = 0.08 if (prev_run == 1 and not is_strong_beat and gap_beats == 1) else 0.0
-                    pen = base_change_pen + short_chatter_pen
-                    run_len = 1
-                cand_score = prev_score + cur_c[3] - pen
-                if cand_score > best_score:
-                    best_score = cand_score
-                    best_prev = i
-                    best_run = run_len
-            new_dp[j] = (best_score, best_prev, best_run)
-            bp[j] = best_prev
-        dp = new_dp
-        backpointers.append(bp)
-        paths.append((b_idx, cur_cands))
-
-    # Backtrack optimal chord sequence
-    last_idx = max(dp.keys(), key=lambda idx: dp[idx][0])
-    chosen_indices = [0] * len(paths)
-    cur_idx = last_idx
-    for k in range(len(paths) - 1, -1, -1):
-        chosen_indices[k] = cur_idx
-        cur_idx = backpointers[k][cur_idx] if k > 0 else -1
-
-    for (b_idx, cands), idx in zip(paths, chosen_indices, strict=True):
-        chosen_seq.append((b_idx, cands[idx]))
-
-    # Final lightweight passing-blip check for any remaining A -> B -> A where B wasn't high confidence
-    raw_snapshots = [(b_idx, c[0], c[1], c[2], c[3]) for b_idx, c in chosen_seq]
-    filtered: list[tuple[int, str, str, str, float]] = []
-    for idx, snap in enumerate(raw_snapshots):
-        b_idx, sym, root_n, qual, conf = snap
-        prev_snap = raw_snapshots[idx - 1] if idx > 0 else None
-        next_snap = raw_snapshots[idx + 1] if idx + 1 < len(raw_snapshots) else None
-        if prev_snap and next_snap and prev_snap[1] == next_snap[1] and sym != prev_snap[1]:
-            if conf < cfg.strong_short_change_confidence or (
-                root_n == prev_snap[2] and qual in ("suspended-second", "suspended-fourth")
-            ):
-                continue
-        if prev_snap and root_n == prev_snap[2] and qual in ("suspended-second", "suspended-fourth"):
-            if prev_snap[3] in ("major", "minor") or (
-                next_snap and next_snap[2] == root_n and "suspended" not in next_snap[3]
-            ):
-                continue
-        filtered.append(snap)
-
-    # Deduplicate consecutive identical chord symbols and enforce minimum label spacing
-    chords: list[ScoreChord] = []
-    last_symbol: str | None = None
-    last_b_idx: int | None = None
-    for b_idx, symbol, root_name, quality, conf in filtered:
-        if symbol == last_symbol:
-            continue
-        if last_b_idx is not None and (b_idx - last_b_idx) < cfg.min_label_spacing_beats:
-            continue
-        last_symbol = symbol
-        last_b_idx = b_idx
-        measure = (b_idx // num) + 1
-        beat = float((b_idx % num) + 1)
-        chords.append(
-            ScoreChord(
-                id=uuid.uuid4().hex[:10],
-                measure=max(1, measure),
-                beat=max(1.0, beat),
-                onset_sec=round(_to_sec(float(b_idx)), 3),
-                symbol=symbol,
-                root=root_name,
-                quality=quality,
-                confidence=round(float(conf), 3),
-            )
-        )
-    return chords
+    return detect_chords_music_theory(
+        notes,
+        tempo_bpm,
+        time_signature,
+        key_signature=key_signature,
+        timing_map=timing_map,
+        config=config,
+        audio_path=audio_path,
+        bass_stem_path=bass_stem_path,
+        harmonic_stem_path=harmonic_stem_path,
+        bass_notes=bass_notes,
+        diagnostics_out=diagnostics_out,
+    )

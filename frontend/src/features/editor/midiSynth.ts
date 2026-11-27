@@ -169,7 +169,7 @@ export class MidiSynthesizer {
   private getLiveOutputNode(ctx: AudioContext): AudioNode {
     if (!this.liveGain) {
       const gain = ctx.createGain();
-      gain.gain.value = 1.0;
+      gain.gain.value = 0.92;
       gain.connect(ctx.destination);
       this.liveGain = gain;
     }
@@ -218,7 +218,8 @@ export class MidiSynthesizer {
     if (program === 0) {
       if (!this.pianoSampler && !this.pianoLoadFailed) {
         try {
-          const piano = new SplendidGrandPiano(ctx, { destination: dest });
+          const liveDest = this.getLiveOutputNode(ctx);
+          const piano = new SplendidGrandPiano(ctx, { destination: liveDest });
           this.pianoSampler = piano;
           const maybeLoaded = (piano as unknown as { loaded?: () => Promise<unknown> }).loaded;
           const rawPromise =
@@ -567,8 +568,10 @@ export class MidiSynthesizer {
     const scheduleStartMs = typeof performance !== "undefined" ? performance.now() : 0;
     // Stop any previous voice on the same pitch cleanly to avoid stuck notes
     this.releaseSustainedVoiceImmediate(pitchMidi);
-    const ctx = this.ensureContext();
-    this.ensureSampler(ctx, program);
+    const ctx = this.ctx && this.ctx.state === "running" ? this.ctx : this.ensureContext();
+    if (program !== 0 || (!this.pianoSampler && !this.pianoLoadFailed)) {
+      this.ensureSampler(ctx, program);
+    }
     const clampedVel = Math.max(1, Math.min(127, Math.round(velocity * Math.max(0.1, Math.min(1.4, volume)))));
 
     if (program === 0 && this.pianoSampler && this.pianoLoaded) {

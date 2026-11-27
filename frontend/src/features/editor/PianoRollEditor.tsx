@@ -32,7 +32,12 @@ import {
   quantizeSeconds,
   rePitchSelectedNotes,
 } from "@/features/editor/midiRecordingUtils";
-import { type MidiConnectionStatus, useWebMidi } from "@/features/editor/useWebMidi";
+import {
+  type MidiConnectionStatus,
+  loadMidiMonitorPreference,
+  saveMidiMonitorPreference,
+  useWebMidi,
+} from "@/features/editor/useWebMidi";
 import {
   createLiveMidiPitchStore,
   type LiveMidiPitchStore,
@@ -40,10 +45,11 @@ import {
   VirtualPianoKeyboard,
 } from "@/features/editor/VirtualPianoKeyboard";
 import { midiToNoteName } from "@/lib/utils";
-import type { ScoreNote, ScoreTrack } from "@/types/api";
+import type { ScoreChord, ScoreNote, ScoreTrack } from "@/types/api";
 
 interface PianoRollEditorProps {
   notes: ScoreNote[];
+  chords?: ScoreChord[];
   tracks?: ScoreTrack[];
   durationSeconds: number;
   tempoBpm: number;
@@ -106,6 +112,7 @@ function formatStatusLabel(status: MidiConnectionStatus, deviceName: string | nu
 
 export function PianoRollEditor({
   notes,
+  chords = [],
   tracks = [],
   durationSeconds,
   tempoBpm,
@@ -182,7 +189,7 @@ export function PianoRollEditor({
 
   // MIDI & Keyboard state
   const [inputMode, setInputMode] = useState<InputMode>("audition");
-  const [monitorEnabled, setMonitorEnabled] = useState(true);
+  const [monitorEnabled, setMonitorEnabled] = useState<boolean>(() => loadMidiMonitorPreference());
   const [metronomeEnabled, setMetronomeEnabled] = useState(true);
   const [countInEnabled, setCountInEnabled] = useState(true);
   const [recordMode, setRecordMode] = useState<"merge" | "replace">("merge");
@@ -965,6 +972,7 @@ export function PianoRollEditor({
           musicxml={musicxml}
           scoreTitle={scoreTitle}
           notes={notes}
+          chords={chords}
           showChordSymbols={showChordSymbols}
           onToggleChordSymbols={onToggleChordSymbols}
           playheadSec={playheadSec}
@@ -1025,6 +1033,22 @@ export function PianoRollEditor({
               {statusText}
             </span>
 
+            {webMidi.status === "connected" && monitorEnabled && (() => {
+              const diag = midiSynth.getLiveLatencyDiagnostics?.();
+              if (diag && typeof diag.baseLatencySec === "number" && Number.isFinite(diag.baseLatencySec)) {
+                return (
+                  <span
+                    data-testid="midi-buffer-latency-est"
+                    title="Estimated browser Web Audio buffer latency only — actual hardware MIDI and speaker delay depends on your OS and audio interface."
+                    className="inline-flex items-center rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-300"
+                  >
+                    Buffer est. ~{Math.max(1, Math.round(diag.baseLatencySec * 1000))}ms
+                  </span>
+                );
+              }
+              return null;
+            })()}
+
             {webMidi.devices.length > 1 && (
               <select
                 aria-label="MIDI Input Device"
@@ -1071,20 +1095,19 @@ export function PianoRollEditor({
             <button
               type="button"
               onClick={() => {
-                setMonitorEnabled((prev) => {
-                  const next = !prev;
-                  if (next) {
-                    void midiSynth.prepareLiveMidi?.();
-                  } else if (typeof midiSynth.stopAllMonitorNotes === "function") {
-                    midiSynth.stopAllMonitorNotes();
-                  } else {
-                    midiSynth.stopAllSustainedNotes?.();
-                  }
-                  return next;
-                });
+                const next = !monitorEnabled;
+                setMonitorEnabled(next);
+                saveMidiMonitorPreference(next);
+                if (next) {
+                  void midiSynth.prepareLiveMidi?.();
+                } else if (typeof midiSynth.stopAllMonitorNotes === "function") {
+                  midiSynth.stopAllMonitorNotes();
+                } else {
+                  midiSynth.stopAllSustainedNotes?.();
+                }
               }}
               aria-pressed={monitorEnabled}
-              title="Toggle local MIDI audio monitoring"
+              title="Play live MIDI notes through your browser audio output. Turn off if you are listening through your piano's own speakers."
               className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors ${
                 monitorEnabled
                   ? "bg-emerald-600 text-white border-emerald-700 font-semibold dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/40"

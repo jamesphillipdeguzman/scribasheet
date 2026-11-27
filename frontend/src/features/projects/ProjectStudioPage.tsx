@@ -1438,6 +1438,7 @@ export function ProjectStudioPage() {
                 ) : scoreData ? (
                   <PianoRollEditor
                     notes={scoreData.notes}
+                    chords={scoreData.chords}
                     tracks={scoreData.tracks}
                     durationSeconds={scoreData.duration_seconds}
                     tempoBpm={scoreData.tempo_bpm}

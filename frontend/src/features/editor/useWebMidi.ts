@@ -34,6 +34,33 @@ export interface WebMidiAccess {
   onstatechange: ((event: { port?: WebMidiInputPort }) => void) | null;
 }
 
+const MIDI_MONITOR_STORAGE_KEY = "scribasheet_midi_monitor_enabled";
+
+export function loadMidiMonitorPreference(): boolean {
+  if (typeof window === "undefined" || typeof window.localStorage?.getItem !== "function") {
+    return true;
+  }
+  try {
+    const raw = window.localStorage.getItem(MIDI_MONITOR_STORAGE_KEY);
+    if (raw === "false") return false;
+    if (raw === "true") return true;
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+export function saveMidiMonitorPreference(enabled: boolean): void {
+  if (typeof window === "undefined" || typeof window.localStorage?.setItem !== "function") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(MIDI_MONITOR_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // Ignore storage quota or private-mode errors
+  }
+}
+
 export interface UseWebMidiOptions {
   onNoteOn?: (pitchMidi: number, velocity: number, timeStampMs?: number) => void;
   onNoteOff?: (pitchMidi: number, timeStampMs?: number) => void;

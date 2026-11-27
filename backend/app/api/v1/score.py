@@ -294,6 +294,7 @@ def regenerate_project_arrangement(
                 existing.tempo_bpm,
                 existing.time_signature,
                 key_signature=existing.key_signature,
+                bass_notes=bass_notes or None,
             )
             play_res = apply_piano_playability(
                 arranged_notes,
@@ -368,6 +369,7 @@ def regenerate_project_arrangement(
             clef_override="treble" if lead_melody_active else None,
             track_name_override="Lead Melody" if lead_melody_active else None,
             chord_source_notes=chord_source if lead_melody_active else None,
+            bass_notes=bass_notes or None,
             monophonic=lead_melody_active,
             analysis=analysis,
         )

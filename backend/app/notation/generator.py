@@ -51,6 +51,10 @@ def build_score_data(
     clef_override: str | None = None,
     track_name_override: str | None = None,
     chord_source_notes: list[DetectedNote] | None = None,
+    audio_path: Path | None = None,
+    bass_stem_path: Path | None = None,
+    harmonic_stem_path: Path | None = None,
+    bass_notes: list[DetectedNote] | None = None,
     monophonic: bool = False,
 ) -> ScoreData:
     program, default_clef = get_instrument_program_and_clef(instrument)
@@ -163,12 +167,18 @@ def build_score_data(
         score_notes = mono_quantized
 
     chord_notes = _quantize_notes(chord_source_notes) if chord_source_notes is not None else score_notes
+    harmony_diag: dict = {}
     chords = detect_chords(
         chord_notes,
         effective_bpm,
         time_signature,
         key_signature=key_signature,
         timing_map=timing_map,
+        audio_path=audio_path,
+        bass_stem_path=bass_stem_path,
+        harmonic_stem_path=harmonic_stem_path,
+        bass_notes=bass_notes,
+        diagnostics_out=harmony_diag,
     )
 
     track = ScoreTrack(
@@ -181,6 +191,8 @@ def build_score_data(
     )
 
     merged_analysis = dict(analysis or {})
+    if harmony_diag:
+        merged_analysis["harmony_diagnostics"] = harmony_diag
     if timing_map is not None:
         merged_analysis["timing_map"] = timing_map.provenance
         effective_duration = max(
@@ -213,6 +225,9 @@ def build_piano_vocal_score_data(
     chord_source_notes: list[DetectedNote],
     bass_notes: list[DetectedNote] | None = None,
     other_notes: list[DetectedNote] | None = None,
+    audio_path: Path | None = None,
+    bass_stem_path: Path | None = None,
+    harmonic_stem_path: Path | None = None,
     tempo_bpm: float = 120.0,
     tempo_estimated: bool = True,
     time_signature: str = "4/4",
@@ -244,6 +259,10 @@ def build_piano_vocal_score_data(
         clef_override="treble",
         track_name_override="Vocal Melody",
         chord_source_notes=chord_source_notes,
+        audio_path=audio_path,
+        bass_stem_path=bass_stem_path,
+        harmonic_stem_path=harmonic_stem_path,
+        bass_notes=bass_notes,
         monophonic=True,
         analysis=analysis,
     )
@@ -882,21 +901,24 @@ def _build_m21_element(
 
 def _attach_chord_symbols(part: music21.stream.Part, chords: list) -> None:
     """Attach semantic music21 ChordSymbol annotations above the staff at measure/beat offsets."""
+    from app.notation.harmonic_engine import normalize_chord_symbol
+
     if not chords:
         return
     measures = {m.number: m for m in part.getElementsByClass(music21.stream.Measure)}
     seen_positions: set[tuple[int, float]] = set()
     for ch in chords:
-        m = measures.get(ch.measure)
+        m = measures.get(ch.measure) or measures.get(1)
         if m is None:
             continue
+        target_m = m.number
         beat_offset = round(max(0.0, float(ch.beat) - 1.0), 2)
-        pos_key = (ch.measure, beat_offset)
+        pos_key = (target_m, beat_offset)
         if pos_key in seen_positions:
             continue
         seen_positions.add(pos_key)
         try:
-            symbol_m21 = ch.symbol
+            symbol_m21 = normalize_chord_symbol(ch.symbol) or ch.symbol
             if len(symbol_m21) > 1 and symbol_m21[1] == "b":
                 symbol_m21 = symbol_m21[0] + "-" + symbol_m21[2:]
             if "/" in symbol_m21:
@@ -909,6 +931,68 @@ def _attach_chord_symbols(part: music21.stream.Part, chords: list) -> None:
             m.insert(beat_offset, cs)
         except Exception:
             continue
+
+
+def _normalize_musicxml_harmonies(root, chords: list) -> None:
+    """Normalize MusicXML <harmony> tags to valid kind/text/bass/degree lead-sheet notation."""
+    import xml.etree.ElementTree as ET
+
+    from app.notation.harmonic_engine import chord_symbol_to_musicxml_spec
+
+    harmonies = root.findall(".//part/measure/harmony")
+    if not harmonies:
+        return
+
+    for idx, harm_el in enumerate(harmonies):
+        ch = chords[idx] if idx < len(chords) else None
+        if ch is None:
+            continue
+        spec = chord_symbol_to_musicxml_spec(
+            ch.symbol,
+            fallback_root=getattr(ch, "root", None),
+            fallback_quality=getattr(ch, "quality", None),
+        )
+        if spec is None:
+            continue
+        root_step, root_alter, kind_val, kind_text, bass_step, bass_alter, degrees = spec
+
+        for child in list(harm_el):
+            if child.tag in ("root", "kind", "bass", "degree", "inversion"):
+                harm_el.remove(child)
+
+        root_el = ET.Element("root")
+        rs_el = ET.SubElement(root_el, "root-step")
+        rs_el.text = root_step
+        if root_alter != 0:
+            ra_el = ET.SubElement(root_el, "root-alter")
+            ra_el.text = str(root_alter)
+        harm_el.insert(0, root_el)
+
+        kind_el = ET.Element("kind", {"text": kind_text})
+        kind_el.text = kind_val
+        harm_el.insert(1, kind_el)
+
+        insert_pos = 2
+        if bass_step:
+            bass_el = ET.Element("bass")
+            bs_el = ET.SubElement(bass_el, "bass-step")
+            bs_el.text = bass_step
+            if bass_alter and bass_alter != 0:
+                ba_el = ET.SubElement(bass_el, "bass-alter")
+                ba_el.text = str(bass_alter)
+            harm_el.insert(insert_pos, bass_el)
+            insert_pos += 1
+
+        for deg_val, deg_alt, deg_type in degrees:
+            deg_el = ET.Element("degree")
+            dv_el = ET.SubElement(deg_el, "degree-value")
+            dv_el.text = str(deg_val)
+            da_el = ET.SubElement(deg_el, "degree-alter")
+            da_el.text = str(deg_alt)
+            dt_el = ET.SubElement(deg_el, "degree-type")
+            dt_el.text = deg_type
+            harm_el.insert(insert_pos, deg_el)
+            insert_pos += 1
 
 
 def _apply_key_signature_and_accidentals(part: music21.stream.Part, key_str: str) -> None:
@@ -1182,7 +1266,11 @@ def score_data_to_musicxml(
     beats_per_sec = max(20.0, score.tempo_bpm) / 60.0
     req_quant = (score.analysis or {}).get("quantization") if isinstance(score.analysis, dict) else None
     timing_prov = (
-        ((score.analysis or {}).get("timing_provenance") or (score.analysis or {}).get("tempo_diagnostics"))
+        (
+            (score.analysis or {}).get("timing_map")
+            or (score.analysis or {}).get("timing_provenance")
+            or (score.analysis or {}).get("tempo_diagnostics")
+        )
         if isinstance(score.analysis, dict)
         else None
     )
@@ -1263,7 +1351,8 @@ def score_data_to_musicxml(
     xml_bytes = exporter.parse()
     xml_str = xml_bytes.decode("utf-8")
     has_pickup = 0.0 < pickup_ql < measure_ql - 1e-6
-    if extend_ordinals or has_pickup:
+    has_chords_xml = bool(include_chords and score.chords)
+    if extend_ordinals or has_pickup or has_chords_xml:
         import xml.etree.ElementTree as ET
 
         root = ET.fromstring(xml_str)
@@ -1282,6 +1371,8 @@ def score_data_to_musicxml(
                 for ord_idx, lyr_el in enumerate(first_part.findall(".//note/lyric")):
                     if ord_idx in extend_ordinals and lyr_el.find("extend") is None:
                         ET.SubElement(lyr_el, "extend")
+        if has_chords_xml:
+            _normalize_musicxml_harmonies(root, score.chords)
         xml_str = ET.tostring(root, encoding="unicode")
     return apply_scribasheet_musicxml_branding(xml_str, title=clean_title)
 

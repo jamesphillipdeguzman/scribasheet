@@ -25,7 +25,15 @@ const CHORD_TEMPLATES: ChordTemplate[] = [
   { suffix: "sus2", kind: "suspended-second", kindText: "sus2", intervals: [0, 2, 7] },
 ];
 
-const KIND_MAP: Array<[RegExp, { kind: string; kindText: string }]> = [
+const KIND_MAP: Array<[RegExp, { kind: string; kindText: string; degrees?: Array<{ value: number; alter: number; type: string }> }]> = [
+  [/^(maj9|M9|\u03949)$/, { kind: "major-ninth", kindText: "maj9" }],
+  [/^(m9|min9|-9)$/, { kind: "minor-ninth", kindText: "m9" }],
+  [/^(9|dom9)$/, { kind: "dominant-ninth", kindText: "9" }],
+  [/^(7sus4|7sus|sus4-7|suspended-fourth-seventh)$/i, { kind: "suspended-fourth", kindText: "7sus4", degrees: [{ value: 7, alter: -1, type: "add" }] }],
+  [/^(add9|add2)$/i, { kind: "major", kindText: "add9", degrees: [{ value: 9, alter: 0, type: "add" }] }],
+  [/^(madd9|minadd9|madd2)$/i, { kind: "minor", kindText: "madd9", degrees: [{ value: 9, alter: 0, type: "add" }] }],
+  [/^(6)$/, { kind: "major-sixth", kindText: "6" }],
+  [/^(m6|min6|-6)$/, { kind: "minor-sixth", kindText: "m6" }],
   [/^(maj7|M7|\u03947?)$/, { kind: "major-seventh", kindText: "maj7" }],
   [/^(m7b5|\u00f87?)$/, { kind: "half-diminished", kindText: "m7b5" }],
   [/^(dim7|\u00b07)$/, { kind: "diminished-seventh", kindText: "dim7" }],
@@ -53,6 +61,7 @@ function parseChordSymbol(symbol: string, fallbackRoot?: string, fallbackQuality
   rootAlter: number;
   kind: string;
   kindText: string;
+  degrees: Array<{ value: number; alter: number; type: string }>;
   bassStep?: string;
   bassAlter?: number;
 } | null {
@@ -82,10 +91,12 @@ function parseChordSymbol(symbol: string, fallbackRoot?: string, fallbackQuality
 
   let kind = "major";
   let kindText = "";
+  let degrees: Array<{ value: number; alter: number; type: string }> = [];
   for (const [re, mapped] of KIND_MAP) {
     if (re.test(rest)) {
       kind = mapped.kind;
       kindText = mapped.kindText;
+      degrees = mapped.degrees ?? [];
       break;
     }
   }
@@ -100,7 +111,7 @@ function parseChordSymbol(symbol: string, fallbackRoot?: string, fallbackQuality
     }
   }
 
-  return { rootStep, rootAlter, kind, kindText, bassStep, bassAlter };
+  return { rootStep, rootAlter, kind, kindText, degrees, bassStep, bassAlter };
 }
 
 function inferChordFromPitches(
@@ -379,6 +390,20 @@ export function injectChordsIntoMusicXml(
           bassEl.appendChild(bassAlterEl);
         }
         harmonyEl.appendChild(bassEl);
+      }
+
+      for (const deg of parsed.degrees) {
+        const degEl = doc.createElement("degree");
+        const valEl = doc.createElement("degree-value");
+        valEl.textContent = String(deg.value);
+        const altEl = doc.createElement("degree-alter");
+        altEl.textContent = String(deg.alter);
+        const typeEl = doc.createElement("degree-type");
+        typeEl.textContent = deg.type;
+        degEl.appendChild(valEl);
+        degEl.appendChild(altEl);
+        degEl.appendChild(typeEl);
+        harmonyEl.appendChild(degEl);
       }
 
       if (anchorEl && anchorEl.parentNode === mEl) {

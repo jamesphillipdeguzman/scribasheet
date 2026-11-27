@@ -665,6 +665,18 @@ class RealTranscriptionHandler:
             norm_mode = normalize_transcription_mode(settings.mode)
             lead_melody_active = is_lead_melody_mode(settings.mode)
             piano_vocal_active = norm_mode == "piano_vocal"
+            sep_stems = sep_res.stems if (sep_res is not None and sep_res.available) else {}
+            bass_stem_path = sep_stems.get("bass") if ("bass" in sep_stems and Path(sep_stems["bass"]).exists()) else None
+            harmonic_stem_path = None
+            for cand_stem in ("piano", "other"):
+                if cand_stem in sep_stems and Path(sep_stems[cand_stem]).exists():
+                    harmonic_stem_path = sep_stems[cand_stem]
+                    break
+            chord_audio_path = (
+                None
+                if ((lead_melody_active or piano_vocal_active) and (harmonic_stem_path is not None or bass_stem_path is not None))
+                else processed_wav
+            )
             melody_source_notes = vocal_refined_notes if vocal_refined_notes else refined_notes
             melody_result = None
             playability_stats: dict[str, Any] | None = None
@@ -718,6 +730,10 @@ class RealTranscriptionHandler:
                         time_sig,
                         key_signature=key_sig,
                         timing_map=timing_map,
+                        audio_path=chord_audio_path,
+                        bass_stem_path=bass_stem_path,
+                        harmonic_stem_path=harmonic_stem_path,
+                        bass_notes=bass_refined_notes or None,
                     )
                     play_res = apply_piano_playability(
                         arranged_notes,
@@ -813,6 +829,9 @@ class RealTranscriptionHandler:
                     chord_source_notes=chord_source,
                     bass_notes=bass_refined_notes or None,
                     other_notes=other_refined_notes or None,
+                    audio_path=chord_audio_path,
+                    bass_stem_path=bass_stem_path,
+                    harmonic_stem_path=harmonic_stem_path,
                     tempo_bpm=tempo_bpm,
                     tempo_estimated=tempo_est,
                     time_signature=time_sig,
@@ -846,6 +865,10 @@ class RealTranscriptionHandler:
                         if lead_melody_active
                         else None
                     ),
+                    audio_path=chord_audio_path,
+                    bass_stem_path=bass_stem_path,
+                    harmonic_stem_path=harmonic_stem_path,
+                    bass_notes=bass_refined_notes or None,
                     monophonic=lead_melody_active,
                     analysis=score_analysis,
                 )

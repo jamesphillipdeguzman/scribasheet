@@ -3,6 +3,8 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
 import { MidiSynthesizer, midiSynth } from "@/features/editor/midiSynth";
+import { injectChordsIntoMusicXml } from "@/features/editor/musicXmlChords";
+import { saveMidiMonitorPreference } from "@/features/editor/useWebMidi";
 import type { ScoreNote } from "@/types/api";
 
 let sheetViewerRenderCount = 0;
@@ -219,6 +221,11 @@ describe("Live MIDI Disconnect & Latency Fixes", () => {
 
   beforeEach(() => {
     sheetViewerRenderCount = 0;
+    try {
+      window.localStorage?.removeItem?.("scribasheet_midi_monitor_enabled");
+    } catch {
+      // ignore
+    }
     installInteractiveAudioContextMock();
   });
 
@@ -535,5 +542,83 @@ describe("Live MIDI Disconnect & Latency Fixes", () => {
     expect(maxScheduleMs).toBeLessThan(15);
     expect(synth.getLiveLatencyDiagnostics().lastLiveScheduleMs).not.toBeNull();
     synth.dispose();
+  });
+
+  it("persists Monitor preference, renders audio buffer estimate & tooltip without duplicate AudioContexts, and injects extended chords", async () => {
+    const audioMock = installInteractiveAudioContextMock();
+    const { portA } = createMockMidiAccess();
+    vi.spyOn(midiSynth, "getLiveLatencyDiagnostics").mockReturnValue({
+      contextState: "running",
+      sampleRate: 48000,
+      baseLatencySec: 0.01,
+      outputLatencySec: 0.012,
+      latencyHint: "interactive",
+      pianoLoaded: true,
+      lastLiveScheduleMs: 0.25,
+    });
+
+    const synth = new MidiSynthesizer();
+    await synth.prepareLiveMidi();
+    await synth.prepareLiveMidi();
+    // Persistent AudioContext reused across multiple prepare calls
+    expect(audioMock.capturedOptions).toHaveLength(1);
+    synth.dispose();
+
+    const firstMount = render(
+      <PianoRollEditor
+        notes={SAMPLE_NOTES}
+        durationSeconds={4}
+        tempoBpm={120}
+        playheadSec={0}
+        selectedNoteId={null}
+        onSelectNote={vi.fn()}
+        onChangeNotes={vi.fn()}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Connect MIDI Device/i }));
+    });
+    await waitFor(() => expect(typeof portA.onmidimessage).toBe("function"));
+
+    const monitorBtn = screen.getByRole("button", { name: /Monitor/i });
+    expect(monitorBtn).toHaveAttribute("aria-pressed", "true");
+    expect(monitorBtn.getAttribute("title")).toContain("piano's own speakers");
+    expect(screen.getByTestId("midi-buffer-latency-est")).toHaveTextContent("Buffer est. ~10ms");
+
+    act(() => {
+      fireEvent.click(monitorBtn);
+    });
+    expect(monitorBtn).toHaveAttribute("aria-pressed", "false");
+    firstMount.unmount();
+
+    // Note: if jsdom localStorage is active, preference restores as false on remount; otherwise stays valid boolean
+    saveMidiMonitorPreference(true);
+
+    const sampleXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>8</duration><type>half</type></note>
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>8</duration><type>half</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const enriched = injectChordsIntoMusicXml(
+      sampleXml,
+      [
+        { id: "c1", measure: 1, beat: 1, onset_sec: 0.0, symbol: "Cadd9", root: "C", quality: "major-add9", confidence: 0.9 },
+        { id: "c2", measure: 1, beat: 3, onset_sec: 1.0, symbol: "G7sus4", root: "G", quality: "suspended-fourth", confidence: 0.9 },
+      ],
+      [],
+      120,
+    );
+    expect(enriched).toContain('text="add9"');
+    expect(enriched).toContain("<degree-value>9</degree-value>");
+    expect(enriched).toContain('text="7sus4"');
+    expect(enriched).toContain("<kind text=\"7sus4\">suspended-fourth</kind>");
+    expect(enriched).not.toContain("suspended-fourth-seventh");
   });
 });
