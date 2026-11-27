@@ -45,6 +45,11 @@ export interface RecordedRawNote {
   offsetSec: number;
 }
 
+export interface RecordedScoreNote extends ScoreNote {
+  raw_onset_sec?: number | null;
+  raw_offset_sec?: number | null;
+}
+
 export function buildQuantizedRecordedNotes(
   rawNotes: RecordedRawNote[],
   options: {
@@ -52,7 +57,7 @@ export function buildQuantizedRecordedNotes(
     snapMode: SnapGridMode;
     targetTrackIndex: number;
   },
-): ScoreNote[] {
+): RecordedScoreNote[] {
   const gridStep = getGridStepSec(options.tempoBpm, options.snapMode);
   const minDur = gridStep > 0 ? Math.max(0.06, Number((gridStep * 0.5).toFixed(3))) : 0.08;
 
@@ -68,6 +73,8 @@ export function buildQuantizedRecordedNotes(
       offset_sec: offset,
       velocity: Math.max(1, Math.min(127, raw.velocity || 85)),
       track_index: options.targetTrackIndex,
+      raw_onset_sec: Number(raw.onsetSec.toFixed(4)),
+      raw_offset_sec: Number(raw.offsetSec.toFixed(4)),
     };
   });
 }

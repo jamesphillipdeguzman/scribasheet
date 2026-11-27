@@ -1,4 +1,5 @@
 import { buildMusicXmlTimeline, wholeNotesToTimeSec } from "@/features/editor/musicXmlTimeline";
+import { applyAutomaticBeaming, applyAutomaticBeamingToDoc } from "@/features/editor/musicXmlBeaming";
 import { prepareDisplayMusicXml } from "@/features/editor/musicXmlNormalization";
 import {
   extractScoreStructure,
@@ -8,7 +9,7 @@ import {
   validateNavigationMarkers,
   validateVoltaEndings,
 } from "@/features/editor/musicXmlStructure";
-import type { SnapGridMode } from "@/features/editor/midiRecordingUtils";
+import type { RecordedScoreNote, SnapGridMode } from "@/features/editor/midiRecordingUtils";
 import {
   clampKeyFifths,
   computeShortestKeyInterval,
@@ -130,7 +131,53 @@ export function stepNoteDurationType(
   return DURATION_ORDER[nextIdx];
 }
 
-export { formatPitchLabel, getKeySignatureAlterForStep };
+export { applyAutomaticBeaming, formatPitchLabel, getKeySignatureAlterForStep };
+
+export type NoteLetter = "A" | "B" | "C" | "D" | "E" | "F" | "G";
+
+export function resolveLetterNotePitch(options: {
+  letter: NoteLetter;
+  keyFifths: number;
+  clef: "treble" | "bass";
+  previousMidi?: number | null;
+}): DiatonicPitchResult {
+  const step = options.letter.toUpperCase() as NoteLetter;
+  const alter = getKeySignatureAlterForStep(step, clampKeyFifths(options.keyFifths));
+  const stepPc = STEP_TO_PC[step] ?? 0;
+  const staffCenterMidi = options.clef === "bass" ? 53 : 67; // F3 in bass, G4 in treble
+  // With no previous note context, anchor on middle-C octave (4 for treble, 3 for bass)
+  const referenceMidi =
+    typeof options.previousMidi === "number" && Number.isFinite(options.previousMidi)
+      ? options.previousMidi
+      : options.clef === "bass"
+        ? 53 // F3 -> lands C3..B3 cleanly around bass staff
+        : 65; // F4 -> lands C4..B4 cleanly in treble octave 4
+
+  let bestOctave = options.clef === "bass" ? 3 : 4;
+  let bestDist = Infinity;
+  let bestCenterDist = Infinity;
+
+  for (let oct = 1; oct <= 7; oct++) {
+    const rawMidi = (oct + 1) * 12 + stepPc + alter;
+    if (rawMidi < 21 || rawMidi > 108) continue;
+    const dist = Math.abs(rawMidi - referenceMidi);
+    const centerDist = Math.abs(rawMidi - staffCenterMidi);
+    if (dist < bestDist - 0.001 || (Math.abs(dist - bestDist) < 0.001 && centerDist < bestCenterDist)) {
+      bestDist = dist;
+      bestCenterDist = centerDist;
+      bestOctave = oct;
+    }
+  }
+
+  const midi = Math.max(21, Math.min(108, (bestOctave + 1) * 12 + stepPc + alter));
+  return {
+    step,
+    alter,
+    octave: bestOctave,
+    midi,
+    label: formatPitchLabel(step, alter, bestOctave),
+  };
+}
 
 export function computeDiatonicDragPitch(
   origin: { step: string; octave: number; alter?: number },
@@ -916,6 +963,7 @@ export function setXmlNoteDuration(
   if (!options?.rebalanceMeasure || safeDur === oldDurDivs) {
     applyDurationAndTypeToNoteGroup(doc, chordGroup, safeDur, noteType, dotted, effectiveTuplet);
     recomputePartAccidentals(doc, partEl);
+    applyAutomaticBeamingToDoc(doc, partEl);
     return {
       xml: serializeXmlDoc(doc),
       nextTarget: target,
@@ -933,6 +981,7 @@ export function setXmlNoteDuration(
       else measureEl.appendChild(r);
     }
     recomputePartAccidentals(doc, partEl);
+    applyAutomaticBeamingToDoc(doc, partEl);
     return {
       xml: serializeXmlDoc(doc),
       nextTarget: target,
@@ -948,6 +997,7 @@ export function setXmlNoteDuration(
     consumeRestsFromFront(doc, measureEl, following.rests, extra, divisions, voice, targetStaffNum);
     applyDurationAndTypeToNoteGroup(doc, chordGroup, safeDur, noteType, dotted, effectiveTuplet);
     recomputePartAccidentals(doc, partEl);
+    applyAutomaticBeamingToDoc(doc, partEl);
     return {
       xml: serializeXmlDoc(doc),
       nextTarget: target,
@@ -1005,6 +1055,7 @@ export function setXmlNoteDuration(
       }
       consumeRestsFromFront(doc, nextMeasure, nextLeading.rests, overflow, divisions, voice, targetStaffNum);
       recomputePartAccidentals(doc, partEl);
+      applyAutomaticBeamingToDoc(doc, partEl);
       return {
         xml: serializeXmlDoc(doc),
         nextTarget: target,
@@ -1366,6 +1417,7 @@ export function setXmlNoteVoice(
     }
   }
 
+  applyAutomaticBeamingToDoc(doc, found.partEl);
   return { xml: serializeXmlDoc(doc), voice };
 }
 
@@ -1405,6 +1457,7 @@ export function convertXmlNoteToRest(
     noteEl.insertBefore(restEl, noteEl.firstChild);
   }
   recomputePartAccidentals(doc, partEl);
+  applyAutomaticBeamingToDoc(doc, partEl);
   const mNotes = Array.from(measureEl.children).filter((c) => c.tagName.toLowerCase() === "note");
   const idxAfter = mNotes.indexOf(noteEl);
   return {
@@ -1456,6 +1509,7 @@ export function deleteXmlNote(
     }
     measureEl.removeChild(noteEl);
     recomputePartAccidentals(doc, partEl);
+    applyAutomaticBeamingToDoc(doc, partEl);
     let nextPitch: number | null = null;
     let nextNoteIdx = target.noteIndex;
     if (survivingEl) {
@@ -1664,6 +1718,7 @@ export function updateXmlScoreHeader(
           inspectAndResizeMeasure(doc, p, curM, mIdx, targetDivs, divisions, true);
         }
       }
+      applyAutomaticBeamingToDoc(doc, p);
     }
   }
 
@@ -1745,6 +1800,51 @@ function durationDivsToBestType(divs: number, divisions: number): { type: Editab
   return { type: best[1], dotted: best[2] };
 }
 
+function decomposeDivsToRhythmicParts(
+  totalDivs: number,
+  divisions: number,
+): Array<{ durDivs: number; type: EditableNoteType; dotted: boolean }> {
+  let rem = Math.max(1, Math.round(totalDivs));
+  const candidates: Array<[number, EditableNoteType, boolean]> = [
+    [divisions * 16, "long", false],
+    [divisions * 12, "breve", true],
+    [divisions * 8, "breve", false],
+    [divisions * 6, "whole", true],
+    [divisions * 4, "whole", false],
+    [divisions * 3, "half", true],
+    [divisions * 2, "half", false],
+    [Math.round(divisions * 1.5), "quarter", true],
+    [divisions, "quarter", false],
+    [Math.round(divisions * 0.75), "eighth", true],
+    [Math.round(divisions * 0.5), "eighth", false],
+    [Math.round(divisions * 0.375), "16th", true],
+    [Math.round(divisions * 0.25), "16th", false],
+    [Math.round(divisions * 0.125), "32nd", false],
+    [Math.max(1, Math.round(divisions * 0.0625)), "64th", false],
+  ];
+
+  // Exact single-duration match fast path
+  const exact = candidates.find(([d]) => d === rem);
+  if (exact) {
+    return [{ durDivs: exact[0], type: exact[1], dotted: exact[2] }];
+  }
+
+  const parts: Array<{ durDivs: number; type: EditableNoteType; dotted: boolean }> = [];
+  let guard = 0;
+  while (rem > 0 && guard < 8) {
+    guard += 1;
+    const match = candidates.find(([d]) => d > 0 && d <= rem);
+    if (!match) {
+      const spec = durationDivsToBestType(rem, divisions);
+      parts.push({ durDivs: rem, type: spec.type, dotted: spec.dotted });
+      break;
+    }
+    parts.push({ durDivs: match[0], type: match[1], dotted: match[2] });
+    rem -= match[0];
+  }
+  return parts.length > 0 ? parts : [{ durDivs: Math.max(1, Math.round(totalDivs)), ...durationDivsToBestType(totalDivs, divisions) }];
+}
+
 function buildRestNoteElementsForDuration(
   doc: Document,
   totalDivs: number,
@@ -1789,19 +1889,37 @@ function buildRestNoteElementsForDuration(
 function createPitchedNoteElements(
   doc: Document,
   options: {
-    pitchesMidi: number[];
+    pitchesMidi?: number[];
+    explicitPitches?: Array<{ step: string; alter: number; octave: number }>;
     durDivs: number;
     noteType: EditableNoteType;
     dotted: boolean;
+    tupletRatio?: { actual: number; normal: number } | null;
     voice: string;
     staffNumber: number | null;
     fifths: number;
   },
 ): Element[] {
-  const sorted = [...options.pitchesMidi].sort((a, b) => a - b);
-  return sorted.map((rawMidi, idx) => {
-    const midi = Math.max(21, Math.min(108, Math.round(rawMidi)));
-    const spelled = spellMidiPitch(midi, options.fifths);
+  const spelledList: Array<{ step: string; alter: number; octave: number; midi: number }> =
+    options.explicitPitches && options.explicitPitches.length > 0
+      ? options.explicitPitches
+          .map((p) => {
+            const step = p.step.trim().toUpperCase();
+            const alter = Math.max(-2, Math.min(2, Math.round(p.alter)));
+            const octave = Math.max(0, Math.min(8, Math.round(p.octave)));
+            const midi = Math.max(21, Math.min(108, (octave + 1) * 12 + (STEP_TO_PC[step] ?? 0) + alter));
+            return { step, alter, octave, midi };
+          })
+          .sort((a, b) => a.midi - b.midi)
+      : [...(options.pitchesMidi ?? [])]
+          .sort((a, b) => a - b)
+          .map((rawMidi) => {
+            const midi = Math.max(21, Math.min(108, Math.round(rawMidi)));
+            const spelled = spellMidiPitch(midi, options.fifths);
+            return { ...spelled, midi };
+          });
+
+  return spelledList.map((spelled, idx) => {
     const noteEl = doc.createElement("note");
     if (idx > 0) noteEl.appendChild(doc.createElement("chord"));
     const pitchEl = doc.createElement("pitch");
@@ -1813,9 +1931,199 @@ function createPitchedNoteElements(
     setElementText(doc, noteEl, "voice", options.voice);
     setElementText(doc, noteEl, "type", options.noteType);
     if (options.dotted) noteEl.appendChild(doc.createElement("dot"));
+    if (options.tupletRatio) {
+      const tm = doc.createElement("time-modification");
+      setElementText(doc, tm, "actual-notes", String(options.tupletRatio.actual));
+      setElementText(doc, tm, "normal-notes", String(options.tupletRatio.normal));
+      noteEl.appendChild(tm);
+    }
     if (options.staffNumber !== null) setElementText(doc, noteEl, "staff", String(options.staffNumber));
     return noteEl;
   });
+}
+
+function computeMeasureAndNoteOnsetWhole(
+  partEl: Element,
+  targetMeasureIdx: number,
+  targetNoteEl: Element,
+): number {
+  const measures = Array.from(partEl.getElementsByTagName("measure"));
+  let divisions = 1;
+  let curWhole = 0;
+
+  for (let mIdx = 0; mIdx <= Math.min(targetMeasureIdx, measures.length - 1); mIdx++) {
+    const m = measures[mIdx];
+    let offsetDiv = 0;
+    let lastStartDiv = 0;
+    let maxDiv = 0;
+
+    for (const child of Array.from(m.children)) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === "attributes") {
+        const divTxt = child.getElementsByTagName("divisions")[0]?.textContent;
+        const d = divTxt ? Number.parseFloat(divTxt) : NaN;
+        if (Number.isFinite(d) && d > 0) divisions = d;
+      } else if (tag === "backup") {
+        const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+        if (Number.isFinite(d) && d > 0) offsetDiv = Math.max(0, offsetDiv - d);
+      } else if (tag === "forward") {
+        const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+        if (Number.isFinite(d) && d > 0) {
+          offsetDiv += d;
+          maxDiv = Math.max(maxDiv, offsetDiv);
+        }
+      } else if (tag === "note") {
+        const isChord = child.getElementsByTagName("chord").length > 0;
+        const noteDiv = isChord ? lastStartDiv : offsetDiv;
+        if (mIdx === targetMeasureIdx && child === targetNoteEl) {
+          return Number((curWhole + noteDiv / (divisions * 4)).toFixed(6));
+        }
+        if (!isChord && child.getElementsByTagName("grace").length === 0) {
+          const dur = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+          lastStartDiv = offsetDiv;
+          if (Number.isFinite(dur) && dur > 0) {
+            offsetDiv += dur;
+            maxDiv = Math.max(maxDiv, offsetDiv);
+          }
+        }
+      }
+    }
+    curWhole += (maxDiv > 0 ? maxDiv : divisions * 4) / (divisions * 4);
+  }
+  return 0;
+}
+
+export function addChordToneToXmlNote(
+  xmlStr: string,
+  target: XmlNoteTarget,
+  pitch: { step: string; alter: number; octave: number },
+): { xml: string; addedTarget: XmlNoteTarget; chordRootTarget: XmlNoteTarget; midi: number } | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+  const found = findTargetNoteElement(doc, target);
+  if (!found) return null;
+
+  const { noteEl, partEl, measureEl, measureIdx, staffNumber, voice } = found;
+  if (noteEl.getElementsByTagName("rest").length > 0) return null;
+
+  const chordGroup = getTargetChordGroup(measureEl, noteEl);
+  const chordRoot = chordGroup[0];
+  const groupLast = chordGroup[chordGroup.length - 1];
+
+  const step = pitch.step.trim().toUpperCase();
+  const alter = Math.max(-2, Math.min(2, Math.round(pitch.alter)));
+  const octave = Math.max(0, Math.min(8, Math.round(pitch.octave)));
+  const midi = Math.max(21, Math.min(108, (octave + 1) * 12 + (STEP_TO_PC[step] ?? 0) + alter));
+
+  // Avoid duplicate unison pitch inside the chord
+  const existingNote = chordGroup.find((el) => {
+    const pEl = el.getElementsByTagName("pitch")[0];
+    if (!pEl) return false;
+    const s = (pEl.getElementsByTagName("step")[0]?.textContent || "C").trim().toUpperCase();
+    const a = Number.parseInt(pEl.getElementsByTagName("alter")[0]?.textContent || "0", 10) || 0;
+    const o = Number.parseInt(pEl.getElementsByTagName("octave")[0]?.textContent || "4", 10) || 4;
+    return (o + 1) * 12 + (STEP_TO_PC[s] ?? 0) + a === midi;
+  });
+
+  const mNum = getMeasureNumber(measureEl, measureIdx);
+  const onsetWhole = computeMeasureAndNoteOnsetWhole(partEl, measureIdx, chordRoot);
+  if (existingNote) {
+    const mNotes = Array.from(measureEl.children).filter((c) => c.tagName.toLowerCase() === "note");
+    const existIdx = mNotes.indexOf(existingNote);
+    const rootIdx = mNotes.indexOf(chordRoot);
+    return {
+      xml: xmlStr,
+      addedTarget: {
+        partIndex: target.partIndex,
+        measureNumber: mNum,
+        onsetWhole,
+        pitchMidi: midi,
+        staffNumber,
+        voice,
+        noteIndex: existIdx >= 0 ? existIdx : target.noteIndex,
+      },
+      chordRootTarget: {
+        partIndex: target.partIndex,
+        measureNumber: mNum,
+        onsetWhole,
+        pitchMidi: target.pitchMidi,
+        staffNumber,
+        voice,
+        noteIndex: rootIdx >= 0 ? rootIdx : target.noteIndex,
+      },
+      midi,
+    };
+  }
+
+  const newChordNote = doc.createElement("note");
+  newChordNote.appendChild(doc.createElement("chord"));
+  const pitchEl = doc.createElement("pitch");
+  setElementText(doc, pitchEl, "step", step);
+  if (alter !== 0) setElementText(doc, pitchEl, "alter", String(alter));
+  setElementText(doc, pitchEl, "octave", String(octave));
+  newChordNote.appendChild(pitchEl);
+
+  const durText = chordRoot.getElementsByTagName("duration")[0]?.textContent?.trim() || "48";
+  const typeText = chordRoot.getElementsByTagName("type")[0]?.textContent?.trim() || "quarter";
+  setElementText(doc, newChordNote, "duration", durText);
+  setElementText(doc, newChordNote, "voice", voice);
+  setElementText(doc, newChordNote, "type", typeText);
+
+  const dotCount = chordRoot.getElementsByTagName("dot").length;
+  for (let d = 0; d < dotCount; d++) {
+    newChordNote.appendChild(doc.createElement("dot"));
+  }
+  const timeMod = chordRoot.getElementsByTagName("time-modification")[0];
+  if (timeMod) {
+    newChordNote.appendChild(timeMod.cloneNode(true));
+  }
+  if (chordRoot.getElementsByTagName("staff").length > 0) {
+    setElementText(doc, newChordNote, "staff", String(staffNumber));
+  }
+
+  if (groupLast.nextSibling) {
+    measureEl.insertBefore(newChordNote, groupLast.nextSibling);
+  } else {
+    measureEl.appendChild(newChordNote);
+  }
+
+  recomputePartAccidentals(doc, partEl);
+  applyAutomaticBeamingToDoc(doc, partEl);
+
+  const mNotesAfter = Array.from(measureEl.children).filter((c) => c.tagName.toLowerCase() === "note");
+  const addedIdx = mNotesAfter.indexOf(newChordNote);
+  const rootIdx = mNotesAfter.indexOf(chordRoot);
+  const rootPitchEl = chordRoot.getElementsByTagName("pitch")[0];
+  let rootMidi = target.pitchMidi;
+  if (rootPitchEl) {
+    const rs = (rootPitchEl.getElementsByTagName("step")[0]?.textContent || "C").trim().toUpperCase();
+    const ra = Number.parseInt(rootPitchEl.getElementsByTagName("alter")[0]?.textContent || "0", 10) || 0;
+    const ro = Number.parseInt(rootPitchEl.getElementsByTagName("octave")[0]?.textContent || "4", 10) || 4;
+    rootMidi = (ro + 1) * 12 + (STEP_TO_PC[rs] ?? 0) + ra;
+  }
+
+  return {
+    xml: serializeXmlDoc(doc),
+    addedTarget: {
+      partIndex: target.partIndex,
+      measureNumber: mNum,
+      onsetWhole,
+      pitchMidi: midi,
+      staffNumber,
+      voice,
+      noteIndex: addedIdx >= 0 ? addedIdx : undefined,
+    },
+    chordRootTarget: {
+      partIndex: target.partIndex,
+      measureNumber: mNum,
+      onsetWhole,
+      pitchMidi: rootMidi,
+      staffNumber,
+      voice,
+      noteIndex: rootIdx >= 0 ? rootIdx : undefined,
+    },
+    midi,
+  };
 }
 
 export interface MeasureMeterUpdateResult {
@@ -2098,6 +2406,7 @@ export function setScorePickupMeasure(
       partEl.removeChild(m0);
       renumberPartMeasures(partEl);
       recomputePartAccidentals(doc, partEl);
+      applyAutomaticBeamingToDoc(doc, partEl);
     }
     return { xml: serializeXmlDoc(doc) };
   }
@@ -2131,6 +2440,7 @@ export function setScorePickupMeasure(
       m0.setAttribute("implicit", "yes");
       renumberPartMeasures(p);
       recomputePartAccidentals(doc, p);
+      applyAutomaticBeamingToDoc(doc, p);
     }
     return { xml: serializeXmlDoc(doc) };
   }
@@ -2169,6 +2479,7 @@ export function setScorePickupMeasure(
     partEl.insertBefore(m0, oldM1);
     renumberPartMeasures(partEl);
     recomputePartAccidentals(doc, partEl);
+    applyAutomaticBeamingToDoc(doc, partEl);
   }
 
   return { xml: serializeXmlDoc(doc) };
@@ -2287,6 +2598,7 @@ export function setMeasureBeatsOrMeter(
 
     renumberPartMeasures(p);
     recomputePartAccidentals(doc, p);
+    applyAutomaticBeamingToDoc(doc, p);
   }
 
   return { xml: serializeXmlDoc(doc) };
@@ -2790,22 +3102,35 @@ export function deleteMeasureFromAllParts(xmlStr: string, measureNumber: number)
   return serializeXmlDoc(doc);
 }
 
+function insertNoteInMeasureAt(
+  doc: Document,
+  measureEl: Element,
+  anchor: Element,
+  elements: Element[],
+): void {
+  for (const el of elements) {
+    measureEl.insertBefore(el, anchor);
+  }
+}
+
 /**
- * Step-time MIDI insertion: inserts single notes, chords, or rests into the target staff/voice
+ * Step-time MIDI or letter insertion: inserts single notes, chords, or rests into the target staff/voice
  * at the active cursor (or first rest), splitting long rests cleanly and advancing the cursor.
  */
 export function insertStepMidiNotesIntoXml(
   xmlStr: string,
   options: {
     pitchesMidi: number[];
+    explicitPitches?: Array<{ step: string; alter: number; octave: number }>;
     durationType: EditableNoteType;
     dotted: boolean;
+    tupletRatio?: { actual: number; normal: number } | null;
     isRest?: boolean;
     voice?: "1" | "2";
     staffNumber?: 1 | 2;
     cursorTarget?: XmlNoteTarget | null;
   },
-): { xml: string; nextCursorTarget: XmlNoteTarget | null } | null {
+): { xml: string; insertedTarget: XmlNoteTarget | null; nextCursorTarget: XmlNoteTarget | null } | null {
   let workingXml = xmlStr;
   let doc = parseXmlDoc(workingXml);
   if (!doc) return null;
@@ -2821,7 +3146,10 @@ export function insertStepMidiNotesIntoXml(
 
   const divisions = ensurePartDivisionsAtLeast(doc, partEl, 0, 48);
   const { fifths } = getEffectiveDivisionsAndFifths(partEl, 0);
-  const rawDurDivs = divisions * TYPE_TO_QUARTERS[options.durationType] * (options.dotted ? 1.5 : 1);
+  let rawDurDivs = divisions * TYPE_TO_QUARTERS[options.durationType] * (options.dotted ? 1.5 : 1);
+  if (options.tupletRatio) {
+    rawDurDivs *= options.tupletRatio.normal / options.tupletRatio.actual;
+  }
   const insertDivs = Math.max(1, Math.round(rawDurDivs));
 
   let targetMatch: TargetMatch | null = options.cursorTarget
@@ -2898,18 +3226,20 @@ export function insertStepMidiNotesIntoXml(
       ? { type: options.durationType, dotted: options.dotted }
       : durationDivsToBestType(actualDur, divisions);
 
-  const newElements =
-    options.isRest || options.pitchesMidi.length === 0
-      ? buildRestNoteElementsForDuration(doc, actualDur, divisions, effectiveVoice, targetStaff)
-      : createPitchedNoteElements(doc, {
-          pitchesMidi: options.pitchesMidi,
-          durDivs: actualDur,
-          noteType: actualSpec.type,
-          dotted: actualSpec.dotted,
-          voice: effectiveVoice,
-          staffNumber: targetStaff,
-          fifths,
-        });
+  const isRestEntry = Boolean(options.isRest) || (options.pitchesMidi.length === 0 && (!options.explicitPitches || options.explicitPitches.length === 0));
+  const newElements = isRestEntry
+    ? buildRestNoteElementsForDuration(doc, actualDur, divisions, effectiveVoice, targetStaff)
+    : createPitchedNoteElements(doc, {
+        pitchesMidi: options.pitchesMidi,
+        explicitPitches: options.explicitPitches,
+        durDivs: actualDur,
+        noteType: actualSpec.type,
+        dotted: actualSpec.dotted,
+        tupletRatio: actualDur === insertDivs ? options.tupletRatio ?? null : null,
+        voice: effectiveVoice,
+        staffNumber: targetStaff,
+        fifths,
+      });
 
   const remainderDivs = oldDurDivs - actualDur;
   const remainderRests =
@@ -2918,77 +3248,193 @@ export function insertStepMidiNotesIntoXml(
       : [];
 
   const anchor = toRemove[0];
-  for (const el of [...newElements, ...remainderRests]) {
-    measureEl.insertBefore(el, anchor);
-  }
+  insertNoteInMeasureAt(doc, measureEl, anchor, [...newElements, ...remainderRests]);
   for (const oldEl of toRemove) {
     measureEl.removeChild(oldEl);
   }
   recomputePartAccidentals(doc, partEl);
+  applyAutomaticBeamingToDoc(doc, partEl);
 
-  // Locate next slot cursor (either remainder rest, next slot in measure, or next measure's first slot)
-  const serialized = serializeXmlDoc(doc);
-  const nextDoc = parseXmlDoc(serialized);
-  if (!nextDoc) return { xml: serialized, nextCursorTarget: null };
-  const nextPart = nextDoc.getElementsByTagName("part")[partIndex] || nextDoc.getElementsByTagName("part")[0];
-  const nextMeasures = Array.from(nextPart.getElementsByTagName("measure"));
-  const curMeasure = nextMeasures[measureIdx];
-  const curMeasureNum = curMeasure ? getMeasureNumber(curMeasure, measureIdx) : measureIdx + 1;
+  const curMeasures = Array.from(partEl.getElementsByTagName("measure"));
+  const curMeasureNum = getMeasureNumber(measureEl, measureIdx);
+  const mNotesAfter = Array.from(measureEl.children).filter((c) => c.tagName.toLowerCase() === "note");
+  const firstInsertedEl = newElements[0];
+  const lastInsertedEl = newElements[newElements.length - 1];
+  const firstInsertedIdx = firstInsertedEl ? mNotesAfter.indexOf(firstInsertedEl) : -1;
+  const lastInsertedIdx = lastInsertedEl ? mNotesAfter.indexOf(lastInsertedEl) : -1;
 
+  let firstInsertedMidi: number | null = null;
+  if (firstInsertedEl && firstInsertedEl.getElementsByTagName("rest").length === 0) {
+    const pEl = firstInsertedEl.getElementsByTagName("pitch")[0];
+    if (pEl) {
+      const s = (pEl.getElementsByTagName("step")[0]?.textContent || "C").trim().toUpperCase();
+      const a = Number.parseInt(pEl.getElementsByTagName("alter")[0]?.textContent || "0", 10) || 0;
+      const o = Number.parseInt(pEl.getElementsByTagName("octave")[0]?.textContent || "4", 10) || 4;
+      firstInsertedMidi = (o + 1) * 12 + (STEP_TO_PC[s] ?? 0) + a;
+    }
+  }
+
+  const insertedTarget: XmlNoteTarget | null =
+    firstInsertedEl && firstInsertedIdx >= 0
+      ? {
+          partIndex,
+          measureNumber: curMeasureNum,
+          onsetWhole: computeMeasureAndNoteOnsetWhole(partEl, measureIdx, firstInsertedEl),
+          pitchMidi: firstInsertedMidi,
+          staffNumber: targetStaff ?? 1,
+          voice: effectiveVoice,
+          noteIndex: firstInsertedIdx,
+        }
+      : null;
+
+  // Locate next slot cursor: first non-chord note/rest AFTER inserted element in same measure & staff, or next measure's first slot
   let nextCursorTarget: XmlNoteTarget | null = null;
-  if (remainderRests.length > 0) {
-    const mNotes = Array.from(curMeasure.children).filter((c) => c.tagName.toLowerCase() === "note");
-    const firstRest = mNotes.find(
-      (n) =>
-        n.getElementsByTagName("rest").length > 0 &&
-        (targetStaff === null || getNoteStaffNumber(n) === targetStaff),
-    );
-    if (firstRest) {
+  if (lastInsertedIdx >= 0) {
+    for (let i = lastInsertedIdx + 1; i < mNotesAfter.length; i++) {
+      const candidate = mNotesAfter[i];
+      if (candidate.getElementsByTagName("chord").length > 0) continue;
+      if (targetStaff !== null && getNoteStaffNumber(candidate) !== targetStaff) continue;
+      let candMidi: number | null = null;
+      if (candidate.getElementsByTagName("rest").length === 0) {
+        const pEl = candidate.getElementsByTagName("pitch")[0];
+        if (pEl) {
+          const s = (pEl.getElementsByTagName("step")[0]?.textContent || "C").trim().toUpperCase();
+          const a = Number.parseInt(pEl.getElementsByTagName("alter")[0]?.textContent || "0", 10) || 0;
+          const o = Number.parseInt(pEl.getElementsByTagName("octave")[0]?.textContent || "4", 10) || 4;
+          candMidi = (o + 1) * 12 + (STEP_TO_PC[s] ?? 0) + a;
+        }
+      }
       nextCursorTarget = {
         partIndex,
         measureNumber: curMeasureNum,
-        onsetWhole: 0,
-        pitchMidi: null,
+        onsetWhole: computeMeasureAndNoteOnsetWhole(partEl, measureIdx, candidate),
+        pitchMidi: candMidi,
         staffNumber: targetStaff ?? 1,
-        noteIndex: mNotes.indexOf(firstRest),
+        voice: getNoteVoice(candidate),
+        noteIndex: i,
       };
+      break;
     }
-  } else {
-    for (let mI = measureIdx + 1; mI < nextMeasures.length; mI++) {
-      const m = nextMeasures[mI];
+  }
+
+  if (!nextCursorTarget) {
+    for (let mI = measureIdx + 1; mI < curMeasures.length; mI++) {
+      const m = curMeasures[mI];
       const mNum = getMeasureNumber(m, mI);
       const mNotes = Array.from(m.children).filter((c) => c.tagName.toLowerCase() === "note");
-      const slot = mNotes.find((n) => targetStaff === null || getNoteStaffNumber(n) === targetStaff);
-      if (slot) {
+      const slotIdx = mNotes.findIndex(
+        (n) => n.getElementsByTagName("chord").length === 0 && (targetStaff === null || getNoteStaffNumber(n) === targetStaff),
+      );
+      if (slotIdx >= 0) {
+        const slot = mNotes[slotIdx];
+        let candMidi: number | null = null;
+        if (slot.getElementsByTagName("rest").length === 0) {
+          const pEl = slot.getElementsByTagName("pitch")[0];
+          if (pEl) {
+            const s = (pEl.getElementsByTagName("step")[0]?.textContent || "C").trim().toUpperCase();
+            const a = Number.parseInt(pEl.getElementsByTagName("alter")[0]?.textContent || "0", 10) || 0;
+            const o = Number.parseInt(pEl.getElementsByTagName("octave")[0]?.textContent || "4", 10) || 4;
+            candMidi = (o + 1) * 12 + (STEP_TO_PC[s] ?? 0) + a;
+          }
+        }
         nextCursorTarget = {
           partIndex,
           measureNumber: mNum,
-          onsetWhole: 0,
-          pitchMidi: null,
+          onsetWhole: computeMeasureAndNoteOnsetWhole(partEl, mI, slot),
+          pitchMidi: candMidi,
           staffNumber: targetStaff ?? 1,
-          noteIndex: mNotes.indexOf(slot),
+          voice: getNoteVoice(slot),
+          noteIndex: slotIdx,
         };
         break;
       }
     }
   }
 
-  return { xml: serialized, nextCursorTarget };
+  return { xml: serializeXmlDoc(doc), insertedTarget, nextCursorTarget };
+}
+
+export function insertLetterNoteIntoXml(
+  xmlStr: string,
+  options: {
+    letter: NoteLetter;
+    durationType: EditableNoteType;
+    dotted: boolean;
+    tupletRatio?: { actual: number; normal: number } | null;
+    isRest?: boolean;
+    voice?: "1" | "2";
+    staffNumber?: 1 | 2;
+    cursorTarget?: XmlNoteTarget | null;
+    previousMidi?: number | null;
+    clefOverride?: "treble" | "bass";
+  },
+): {
+  xml: string;
+  insertedTarget: XmlNoteTarget | null;
+  nextCursorTarget: XmlNoteTarget | null;
+  resolvedPitch: DiatonicPitchResult;
+} | null {
+  const doc = parseXmlDoc(xmlStr);
+  if (!doc) return null;
+  const partIndex = options.cursorTarget?.partIndex ?? 0;
+  const partEl = doc.getElementsByTagName("part")[partIndex] || doc.getElementsByTagName("part")[0];
+  if (!partEl) return null;
+
+  let measureIdx = 0;
+  let fifths = getEffectiveDivisionsAndFifths(partEl, 0).fifths;
+  let targetStaff = options.staffNumber ?? options.cursorTarget?.staffNumber ?? 1;
+
+  if (options.cursorTarget) {
+    const found = findTargetNoteElement(doc, options.cursorTarget);
+    if (found) {
+      measureIdx = found.measureIdx;
+      fifths = found.fifths;
+      targetStaff = options.staffNumber ?? found.staffNumber;
+    }
+  }
+
+  const clef = options.clefOverride ?? getNoteClef(partEl, measureIdx, targetStaff);
+  const resolvedPitch = resolveLetterNotePitch({
+    letter: options.letter,
+    keyFifths: fifths,
+    clef,
+    previousMidi: options.previousMidi,
+  });
+
+  const stepRes = insertStepMidiNotesIntoXml(xmlStr, {
+    pitchesMidi: [resolvedPitch.midi],
+    explicitPitches: [{ step: resolvedPitch.step, alter: resolvedPitch.alter, octave: resolvedPitch.octave }],
+    durationType: options.durationType,
+    dotted: options.dotted,
+    tupletRatio: options.tupletRatio,
+    isRest: options.isRest,
+    voice: options.voice,
+    staffNumber: options.staffNumber,
+    cursorTarget: options.cursorTarget,
+  });
+  if (!stepRes) return null;
+  return {
+    ...stepRes,
+    resolvedPitch,
+  };
 }
 
 /**
  * Convert quantized recorded MIDI ScoreNote[] directly into grand-staff / treble / bass MusicXML
- * while keeping time signature, key signature, tempo, and measure structure valid.
+ * while keeping time signature, key signature, tempo, beat beaming, barline ties, and legato slurs valid.
  */
 export function mergeLiveMidiRecordingIntoXml(
   xmlStr: string,
-  recordedNotes: ScoreNote[],
+  recordedNotes: RecordedScoreNote[],
   options: {
     tempoBpm: number;
     timeSignature: string;
     snapMode: SnapGridMode;
     clefMode?: PlaygroundClefMode;
     splitPointMidi?: number;
+    autoSlursTies?: boolean;
+    legatoOverlapThresholdSec?: number;
+    legatoMaxOverlapSec?: number;
   },
 ): string | null {
   const doc = parseXmlDoc(xmlStr);
@@ -2996,6 +3442,10 @@ export function mergeLiveMidiRecordingIntoXml(
 
   const partEl = doc.getElementsByTagName("part")[0];
   if (!partEl) return null;
+
+  const autoSlursTies = options.autoSlursTies ?? true;
+  const legatoOverlapThresholdSec = options.legatoOverlapThresholdSec ?? 0.005;
+  const legatoMaxOverlapSec = options.legatoMaxOverlapSec ?? 0.45;
 
   const [bStr, btStr] = (options.timeSignature || "4/4").split("/", 2);
   const beats = Math.max(1, Math.min(16, Number.parseInt(bStr, 10) || 4));
@@ -3017,18 +3467,32 @@ export function mergeLiveMidiRecordingIntoXml(
     return Math.max(1, Math.round(barQuarters * divisions));
   });
 
-  const quantizedEvents = recordedNotes.map((n) => {
+  interface RecordedQuantizedEvent {
+    attackId: number;
+    pitchMidi: number;
+    origStartDiv: number;
+    origEndDiv: number;
+    clampedEndDiv: number;
+    rawOnsetSec?: number;
+    rawOffsetSec?: number;
+  }
+
+  const quantizedEvents: RecordedQuantizedEvent[] = recordedNotes.map((n, idx) => {
     const rawStart = Math.max(0, Math.round((n.onset_sec * divPerSec) / stepDivs) * stepDivs);
     const rawEnd = Math.max(rawStart + stepDivs, Math.round((n.offset_sec * divPerSec) / stepDivs) * stepDivs);
     return {
+      attackId: idx,
       pitchMidi: n.pitch_midi,
-      startDiv: Math.round(rawStart),
-      endDiv: Math.round(rawEnd),
+      origStartDiv: Math.round(rawStart),
+      origEndDiv: Math.round(rawEnd),
+      clampedEndDiv: Math.round(rawEnd),
+      rawOnsetSec: typeof n.raw_onset_sec === "number" ? n.raw_onset_sec : undefined,
+      rawOffsetSec: typeof n.raw_offset_sec === "number" ? n.raw_offset_sec : undefined,
     };
   });
 
   let cumulativeExistingDivs = existingMeasureDivs.reduce((sum, d) => sum + d, 0);
-  const maxEndDiv = quantizedEvents.reduce((m, e) => Math.max(m, e.endDiv), measureDivs);
+  const maxEndDiv = quantizedEvents.reduce((m, e) => Math.max(m, e.origEndDiv), measureDivs);
 
   let workingXml = serializeXmlDoc(doc);
   let safetyAdd = 0;
@@ -3048,59 +3512,118 @@ export function mergeLiveMidiRecordingIntoXml(
     options.clefMode === "grand" ||
     Number.parseInt(nextPart.getElementsByTagName("staves")[0]?.textContent || "1", 10) >= 2;
   const splitMidi = options.splitPointMidi ?? 60;
+  const isPercussion = Array.from(nextPart.getElementsByTagName("sign")).some(
+    (s) => (s.textContent || "").trim().toLowerCase() === "percussion",
+  );
 
-  const measures = Array.from(nextPart.getElementsByTagName("measure"));
+  // Prevent quantized legato overlap from swallowing subsequent melodic notes in the same single-voice staff
+  const prepareStaffLaneGroups = (events: RecordedQuantizedEvent[]) => {
+    const sorted = [...events].sort((a, b) => a.origStartDiv - b.origStartDiv || a.pitchMidi - b.pitchMidi);
+    const byOnset = new Map<number, RecordedQuantizedEvent[]>();
+    for (const ev of sorted) {
+      if (!byOnset.has(ev.origStartDiv)) byOnset.set(ev.origStartDiv, []);
+      byOnset.get(ev.origStartDiv)!.push(ev);
+    }
+    const onsetKeys = Array.from(byOnset.keys()).sort((a, b) => a - b);
+    const groups = onsetKeys.map((onset) => ({
+      onsetDiv: onset,
+      events: byOnset.get(onset)!.sort((a, b) => a.pitchMidi - b.pitchMidi),
+    }));
+    for (let i = 0; i < groups.length - 1; i++) {
+      const nextOnset = groups[i + 1].onsetDiv;
+      for (const ev of groups[i].events) {
+        if (ev.clampedEndDiv > nextOnset) {
+          ev.clampedEndDiv = nextOnset;
+        }
+      }
+    }
+    return groups;
+  };
+
+  const attackFirstElMap = new Map<number, Element>();
+  const attackLastElMap = new Map<number, Element>();
+  const staffLaneGroupsMap = new Map<string, ReturnType<typeof prepareStaffLaneGroups>>();
 
   const populateStaffInMeasure = (
     mEl: Element,
     mStartDiv: number,
     mEndDiv: number,
     barDivs: number,
-    staffEvents: typeof quantizedEvents,
+    staffEvents: RecordedQuantizedEvent[],
+    laneGroups: ReturnType<typeof prepareStaffLaneGroups>,
     voice: string,
     staffNumber: number | null,
   ) => {
-    // Group events by clipped onset within measure
-    const clipped = staffEvents
-      .filter((e) => e.endDiv > mStartDiv && e.startDiv < mEndDiv)
-      .map((e) => ({
-        pitchMidi: e.pitchMidi,
-        start: Math.max(0, e.startDiv - mStartDiv),
-        end: Math.min(barDivs, e.endDiv - mStartDiv),
-      }))
-      .filter((e) => e.end > e.start);
-
-    const byOnset = new Map<number, typeof clipped>();
-    for (const ev of clipped) {
-      if (!byOnset.has(ev.start)) byOnset.set(ev.start, []);
-      byOnset.get(ev.start)!.push(ev);
+    interface ClippedSlot {
+      start: number;
+      end: number;
+      items: RecordedQuantizedEvent[];
     }
-    const sortedOnsets = Array.from(byOnset.keys()).sort((a, b) => a - b);
+
+    const slots: ClippedSlot[] = [];
+    for (const grp of laneGroups) {
+      const active = grp.events.filter((e) => e.clampedEndDiv > mStartDiv && e.origStartDiv < mEndDiv);
+      if (active.length === 0) continue;
+      const start = Math.max(0, grp.onsetDiv - mStartDiv);
+      const maxEnd = active.reduce((m, e) => Math.max(m, Math.min(barDivs, e.clampedEndDiv - mStartDiv)), start);
+      if (maxEnd > start) {
+        slots.push({ start, end: maxEnd, items: active });
+      }
+    }
+    void staffEvents;
+    slots.sort((a, b) => a.start - b.start);
 
     let cursor = 0;
-    for (let i = 0; i < sortedOnsets.length; i++) {
-      const onset = sortedOnsets[i];
-      if (onset > cursor) {
-        const gapRests = buildRestNoteElementsForDuration(nextDoc, onset - cursor, divisions, voice, staffNumber);
+    for (let i = 0; i < slots.length; i++) {
+      const slot = slots[i];
+      if (slot.start > cursor) {
+        const gapRests = buildRestNoteElementsForDuration(nextDoc, slot.start - cursor, divisions, voice, staffNumber);
         for (const r of gapRests) mEl.appendChild(r);
-        cursor = onset;
+        cursor = slot.start;
       }
-      const nextOnset = i + 1 < sortedOnsets.length ? sortedOnsets[i + 1] : barDivs;
-      const chordGroup = byOnset.get(onset)!;
-      const maxChordEnd = chordGroup.reduce((m, e) => Math.max(m, e.end), onset);
-      const availDur = Math.max(stepDivs, Math.min(maxChordEnd, nextOnset) - onset);
-      const spec = durationDivsToBestType(availDur, divisions);
-      const noteEls = createPitchedNoteElements(nextDoc, {
-        pitchesMidi: chordGroup.map((c) => c.pitchMidi),
-        durDivs: Math.round(availDur),
-        noteType: spec.type,
-        dotted: spec.dotted,
-        voice,
-        staffNumber,
-        fifths,
-      });
-      for (const ne of noteEls) mEl.appendChild(ne);
-      cursor = onset + Math.round(availDur);
+      if (slot.start < cursor) continue;
+      const nextSlotStart = i + 1 < slots.length ? slots[i + 1].start : barDivs;
+      const availDur = Math.max(Math.round(stepDivs), Math.round(Math.min(slot.end, nextSlotStart) - slot.start));
+      const sortedItems = [...slot.items].sort((a, b) => a.pitchMidi - b.pitchMidi);
+
+      const segParts = autoSlursTies
+        ? decomposeDivsToRhythmicParts(availDur, divisions)
+        : [{ durDivs: availDur, ...durationDivsToBestType(availDur, divisions) }];
+
+      for (let pIdx = 0; pIdx < segParts.length; pIdx++) {
+        const partSpec = segParts[pIdx];
+        const noteEls = createPitchedNoteElements(nextDoc, {
+          pitchesMidi: sortedItems.map((c) => c.pitchMidi),
+          durDivs: partSpec.durDivs,
+          noteType: partSpec.type,
+          dotted: partSpec.dotted,
+          voice,
+          staffNumber,
+          fifths,
+        });
+
+        noteEls.forEach((ne, nIdx) => {
+          const ev = sortedItems[nIdx];
+          if (!ev) return;
+          if (!attackFirstElMap.has(ev.attackId)) {
+            attackFirstElMap.set(ev.attackId, ne);
+          }
+          attackLastElMap.set(ev.attackId, ne);
+
+          if (autoSlursTies) {
+            const continuesFromBefore = ev.origStartDiv < mStartDiv;
+            const continuesAfterBar = ev.clampedEndDiv > mEndDiv;
+            const needStopTie = (pIdx === 0 && continuesFromBefore) || pIdx > 0;
+            const needStartTie =
+              (pIdx === segParts.length - 1 && continuesAfterBar) || pIdx < segParts.length - 1;
+            if (needStopTie) addTieMarker(nextDoc, ne, "stop");
+            if (needStartTie) addTieMarker(nextDoc, ne, "start");
+          }
+          mEl.appendChild(ne);
+        });
+      }
+
+      cursor = slot.start + availDur;
     }
 
     if (cursor < barDivs) {
@@ -3109,9 +3632,18 @@ export function mergeLiveMidiRecordingIntoXml(
     }
   };
 
+  if (hasTwoStaves) {
+    const rhEvents = quantizedEvents.filter((e) => e.pitchMidi >= splitMidi);
+    const lhEvents = quantizedEvents.filter((e) => e.pitchMidi < splitMidi);
+    staffLaneGroupsMap.set("1:1", prepareStaffLaneGroups(rhEvents));
+    staffLaneGroupsMap.set("2:2", prepareStaffLaneGroups(lhEvents));
+  } else {
+    staffLaneGroupsMap.set("1:1", prepareStaffLaneGroups(quantizedEvents));
+  }
+
+  const measures = Array.from(nextPart.getElementsByTagName("measure"));
   let runningStartDiv = 0;
   measures.forEach((mEl, mIdx) => {
-    // Preserve <attributes> and <direction> in measure 1; clear old notes & backups cleanly
     for (const child of Array.from(mEl.children)) {
       const tag = child.tagName.toLowerCase();
       if (tag === "note" || tag === "backup" || tag === "forward") {
@@ -3126,17 +3658,110 @@ export function mergeLiveMidiRecordingIntoXml(
     if (hasTwoStaves) {
       const rhEvents = quantizedEvents.filter((e) => e.pitchMidi >= splitMidi);
       const lhEvents = quantizedEvents.filter((e) => e.pitchMidi < splitMidi);
-      populateStaffInMeasure(mEl, mStartDiv, mEndDiv, barDivs, rhEvents, "1", 1);
+      populateStaffInMeasure(
+        mEl,
+        mStartDiv,
+        mEndDiv,
+        barDivs,
+        rhEvents,
+        staffLaneGroupsMap.get("1:1") || [],
+        "1",
+        1,
+      );
       const backupEl = nextDoc.createElement("backup");
       setElementText(nextDoc, backupEl, "duration", String(barDivs));
       mEl.appendChild(backupEl);
-      populateStaffInMeasure(mEl, mStartDiv, mEndDiv, barDivs, lhEvents, "2", 2);
+      populateStaffInMeasure(
+        mEl,
+        mStartDiv,
+        mEndDiv,
+        barDivs,
+        lhEvents,
+        staffLaneGroupsMap.get("2:2") || [],
+        "2",
+        2,
+      );
     } else {
-      populateStaffInMeasure(mEl, mStartDiv, mEndDiv, barDivs, quantizedEvents, "1", null);
+      populateStaffInMeasure(
+        mEl,
+        mStartDiv,
+        mEndDiv,
+        barDivs,
+        quantizedEvents,
+        staffLaneGroupsMap.get("1:1") || [],
+        "1",
+        null,
+      );
     }
   });
 
+  // Conservative legato slur detection using actual recorded note-on / note-off timestamps
+  if (autoSlursTies && !isPercussion) {
+    const appendSlurMarker = (el: Element, slurType: "start" | "stop") => {
+      const notations = getOrCreateChild(nextDoc, el, "notations");
+      const already = Array.from(notations.getElementsByTagName("slur")).some(
+        (s) => s.getAttribute("type") === slurType,
+      );
+      if (already) return;
+      const slurEl = nextDoc.createElement("slur");
+      slurEl.setAttribute("type", slurType);
+      slurEl.setAttribute("number", "1");
+      notations.appendChild(slurEl);
+    };
+
+    for (const laneGroups of staffLaneGroupsMap.values()) {
+      let phraseStartIdx: number | null = null;
+      let phraseEndIdx: number | null = null;
+
+      const flushPhrase = () => {
+        if (phraseStartIdx !== null && phraseEndIdx !== null && phraseEndIdx > phraseStartIdx) {
+          const firstEv = laneGroups[phraseStartIdx].events[0];
+          const lastEv = laneGroups[phraseEndIdx].events[0];
+          const startEl = attackFirstElMap.get(firstEv.attackId);
+          const endEl = attackLastElMap.get(lastEv.attackId);
+          if (startEl && endEl && startEl !== endEl) {
+            appendSlurMarker(startEl, "start");
+            appendSlurMarker(endEl, "stop");
+          }
+        }
+        phraseStartIdx = null;
+        phraseEndIdx = null;
+      };
+
+      for (let i = 0; i < laneGroups.length - 1; i++) {
+        const curGrp = laneGroups[i];
+        const nextGrp = laneGroups[i + 1];
+        const curMono = curGrp.events.length === 1 ? curGrp.events[0] : null;
+        const nextMono = nextGrp.events.length === 1 ? nextGrp.events[0] : null;
+
+        let isLegatoTransition = false;
+        if (
+          curMono &&
+          nextMono &&
+          curMono.pitchMidi !== nextMono.pitchMidi &&
+          nextMono.origStartDiv <= curMono.clampedEndDiv + 0.5 &&
+          typeof curMono.rawOffsetSec === "number" &&
+          typeof nextMono.rawOnsetSec === "number"
+        ) {
+          const rawOverlap = curMono.rawOffsetSec - nextMono.rawOnsetSec;
+          if (rawOverlap >= legatoOverlapThresholdSec && rawOverlap <= legatoMaxOverlapSec) {
+            isLegatoTransition = true;
+          }
+        }
+
+        if (isLegatoTransition) {
+          if (phraseStartIdx === null) phraseStartIdx = i;
+          phraseEndIdx = i + 1;
+        } else {
+          flushPhrase();
+        }
+      }
+      flushPhrase();
+    }
+  }
+
   recomputePartAccidentals(nextDoc, nextPart);
+  applyAutomaticBeamingToDoc(nextDoc, nextPart);
   return serializeXmlDoc(nextDoc);
 }
 

@@ -35,6 +35,7 @@ export interface WebMidiAccess {
 }
 
 const MIDI_MONITOR_STORAGE_KEY = "scribasheet_midi_monitor_enabled";
+const MIDI_AUTO_SLURS_TIES_STORAGE_KEY = "scribasheet_midi_auto_slurs_ties";
 
 export function loadMidiMonitorPreference(): boolean {
   if (typeof window === "undefined" || typeof window.localStorage?.getItem !== "function") {
@@ -56,6 +57,31 @@ export function saveMidiMonitorPreference(enabled: boolean): void {
   }
   try {
     window.localStorage.setItem(MIDI_MONITOR_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // Ignore storage quota or private-mode errors
+  }
+}
+
+export function loadAutoSlursTiesPreference(): boolean {
+  if (typeof window === "undefined" || typeof window.localStorage?.getItem !== "function") {
+    return true;
+  }
+  try {
+    const raw = window.localStorage.getItem(MIDI_AUTO_SLURS_TIES_STORAGE_KEY);
+    if (raw === "false") return false;
+    if (raw === "true") return true;
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+export function saveAutoSlursTiesPreference(enabled: boolean): void {
+  if (typeof window === "undefined" || typeof window.localStorage?.setItem !== "function") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(MIDI_AUTO_SLURS_TIES_STORAGE_KEY, enabled ? "true" : "false");
   } catch {
     // Ignore storage quota or private-mode errors
   }

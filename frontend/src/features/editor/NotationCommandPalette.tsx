@@ -399,7 +399,7 @@ export function NotationCommandPalette({
               type="button"
               disabled={!hasSelection}
               aria-label="Octave up"
-              title="Transpose up 1 octave (Shift+ArrowUp)"
+              title="Transpose up 1 octave (Ctrl/Cmd+ArrowUp or Shift+ArrowUp)"
               className={btnClass(false, !hasSelection)}
               onClick={() => onTranspose(12)}
             >
@@ -409,7 +409,7 @@ export function NotationCommandPalette({
               type="button"
               disabled={!hasSelection}
               aria-label="Octave down"
-              title="Transpose down 1 octave (Shift+ArrowDown)"
+              title="Transpose down 1 octave (Ctrl/Cmd+ArrowDown or Shift+ArrowDown)"
               className={btnClass(false, !hasSelection)}
               onClick={() => onTranspose(-12)}
             >
@@ -543,9 +543,9 @@ export function NotationCommandPalette({
               Tuplets &amp; Editor Modes
             </div>
             <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+3</kbd> Triplet (3:2) &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+2..9</kbd> Tuplets</div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">N</kbd> Toggle Note Input &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Esc</kbd> Exit Input / Deselect</div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Del</kbd> / <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Backspace</kbd> Delete Note or Measure</div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">S</kbd> Slur &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">X</kbd> Flip Stem &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">↑/↓</kbd> Pitch &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl+Z/Y</kbd> Undo/Redo</div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">N</kbd> Note Input &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">A–G</kbd> Pitch &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Shift+A–G</kbd> Chord Tone</div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Del</kbd> / <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Backspace</kbd> Delete Note or Measure &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Esc</kbd> Exit</div>
+            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">S</kbd> Slur &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">X</kbd> Stem &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">↑/↓</kbd> Pitch &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+↑/↓</kbd> Octave &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl+Z/Y</kbd> Undo/Redo</div>
             {activeTupletActual && (
               <div className="text-violet-700 dark:text-violet-300 font-medium">
                 Active Tuplet Input: {activeTupletActual}-tuplet

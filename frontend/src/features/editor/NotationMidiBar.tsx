@@ -16,7 +16,9 @@ import {
 } from "@/features/editor/musicXmlEditor";
 import { extractScoreStructure, getBeatUnitQuarters } from "@/features/editor/musicXmlStructure";
 import {
+  loadAutoSlursTiesPreference,
   loadMidiMonitorPreference,
+  saveAutoSlursTiesPreference,
   saveMidiMonitorPreference,
   useWebMidi,
 } from "@/features/editor/useWebMidi";
@@ -57,6 +59,9 @@ export function NotationMidiBar({
   onCommitXml,
 }: NotationMidiBarProps) {
   const [monitorEnabled, setMonitorEnabled] = useState<boolean>(() => loadMidiMonitorPreference());
+  const [autoSlursTies, setAutoSlursTies] = useState<boolean>(() => loadAutoSlursTiesPreference());
+  const autoSlursTiesRef = useRef(autoSlursTies);
+  autoSlursTiesRef.current = autoSlursTies;
   const [stepInputEnabled, setStepInputEnabled] = useState<boolean>(false);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [countInEnabled, setCountInEnabled] = useState<boolean>(false);
@@ -126,6 +131,7 @@ export function NotationMidiBar({
           timeSignature,
           snapMode,
           clefMode,
+          autoSlursTies: autoSlursTiesRef.current,
         });
         if (nextXml) {
           onCommitXml(nextXml, null);
@@ -410,6 +416,27 @@ export function NotationMidiBar({
             <option value="off">Free</option>
           </select>
         </label>
+
+        <button
+          type="button"
+          data-testid="notation-auto-slurs-ties-btn"
+          aria-label="Toggle automatic slurs and ties for MIDI recording"
+          aria-pressed={autoSlursTies}
+          title="When enabled, MIDI recording splits sustained notes across barlines with ties and adds slurs to legato melodic phrases"
+          onClick={() => {
+            const next = !autoSlursTies;
+            setAutoSlursTies(next);
+            autoSlursTiesRef.current = next;
+            saveAutoSlursTiesPreference(next);
+          }}
+          className={`inline-flex items-center gap-1 h-7 rounded-md border px-2 text-[11px] font-medium transition-colors ${
+            autoSlursTies
+              ? "border-violet-400/60 bg-violet-50 text-violet-900 dark:border-violet-500/40 dark:bg-violet-500/20 dark:text-violet-200"
+              : "border-stone-300 bg-white text-stone-600 dark:border-[#27273A] dark:bg-[#181825] dark:text-[#A1A1AA]"
+          }`}
+        >
+          Auto Slurs/Ties: {autoSlursTies ? "ON" : "OFF"}
+        </button>
 
         <label className="inline-flex items-center gap-1 text-[11px] text-stone-700 dark:text-[#A1A1AA]">
           BPM

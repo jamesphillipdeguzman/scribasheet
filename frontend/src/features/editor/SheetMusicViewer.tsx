@@ -22,6 +22,7 @@ import { type MeasureMeterChangePayload, type PendingOverflowWarning } from "@/f
 import { NotationCommandPalette } from "@/features/editor/NotationCommandPalette";
 import { NotationMidiBar } from "@/features/editor/NotationMidiBar";
 import {
+  addChordToneToXmlNote,
   addMeasureToAllParts,
   computeDiatonicDragPitch,
   convertXmlNoteToRest,
@@ -32,7 +33,10 @@ import {
   flipXmlNoteStem,
   formatPitchLabel,
   getXmlNoteInfo,
+  insertLetterNoteIntoXml,
+  type NoteLetter,
   type PlaygroundClefMode,
+  resolveLetterNotePitch,
   setMeasureBeatsOrMeter,
   setMeasureRepeatCount,
   setMeasureVoltaEnding,
@@ -49,6 +53,7 @@ import {
   toggleXmlNoteTie,
   toggleXmlNoteTuplet,
   transposeXmlNote,
+  TUPLET_RATIOS,
   type XmlAccidentalType,
   type XmlArticulationType,
   type XmlNoteInfo,
@@ -334,6 +339,14 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const [selectedMeasureRect, setSelectedMeasureRect] = useState<MeasureBoundingRect | null>(null);
   const [pendingOverflow, setPendingOverflow] = useState<PendingOverflowWarning | null>(null);
   const lastEditedXmlRef = useRef<string | null>(null);
+  const lastEnteredTargetRef = useRef<XmlNoteTarget | null>(null);
+  const lastEnteredMidiRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!editMode || !noteInputMode) {
+      lastEnteredTargetRef.current = null;
+    }
+  }, [editMode, noteInputMode]);
 
   interface DragSession {
     pointerId: number;
@@ -1520,6 +1533,30 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         return;
       }
 
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+        const octaveTarget =
+          selectedTarget && selectedTarget.pitchMidi !== null
+            ? selectedTarget
+            : noteInputMode && lastEnteredTargetRef.current && lastEnteredTargetRef.current.pitchMidi !== null
+              ? lastEnteredTargetRef.current
+              : null;
+        if (octaveTarget) {
+          e.preventDefault();
+          const delta = e.key === "ArrowUp" ? 12 : -12;
+          const res = transposeXmlNote(resolvedXml, octaveTarget, delta);
+          if (res) {
+            lastEnteredMidiRef.current = res.nextTarget.pitchMidi;
+            if (octaveTarget === lastEnteredTargetRef.current) {
+              lastEnteredTargetRef.current = res.nextTarget;
+              applyXmlEdit(res.xml, selectedTarget);
+            } else {
+              applyXmlEdit(res.xml, res.nextTarget);
+            }
+          }
+        }
+        return;
+      }
+
       if ((e.ctrlKey || e.metaKey) && !e.altKey && /^[2-9]$/.test(e.key)) {
         e.preventDefault();
         const actualNotes = Number.parseInt(e.key, 10);
@@ -1538,6 +1575,84 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         return;
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      if (noteInputMode && /^[a-g]$/i.test(e.key)) {
+        e.preventDefault();
+        const letter = e.key.toUpperCase() as NoteLetter;
+        const activeTupletRatio = activeTupletActual ? TUPLET_RATIOS[activeTupletActual] ?? null : null;
+        const targetStaffNum: 1 | 2 =
+          selectedTarget?.staffNumber === 2 || clefMode === "bass" ? 2 : 1;
+        const activeClef: "treble" | "bass" =
+          clefMode === "bass" || targetStaffNum === 2 ? "bass" : "treble";
+        const prevMidi =
+          lastEnteredMidiRef.current ??
+          (selectedTarget?.pitchMidi !== null && selectedTarget?.pitchMidi !== undefined
+            ? selectedTarget.pitchMidi
+            : null);
+
+        if (e.shiftKey) {
+          const chordTarget =
+            selectedTarget && selectedTarget.pitchMidi !== null
+              ? selectedTarget
+              : lastEnteredTargetRef.current && lastEnteredTargetRef.current.pitchMidi !== null
+                ? lastEnteredTargetRef.current
+                : null;
+          if (chordTarget) {
+            const info = getXmlNoteInfo(resolvedXml, chordTarget);
+            const resolved = resolveLetterNotePitch({
+              letter,
+              keyFifths: info?.keyFifths ?? keyFifths,
+              clef: info?.clef ?? activeClef,
+              previousMidi: info?.pitchMidi ?? prevMidi,
+            });
+            const chordRes = addChordToneToXmlNote(resolvedXml, chordTarget, {
+              step: resolved.step,
+              alter: resolved.alter,
+              octave: resolved.octave,
+            });
+            if (chordRes) {
+              lastEnteredMidiRef.current = chordRes.midi;
+              try {
+                midiSynth.triggerNote(chordRes.midi, 0.25, 84, 0.7);
+              } catch {
+                // Ignore audio preview errors in restricted/headless environments
+              }
+              applyXmlEdit(chordRes.xml, selectedTarget, `Added chord tone ${resolved.label}`);
+              return;
+            }
+          }
+        }
+
+        const res = insertLetterNoteIntoXml(resolvedXml, {
+          letter,
+          durationType: activeDuration,
+          dotted: activeDotted,
+          isRest: restInputMode,
+          voice: activeVoice,
+          staffNumber: targetStaffNum,
+          cursorTarget: selectedTarget,
+          previousMidi: prevMidi,
+          clefOverride: activeClef,
+          tupletRatio: activeTupletRatio,
+        });
+        if (res) {
+          lastEnteredTargetRef.current = res.insertedTarget;
+          lastEnteredMidiRef.current = res.resolvedPitch.midi;
+          if (!restInputMode) {
+            try {
+              midiSynth.triggerNote(res.resolvedPitch.midi, 0.25, 84, 0.7);
+            } catch {
+              // Ignore audio preview errors in restricted/headless environments
+            }
+          }
+          applyXmlEdit(
+            res.xml,
+            res.nextCursorTarget,
+            restInputMode ? "Inserted rest" : `Entered ${res.resolvedPitch.label}`,
+          );
+        }
+        return;
+      }
 
       if (lower === "n") {
         e.preventDefault();
@@ -1670,6 +1785,12 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     selectedMeasureNumber,
     resolvedXml,
     activeDuration,
+    activeDotted,
+    activeVoice,
+    activeTupletActual,
+    restInputMode,
+    clefMode,
+    keyFifths,
     applyXmlEdit,
     noteInputMode,
     isActiveTab,
@@ -1788,6 +1909,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
 
     applySelectedHighlight(hit.el);
     setSelectedTarget(mapped);
+    lastEnteredTargetRef.current = null;
+    if (mapped.pitchMidi !== null) lastEnteredMidiRef.current = mapped.pitchMidi;
     setSelectedMeasureNumber(null);
     setSelectedMeasureRect(null);
 
@@ -1908,6 +2031,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         setEditMode(true);
         applySelectedHighlight(hit.el);
         setSelectedTarget(hit.target);
+        lastEnteredTargetRef.current = null;
+        if (hit.target.pitchMidi !== null) lastEnteredMidiRef.current = hit.target.pitchMidi;
         setSelectedMeasureNumber(null);
         setSelectedMeasureRect(null);
         return;
