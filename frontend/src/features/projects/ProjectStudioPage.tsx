@@ -31,6 +31,7 @@ import { ChordAndTabPanel } from "@/features/editor/ChordAndTabPanel";
 import { ExportCenter } from "@/features/editor/ExportCenter";
 import { LyricsPanel } from "@/features/editor/LyricsPanel";
 import { PianoRollEditor } from "@/features/editor/PianoRollEditor";
+import { InstrumentTunerControl } from "@/features/editor/InstrumentTunerControl";
 import { KeySignatureControl, type KeyChangeAction } from "@/features/editor/KeySignatureControl";
 import { type PendingOverflowWarning } from "@/features/editor/MeasureMeterControl";
 import { metronomeEngine } from "@/features/editor/metronome";
@@ -1167,6 +1168,7 @@ export function ProjectStudioPage() {
             </div>
 
             <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 sm:order-3">
+              <InstrumentTunerControl />
               {scoreData && (
                 <>
                   {!isMidiPlayground && (
