@@ -36,6 +36,9 @@ class VocalPitchTrackerConfig:
     min_syllable_gap_sec: float = 0.085
     concert_pitch_hz: float = 440.0
     transpose_semitones: int = 0
+    strict_range: bool = False
+    vibrato_kernel_frames: int = 5
+    engine_name: str = "vocal_pyin"
 
 
 @dataclass
@@ -92,9 +95,17 @@ def _suppress_octave_spikes(
     return out, suppressed
 
 
-def _vibrato_safe_smooth(midi_frames: np.ndarray, active_mask: np.ndarray) -> np.ndarray:
+def _vibrato_safe_smooth(
+    midi_frames: np.ndarray,
+    active_mask: np.ndarray,
+    kernel_size: int = 5,
+) -> np.ndarray:
     """Apply narrow median smoothing inside gentle vibrato passages while preserving fast melodic steps."""
     out = midi_frames.copy()
+    k = max(3, int(kernel_size))
+    if k % 2 == 0:
+        k += 1
+    half_w = k // 2
     n = len(out)
     i = 0
     while i < n:
@@ -105,12 +116,19 @@ def _vibrato_safe_smooth(midi_frames: np.ndarray, active_mask: np.ndarray) -> np
         while i < n and active_mask[i]:
             i += 1
         seg = out[start:i]
-        if len(seg) < 5:
+        if len(seg) < k:
+            if len(seg) >= 5:
+                smoothed = medfilt(seg, kernel_size=5)
+                for idx in range(start, i):
+                    w0 = max(start, idx - 2)
+                    w1 = min(i, idx + 3)
+                    if float(np.max(out[w0:w1]) - np.min(out[w0:w1])) <= 2.2:
+                        out[idx] = smoothed[idx - start]
             continue
-        smoothed = medfilt(seg, kernel_size=5)
+        smoothed = medfilt(seg, kernel_size=k)
         for idx in range(start, i):
-            w0 = max(start, idx - 2)
-            w1 = min(i, idx + 3)
+            w0 = max(start, idx - half_w)
+            w1 = min(i, idx + half_w + 1)
             span = float(np.max(out[w0:w1]) - np.min(out[w0:w1]))
             # Apply median smoothing when local excursion resembles vibrato/jitter (<= 2.2 st)
             if span <= 2.2:
@@ -129,12 +147,12 @@ def transcribe_vocal_melody_f0(
     if y.size == 0 or float(np.max(np.abs(y))) < 1e-6:
         return VocalPitchResult(
             notes=[],
-            stats={"engine": "vocal_pyin", "voiced_frames": 0, "note_count": 0},
+            stats={"engine": cfg.engine_name, "voiced_frames": 0, "note_count": 0},
             duration_seconds=duration_sec,
         )
 
     fmin_midi = max(28, int(cfg.min_midi))
-    fmax_midi = min(96, max(fmin_midi + 12, int(cfg.max_midi)))
+    fmax_midi = min(100, max(fmin_midi + 12, int(cfg.max_midi)))
     fmin_hz = float(cfg.concert_pitch_hz * (2.0 ** ((fmin_midi - 69) / 12.0)))
     fmax_hz = float(cfg.concert_pitch_hz * (2.0 ** ((fmax_midi - 69) / 12.0)))
 
@@ -154,7 +172,7 @@ def transcribe_vocal_melody_f0(
     if n_frames == 0:
         return VocalPitchResult(
             notes=[],
-            stats={"engine": "vocal_pyin", "voiced_frames": 0, "note_count": 0},
+            stats={"engine": cfg.engine_name, "voiced_frames": 0, "note_count": 0},
             duration_seconds=duration_sec,
         )
 
@@ -190,10 +208,14 @@ def transcribe_vocal_melody_f0(
     )
 
     frac_midi, octave_spikes_suppressed = _suppress_octave_spikes(frac_midi, active_mask)
-    frac_midi = _vibrato_safe_smooth(frac_midi, active_mask)
+    frac_midi = _vibrato_safe_smooth(frac_midi, active_mask, kernel_size=cfg.vibrato_kernel_frames)
 
     int_midi = np.full(n_frames, -1, dtype=np.int32)
     int_midi[active_mask] = np.clip(np.round(frac_midi[active_mask]).astype(np.int32), 21, 108)
+    if cfg.strict_range:
+        out_of_range = active_mask & ((int_midi < int(cfg.min_midi)) | (int_midi > int(cfg.max_midi)))
+        int_midi[out_of_range] = -1
+        active_mask = active_mask & (int_midi >= 0)
 
     # Filter isolated 1-frame transition frames flanked immediately by steady neighbor pitches
     cleaned_midi = int_midi.copy()
@@ -257,9 +279,16 @@ def transcribe_vocal_melody_f0(
             seg_start = idx
             seg_split = bool(is_onset_split[idx])
         elif is_onset_split[idx] and (idx - seg_start) >= min_syllable_frames:
-            raw_segments.append((cur_pitch, seg_start, idx, seg_split))
-            seg_start = idx
-            seg_split = True
+            # Ensure the suffix after an internal same-pitch split sustains long enough
+            # to be a genuine re-articulation rather than a decay-tail artifact.
+            lookahead = 0
+            max_check = min(n_frames, idx + min_syllable_frames)
+            while idx + lookahead < max_check and int(cleaned_midi[idx + lookahead]) == cur_pitch:
+                lookahead += 1
+            if lookahead >= min_syllable_frames:
+                raw_segments.append((cur_pitch, seg_start, idx, seg_split))
+                seg_start = idx
+                seg_split = True
 
     if cur_pitch >= 0:
         raw_segments.append((cur_pitch, seg_start, n_frames, seg_split))
@@ -319,7 +348,7 @@ def transcribe_vocal_melody_f0(
         notes=notes,
         duration_seconds=duration_sec,
         stats={
-            "engine": "vocal_pyin",
+            "engine": cfg.engine_name,
             "voiced_frames": int(np.sum(active_mask)),
             "total_frames": int(n_frames),
             "octave_spikes_suppressed": octave_spikes_suppressed,
@@ -330,3 +359,59 @@ def transcribe_vocal_melody_f0(
             "peak_rms_db": round(peak_db, 2),
         },
     )
+
+
+def transcribe_violin_melody_f0(
+    wav_path: Path,
+    config: VocalPitchTrackerConfig | None = None,
+) -> VocalPitchResult:
+    """Extract monophonic solo violin melody notes using pYIN + vibrato-safe smoothing (G3–E7)."""
+    cfg = config or VocalPitchTrackerConfig(
+        sample_rate=44100,
+        hop_length=512,  # ~11.6 ms hop with higher temporal/frequency resolution up to E7
+        frame_length=4096,
+        min_midi=55,  # G3 (~196 Hz)
+        max_midi=100,  # E7 (~2637 Hz)
+        voiced_prob_threshold=0.30,
+        min_rms_db=-52.0,
+        relative_rms_floor_db=34.0,
+        min_note_duration_sec=0.05,
+        micro_gap_bridge_sec=0.04,
+        min_syllable_gap_sec=0.08,
+        strict_range=True,
+        vibrato_kernel_frames=9,
+        engine_name="violin_pyin",
+    )
+    res = transcribe_vocal_melody_f0(wav_path, config=cfg)
+
+    # Guarantee strictly monophonic non-overlapping note sequence in range
+    mono_notes: list[DetectedNote] = []
+    for n in sorted(res.notes, key=lambda x: (x.onset_sec, -x.offset_sec)):
+        if n.pitch_midi < cfg.min_midi or n.pitch_midi > cfg.max_midi:
+            continue
+        if mono_notes and mono_notes[-1].offset_sec > n.onset_sec:
+            prev = mono_notes[-1]
+            clamped_off = round(n.onset_sec, 4)
+            if clamped_off > prev.onset_sec + 0.02:
+                mono_notes[-1] = DetectedNote(
+                    pitch_midi=prev.pitch_midi,
+                    onset_sec=prev.onset_sec,
+                    offset_sec=clamped_off,
+                    velocity=prev.velocity,
+                    confidence=prev.confidence,
+                )
+            else:
+                continue
+        mono_notes.append(n)
+
+    stats = {
+        **res.stats,
+        "engine": cfg.engine_name,
+        "monophonic": True,
+        "vibrato_handling": True,
+        "note_count": len(mono_notes),
+        "pitch_range_midi": [min(n.pitch_midi for n in mono_notes), max(n.pitch_midi for n in mono_notes)]
+        if mono_notes
+        else None,
+    }
+    return VocalPitchResult(notes=mono_notes, stats=stats, duration_seconds=res.duration_seconds)

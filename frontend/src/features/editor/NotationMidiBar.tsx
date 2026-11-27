@@ -1,5 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Circle, Keyboard, Piano, Radio, Square, Volume2, VolumeX } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Circle, Keyboard, Mic, MicOff, Piano, Radio, Square, Volume2, VolumeX } from "lucide-react";
+import { clampKeyFifths, spellMidiPitch } from "@/lib/keySignature";
+import { createLivePitchNoteTracker, type LivePitchFrameResult } from "@/utils/livePitchNoteTracker";
+import { acquireExclusiveMic, releaseExclusiveMic } from "@/utils/micCoordinator";
+import { DEFAULT_TUNER_FFT_SIZE } from "@/utils/pitchTuner";
 import { metronomeEngine, type MetronomeSettings } from "@/features/editor/metronome";
 import {
   buildQuantizedRecordedNotes,
@@ -41,6 +45,47 @@ interface NotationMidiBarProps {
 }
 
 const CHORD_WINDOW_MS = 45;
+const MIC_UI_UPDATE_INTERVAL_MS = 45;
+
+type MicInputStatus = "idle" | "requesting" | "listening" | "error";
+
+interface AudioInputDeviceOption {
+  deviceId: string;
+  label: string;
+}
+
+function extractKeyFifthsFromXml(xml: string | null | undefined): number {
+  if (!xml) return 0;
+  const match = xml.match(/<fifths>\s*(-?\d+)\s*<\/fifths>/);
+  if (!match) return 0;
+  return clampKeyFifths(Number.parseInt(match[1], 10));
+}
+
+function formatLiveMicError(err: unknown): string {
+  const errName =
+    err && typeof err === "object" && "name" in err ? String((err as { name: unknown }).name) : "";
+  if (errName === "NotAllowedError" || errName === "PermissionDeniedError") {
+    return "Microphone permission was denied. Allow microphone access in your browser to use Live Mic / Violin Input.";
+  }
+  if (errName === "NotFoundError" || errName === "DevicesNotFoundError" || errName === "OverconstrainedError") {
+    return "No compatible microphone / audio input device was found.";
+  }
+  if (errName === "NotReadableError" || errName === "TrackStartError") {
+    return "Audio input device is currently in use by another application.";
+  }
+  return err instanceof Error && err.message
+    ? err.message
+    : "Unable to start microphone audio input in this browser.";
+}
+
+function getAudioContextCtor(): typeof AudioContext | null {
+  if (typeof window === "undefined") return null;
+  const win = window as unknown as {
+    AudioContext?: typeof AudioContext;
+    webkitAudioContext?: typeof AudioContext;
+  };
+  return win.AudioContext || win.webkitAudioContext || null;
+}
 
 export function NotationMidiBar({
   isActiveTab,
@@ -70,16 +115,74 @@ export function NotationMidiBar({
   const [targetStaff, setTargetStaff] = useState<1 | 2>(1);
   const [midiStatusNote, setMidiStatusNote] = useState<string | null>(null);
 
+  // Live Mic / Violin input state
+  const [micStatus, setMicStatus] = useState<MicInputStatus>("idle");
+  const [micError, setMicError] = useState<string | null>(null);
+  const [micDevices, setMicDevices] = useState<AudioInputDeviceOption[]>([]);
+  const [selectedMicDeviceId, setSelectedMicDeviceId] = useState<string>("");
+  const [micConfidenceThreshold, setMicConfidenceThreshold] = useState<number>(0.8);
+  const [micFrame, setMicFrame] = useState<LivePitchFrameResult | null>(null);
+  const [micAcceptedLabel, setMicAcceptedLabel] = useState<string | null>(null);
+
+  const micActive = micStatus === "requesting" || micStatus === "listening";
+  const micActiveRef = useRef(micActive);
+  micActiveRef.current = micActive;
+  const recordingUsedMicRef = useRef(false);
+
+  const keyFifths = useMemo(() => extractKeyFifthsFromXml(activeXml), [activeXml]);
+  const keyFifthsRef = useRef(keyFifths);
+  keyFifthsRef.current = keyFifths;
+
   const activeXmlRef = useRef(activeXml);
   activeXmlRef.current = activeXml;
   const selectedTargetRef = useRef(selectedTarget);
   selectedTargetRef.current = selectedTarget;
+  const onCommitXmlRef = useRef(onCommitXml);
+  onCommitXmlRef.current = onCommitXml;
+  const stepInputEnabledRef = useRef(stepInputEnabled);
+  stepInputEnabledRef.current = stepInputEnabled;
+  const isRecordingRef = useRef(isRecording);
+  isRecordingRef.current = isRecording;
+  const countingInRef = useRef(countingIn);
+  countingInRef.current = countingIn;
+  const activeDurationRef = useRef(activeDuration);
+  activeDurationRef.current = activeDuration;
+  const activeDottedRef = useRef(activeDotted);
+  activeDottedRef.current = activeDotted;
+  const activeVoiceRef = useRef(activeVoice);
+  activeVoiceRef.current = activeVoice;
+  const restInputModeRef = useRef(restInputMode);
+  restInputModeRef.current = restInputMode;
+  const monitorEnabledRef = useRef(monitorEnabled);
+  monitorEnabledRef.current = monitorEnabled;
+
   const stepBufferRef = useRef<number[]>([]);
   const stepTimerRef = useRef<number | null>(null);
 
   const recStartPerfRef = useRef<number>(0);
   const recOpenNotesRef = useRef<Map<number, { onsetSec: number; velocity: number }>>(new Map());
   const recCapturedRef = useRef<RecordedRawNote[]>([]);
+
+  const micSessionTokenRef = useRef(0);
+  const micResourcesRef = useRef<{
+    audioCtx: AudioContext | null;
+    stream: MediaStream | null;
+    sourceNode: MediaStreamAudioSourceNode | null;
+    analyser: AnalyserNode | null;
+    rafId: number | null;
+  }>({
+    audioCtx: null,
+    stream: null,
+    sourceNode: null,
+    analyser: null,
+    rafId: null,
+  });
+  const micAcceptedTimerRef = useRef<number | null>(null);
+  const pitchTrackerRef = useRef(createLivePitchNoteTracker({ confidenceThreshold: 0.8 }));
+
+  useEffect(() => {
+    pitchTrackerRef.current.updateConfig({ confidenceThreshold: micConfidenceThreshold });
+  }, [micConfidenceThreshold]);
 
   const flushStepChord = useCallback(() => {
     stepTimerRef.current = null;
@@ -126,11 +229,13 @@ export function NotationMidiBar({
           snapMode,
           targetTrackIndex: 0,
         });
+        const effectiveClefMode: PlaygroundClefMode =
+          micActiveRef.current || recordingUsedMicRef.current ? "treble" : clefMode;
         const nextXml = mergeLiveMidiRecordingIntoXml(activeXmlRef.current, quantized, {
           tempoBpm,
           timeSignature,
           snapMode,
-          clefMode,
+          clefMode: effectiveClefMode,
           autoSlursTies: autoSlursTiesRef.current,
         });
         if (nextXml) {
@@ -138,6 +243,7 @@ export function NotationMidiBar({
           setMidiStatusNote(`Recorded ${quantized.length} note${quantized.length === 1 ? "" : "s"} to staff.`);
         }
       }
+      recordingUsedMicRef.current = false;
       recCapturedRef.current = [];
     },
     [clefMode, onCommitXml, snapMode, tempoBpm, timeSignature],
@@ -197,6 +303,11 @@ export function NotationMidiBar({
     [countingIn, isActiveTab, isRecording, monitorEnabled],
   );
 
+  const handleNoteOnRef = useRef(handleNoteOn);
+  handleNoteOnRef.current = handleNoteOn;
+  const handleNoteOffRef = useRef(handleNoteOff);
+  handleNoteOffRef.current = handleNoteOff;
+
   const handleControlChange = useCallback(
     (controller: number, value: number) => {
       if (!isActiveTab || !monitorEnabled) return;
@@ -216,23 +327,300 @@ export function NotationMidiBar({
     },
   });
 
+  const handleMicFrame = useCallback((frame: LivePitchFrameResult) => {
+    for (const ev of frame.events) {
+      if (ev.type === "noteOn") {
+        const spelled = spellMidiPitch(ev.midi, keyFifthsRef.current);
+        setMicAcceptedLabel(spelled.label);
+        if (micAcceptedTimerRef.current !== null && typeof window !== "undefined") {
+          window.clearTimeout(micAcceptedTimerRef.current);
+        }
+        if (typeof window !== "undefined") {
+          micAcceptedTimerRef.current = window.setTimeout(() => {
+            setMicAcceptedLabel(null);
+          }, 900);
+        }
+
+        if (isRecordingRef.current && !countingInRef.current) {
+          recordingUsedMicRef.current = true;
+          handleNoteOnRef.current(ev.midi, ev.velocity);
+        } else if (stepInputEnabledRef.current && activeXmlRef.current) {
+          if (monitorEnabledRef.current) {
+            midiSynth.startSustainedNote(ev.midi, ev.velocity, 0.85, 0);
+          }
+          const res = insertStepMidiNotesIntoXml(activeXmlRef.current, {
+            pitchesMidi: restInputModeRef.current ? [] : [ev.midi],
+            durationType: activeDurationRef.current,
+            dotted: activeDottedRef.current,
+            isRest: restInputModeRef.current,
+            voice: activeVoiceRef.current,
+            staffNumber: 1,
+            cursorTarget: selectedTargetRef.current,
+          });
+          if (res) {
+            onCommitXmlRef.current(res.xml, res.nextCursorTarget);
+          }
+        } else if (monitorEnabledRef.current) {
+          midiSynth.startSustainedNote(ev.midi, ev.velocity, 0.85, 0);
+        }
+      } else if (ev.type === "noteOff") {
+        handleNoteOffRef.current(ev.midi);
+      }
+    }
+  }, []);
+
+  const stopMicInput = useCallback((keepError = false) => {
+    micSessionTokenRef.current += 1;
+    const res = micResourcesRef.current;
+
+    if (res.rafId !== null && typeof window !== "undefined") {
+      window.cancelAnimationFrame(res.rafId);
+      res.rafId = null;
+    }
+
+    const flushed = pitchTrackerRef.current.flush(
+      typeof performance !== "undefined" ? performance.now() : Date.now(),
+    );
+    for (const ev of flushed) {
+      if (ev.type === "noteOff") {
+        handleNoteOffRef.current(ev.midi);
+      }
+    }
+    pitchTrackerRef.current.reset();
+
+    if (res.sourceNode) {
+      try {
+        res.sourceNode.disconnect();
+      } catch {
+        // Ignore disconnect error
+      }
+      res.sourceNode = null;
+    }
+    if (res.analyser) {
+      try {
+        res.analyser.disconnect();
+      } catch {
+        // Ignore disconnect error
+      }
+      res.analyser = null;
+    }
+    if (res.stream) {
+      for (const track of res.stream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          // Ignore track stop error
+        }
+      }
+      res.stream = null;
+    }
+    if (res.audioCtx) {
+      const ctx = res.audioCtx;
+      res.audioCtx = null;
+      if (ctx.state !== "closed" && typeof ctx.close === "function") {
+        try {
+          void Promise.resolve(ctx.close()).catch(() => undefined);
+        } catch {
+          // Ignore close error
+        }
+      }
+    }
+
+    setMicFrame(null);
+    setMicAcceptedLabel(null);
+    if (!keepError) {
+      setMicError(null);
+      setMicStatus("idle");
+    }
+    releaseExclusiveMic("live_mic_input");
+  }, []);
+
+  const startMicInput = useCallback(
+    async (deviceIdOverride?: string) => {
+      stopMicInput(false);
+      const myToken = micSessionTokenRef.current;
+      setMicError(null);
+
+      if (
+        typeof navigator === "undefined" ||
+        !navigator.mediaDevices ||
+        typeof navigator.mediaDevices.getUserMedia !== "function"
+      ) {
+        setMicStatus("error");
+        setMicError(
+          "Microphone capture is not supported in this browser. Connect a MIDI controller instead.",
+        );
+        return;
+      }
+
+      const CtxCtor = getAudioContextCtor();
+      if (!CtxCtor) {
+        setMicStatus("error");
+        setMicError("Web Audio API is unavailable in this browser.");
+        return;
+      }
+
+      acquireExclusiveMic("live_mic_input", () => {
+        stopMicInput(false);
+      });
+
+      setMicStatus("requesting");
+      const targetDeviceId = deviceIdOverride !== undefined ? deviceIdOverride : selectedMicDeviceId;
+
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            ...(targetDeviceId ? { deviceId: { exact: targetDeviceId } } : {}),
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
+          video: false,
+        });
+      } catch (err) {
+        if (micSessionTokenRef.current !== myToken) return;
+        releaseExclusiveMic("live_mic_input");
+        setMicStatus("error");
+        setMicError(formatLiveMicError(err));
+        return;
+      }
+
+      if (micSessionTokenRef.current !== myToken) {
+        for (const track of stream.getTracks()) {
+          try {
+            track.stop();
+          } catch {
+            // Ignore
+          }
+        }
+        return;
+      }
+
+      // Refresh audio input device list now that permission has been granted
+      if (typeof navigator.mediaDevices.enumerateDevices === "function") {
+        try {
+          const allDevices = await navigator.mediaDevices.enumerateDevices();
+          if (micSessionTokenRef.current === myToken) {
+            const audioInputs = allDevices
+              .filter((d) => d.kind === "audioinput")
+              .map((d, idx) => ({
+                deviceId: d.deviceId,
+                label: d.label || `Microphone ${idx + 1}`,
+              }));
+            setMicDevices(audioInputs);
+          }
+        } catch {
+          // Device enumeration failure should not block active mic capture
+        }
+      }
+
+      try {
+        const audioCtx = new CtxCtor();
+        if (audioCtx.state === "suspended" && typeof audioCtx.resume === "function") {
+          await Promise.resolve(audioCtx.resume()).catch(() => undefined);
+        }
+
+        if (micSessionTokenRef.current !== myToken) {
+          for (const track of stream.getTracks()) {
+            try {
+              track.stop();
+            } catch {
+              // Ignore
+            }
+          }
+          if (audioCtx.state !== "closed" && typeof audioCtx.close === "function") {
+            void Promise.resolve(audioCtx.close()).catch(() => undefined);
+          }
+          return;
+        }
+
+        const sourceNode = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = DEFAULT_TUNER_FFT_SIZE;
+        analyser.smoothingTimeConstant = 0;
+        sourceNode.connect(analyser);
+
+        micResourcesRef.current = {
+          audioCtx,
+          stream,
+          sourceNode,
+          analyser,
+          rafId: null,
+        };
+        pitchTrackerRef.current.reset();
+        setMicStatus("listening");
+
+        const sampleBuffer = new Float32Array(analyser.fftSize);
+        let lastUiUpdateMs = -Infinity;
+
+        const tick = (rafNowMs: number) => {
+          if (micSessionTokenRef.current !== myToken) return;
+          const activeAnalyser = micResourcesRef.current.analyser;
+          const activeCtx = micResourcesRef.current.audioCtx;
+          if (!activeAnalyser || !activeCtx) return;
+
+          activeAnalyser.getFloatTimeDomainData(sampleBuffer);
+          const nowTs = typeof performance !== "undefined" ? performance.now() : rafNowMs;
+          const frame = pitchTrackerRef.current.processSamples(
+            sampleBuffer,
+            activeCtx.sampleRate,
+            nowTs,
+          );
+          if (frame.events.length > 0) {
+            handleMicFrame(frame);
+            setMicFrame(frame);
+            lastUiUpdateMs = rafNowMs;
+          } else if (rafNowMs - lastUiUpdateMs >= MIC_UI_UPDATE_INTERVAL_MS) {
+            setMicFrame(frame);
+            lastUiUpdateMs = rafNowMs;
+          }
+
+          if (micSessionTokenRef.current === myToken) {
+            micResourcesRef.current.rafId = window.requestAnimationFrame(tick);
+          }
+        };
+
+        micResourcesRef.current.rafId = window.requestAnimationFrame(tick);
+      } catch (err) {
+        for (const track of stream.getTracks()) {
+          try {
+            track.stop();
+          } catch {
+            // Ignore
+          }
+        }
+        if (micSessionTokenRef.current !== myToken) return;
+        releaseExclusiveMic("live_mic_input");
+        setMicStatus("error");
+        setMicError(formatLiveMicError(err));
+      }
+    },
+    [handleMicFrame, selectedMicDeviceId, stopMicInput],
+  );
+
   // Prevent duplicate listeners when user switches away from Sheet Music tab or unmounts
   useEffect(() => {
     if (!isActiveTab) {
       if (isRecording || countingIn) {
         stopRecordingInternal(false);
       }
+      if (micActiveRef.current) {
+        stopMicInput(false);
+      }
       midiSynth.stopAllSustainedNotes();
     }
-  }, [countingIn, isActiveTab, isRecording, stopRecordingInternal]);
+  }, [countingIn, isActiveTab, isRecording, stopMicInput, stopRecordingInternal]);
 
   useEffect(() => {
     return () => {
       if (stepTimerRef.current !== null) window.clearTimeout(stepTimerRef.current);
+      if (micAcceptedTimerRef.current !== null) window.clearTimeout(micAcceptedTimerRef.current);
+      stopMicInput(false);
       midiSynth.stopAllSustainedNotes();
       metronomeEngine.stop();
     };
-  }, []);
+  }, [stopMicInput]);
 
   const startLiveRecording = () => {
     setMidiStatusNote(null);
@@ -333,6 +721,32 @@ export function NotationMidiBar({
             Connect MIDI
           </button>
         )}
+
+        <button
+          type="button"
+          data-testid="notation-mic-input-btn"
+          aria-pressed={micActive}
+          title={
+            micActive
+              ? "Stop Live Mic / Violin Input"
+              : "Use acoustic microphone for live Violin-to-Staff input (G3–E7, Treble)"
+          }
+          onClick={() => {
+            if (micActive) {
+              stopMicInput(false);
+            } else {
+              void startMicInput();
+            }
+          }}
+          className={`inline-flex items-center gap-1.5 h-7 rounded-md border px-2.5 text-[11px] font-semibold transition-colors ${
+            micActive
+              ? "border-emerald-500 bg-emerald-600 text-white hover:bg-emerald-700 dark:border-emerald-400 dark:bg-emerald-600"
+              : "border-sky-400/50 bg-sky-50 text-sky-900 hover:bg-sky-100 dark:border-sky-500/40 dark:bg-sky-500/15 dark:text-sky-200 dark:hover:bg-sky-500/25"
+          }`}
+        >
+          {micActive ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+          {micActive ? "Stop Mic" : "Mic / Violin Input"}
+        </button>
 
         <button
           type="button"
@@ -480,6 +894,132 @@ export function NotationMidiBar({
           </>
         )}
       </div>
+
+      {(micActive || micError) && (
+        <div
+          data-testid="notation-mic-panel"
+          className="w-full flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-300/70 bg-sky-50/70 px-2.5 py-1.5 text-[11px] text-sky-950 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-100"
+        >
+          {micError ? (
+            <div className="flex w-full items-center justify-between gap-2">
+              <span data-testid="notation-mic-error" className="font-medium text-red-700 dark:text-red-300">
+                {micError}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setMicError(null);
+                  setMicStatus("idle");
+                }}
+                className="h-6 rounded border border-stone-300 bg-white px-2 text-[10px] font-medium text-stone-700 hover:bg-stone-100 dark:border-[#27273A] dark:bg-[#181825] dark:text-[#C4C4D4]"
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 font-semibold">
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      micStatus === "listening"
+                        ? "bg-emerald-500 animate-pulse"
+                        : "bg-amber-400 animate-pulse"
+                    }`}
+                  />
+                  {micAcceptedLabel
+                    ? `Note Accepted (${micAcceptedLabel})`
+                    : micFrame?.state === "stabilizing"
+                      ? "Stabilizing..."
+                      : micStatus === "requesting"
+                        ? "Requesting Mic..."
+                        : "Listening (Violin G3–E7 · Treble)"}
+                </span>
+
+                <span
+                  data-testid="notation-mic-detected-pitch"
+                  className="rounded border border-sky-300/80 bg-white/90 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-stone-900 dark:border-sky-500/30 dark:bg-[#181825] dark:text-sky-100"
+                >
+                  {micFrame?.detectedMidi !== null && micFrame?.detectedMidi !== undefined
+                    ? `${spellMidiPitch(micFrame.detectedMidi, keyFifths).label}${
+                        micFrame.detectedHz ? ` · ${micFrame.detectedHz.toFixed(1)} Hz` : ""
+                      }`
+                    : "—"}
+                </span>
+
+                <span className="text-[10px] text-sky-900/80 dark:text-sky-200/80">
+                  Conf {Math.round((micFrame?.confidence ?? 0) * 100)}%
+                </span>
+
+                <span
+                  aria-label="Microphone signal level"
+                  className="inline-flex h-2 w-14 overflow-hidden rounded-full bg-stone-200 dark:bg-[#27273A]"
+                >
+                  <span
+                    className="h-full bg-emerald-500 transition-all duration-75"
+                    style={{
+                      width: `${Math.min(100, Math.round((micFrame?.rms ?? 0) * 450))}%`,
+                    }}
+                  />
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {micDevices.length > 0 && (
+                  <select
+                    data-testid="notation-mic-device-select"
+                    aria-label="Audio input device"
+                    value={selectedMicDeviceId}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      setSelectedMicDeviceId(nextId);
+                      if (micActive) {
+                        void startMicInput(nextId);
+                      }
+                    }}
+                    className="h-6 max-w-[170px] rounded border border-stone-300 bg-white px-1.5 text-[11px] text-stone-800 dark:border-[#27273A] dark:bg-[#181825] dark:text-[#F5F3FF]"
+                  >
+                    <option value="">Default Microphone</option>
+                    {micDevices.map((dev) => (
+                      <option key={dev.deviceId} value={dev.deviceId}>
+                        {dev.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                <label className="inline-flex items-center gap-1 text-[10px] text-sky-900/80 dark:text-sky-200/80">
+                  Sensitivity
+                  <select
+                    aria-label="Pitch detection sensitivity"
+                    value={String(micConfidenceThreshold)}
+                    onChange={(e) => {
+                      const nextVal = Number.parseFloat(e.target.value);
+                      if (Number.isFinite(nextVal)) {
+                        setMicConfidenceThreshold(nextVal);
+                      }
+                    }}
+                    className="h-6 rounded border border-stone-300 bg-white px-1 text-[11px] text-stone-800 dark:border-[#27273A] dark:bg-[#181825] dark:text-[#F5F3FF]"
+                  >
+                    <option value="0.7">Sensitive (70%)</option>
+                    <option value="0.8">Balanced (80%)</option>
+                    <option value="0.88">Strict (88%)</option>
+                  </select>
+                </label>
+
+                <button
+                  type="button"
+                  data-testid="notation-mic-stop-btn"
+                  onClick={() => stopMicInput(false)}
+                  className="h-6 rounded border border-red-400/60 bg-red-50 px-2 text-[10px] font-semibold text-red-800 hover:bg-red-100 dark:border-red-500/40 dark:bg-red-500/15 dark:text-red-200"
+                >
+                  Stop Mic
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {(midiStatusNote || webMidi.errorMessage) && (
         <div className="w-full text-[11px] text-violet-800 dark:text-violet-300">

@@ -33,8 +33,10 @@ from app.notation.arrangement import simplify_arrangement
 from app.notation.beat_tracker import infer_time_signature_from_beats, track_beats_and_downbeats
 from app.notation.generator import build_piano_vocal_score_data, build_score_data, clean_score_title
 from app.notation.melody import (
+    DEFAULT_VIOLIN_RANGE,
     extract_lead_melody,
     is_lead_melody_mode,
+    is_violin_solo_mode,
     normalize_transcription_mode,
 )
 from app.notation.piano_playability import apply_piano_playability, normalize_playability_smoothing
@@ -50,6 +52,7 @@ from app.transcription.provider_factory import (
 )
 from app.transcription.vocal_pitch_tracker import (
     VocalPitchTrackerConfig,
+    transcribe_violin_melody_f0,
     transcribe_vocal_melody_f0,
 )
 
@@ -196,6 +199,7 @@ def transcribe_and_refine_audio(
     program, _ = get_instrument_program_and_clef(settings.instrument)
     cfg = refiner_cfg or NoteRefinerConfig()
     norm_mode = normalize_transcription_mode(settings.mode)
+    violin_solo_active = is_violin_solo_mode(settings.mode)
     lead_melody_active = is_lead_melody_mode(settings.mode)
     piano_vocal_active = norm_mode == "piano_vocal"
     vocal_mode_active = lead_melody_active or piano_vocal_active or norm_mode == "vocal_melody"
@@ -208,7 +212,7 @@ def transcribe_and_refine_audio(
 
     # Safeguard: Lead Melody with Automatic / Full Song source must receive an actual isolated vocals stem.
     # Never silently substitute bass.wav, other.wav, or the full mix when vocal isolation fails or is missing.
-    if lead_melody_active and not explicit_solo:
+    if lead_melody_active and not explicit_solo and not violin_solo_active:
         vocals_path = sep_res.stems.get("vocals") if (sep_res is not None and sep_res.available) else None
         if sep_res is None or not sep_res.available or vocals_path is None or not Path(vocals_path).exists():
             raise TranscriptionInferenceError(
@@ -272,13 +276,68 @@ def transcribe_and_refine_audio(
         }
         return v_exec, v_res.notes, tracking_info
 
+    def _run_monophonic_violin_tracker(
+        audio_target: Path,
+    ) -> tuple[ProviderExecutionResult, list[DetectedNote], dict[str, Any]]:
+        v_min, v_max = DEFAULT_VIOLIN_RANGE
+        eff_min = max(v_min, int(settings.min_midi_pitch)) if settings.min_midi_pitch >= v_min else v_min
+        eff_max = min(v_max, int(settings.max_midi_pitch)) if settings.max_midi_pitch <= v_max else v_max
+        if eff_min >= eff_max:
+            eff_min, eff_max = DEFAULT_VIOLIN_RANGE
+        v_cfg = VocalPitchTrackerConfig(
+            sample_rate=44100,
+            hop_length=512,
+            frame_length=4096,
+            min_midi=eff_min,
+            max_midi=eff_max,
+            voiced_prob_threshold=0.30,
+            min_rms_db=-52.0,
+            relative_rms_floor_db=34.0,
+            min_note_duration_sec=max(0.04, float(settings.min_note_length_ms) / 1000.0),
+            micro_gap_bridge_sec=0.04,
+            min_syllable_gap_sec=0.08,
+            concert_pitch_hz=float(settings.concert_pitch_hz),
+            transpose_semitones=int(settings.transpose_semitones),
+            strict_range=True,
+            vibrato_kernel_frames=9,
+            engine_name="violin_pyin",
+        )
+        v_res = transcribe_violin_melody_f0(audio_target, config=v_cfg)
+        v_exec = ProviderExecutionResult(
+            output=TranscriptionOutput(
+                engine="violin_pyin",
+                notes=v_res.notes,
+                midi_bytes=b"",
+                duration_seconds=v_res.duration_seconds,
+                metadata={
+                    "model": "librosa_pyin_violin",
+                    "preset": "violin_solo",
+                    "pitch_range": [eff_min, eff_max],
+                    "vibrato_handling": True,
+                    "source_path": str(audio_target),
+                },
+            ),
+            requested_engine="violin_pyin",
+            actual_engine="violin_pyin",
+            fallback_used=False,
+        )
+        tracking_info = {
+            "engine": "violin_pyin",
+            "preset": "violin_solo",
+            "source_stem": "original_solo_violin",
+            "source_path": str(audio_target),
+            **v_res.stats,
+        }
+        return v_exec, v_res.notes, tracking_info
+
     content_class = (source_route or {}).get("content_classification") or classify_audio_content(
         processed_wav, sep_res.stems if sep_res and sep_res.available else None
     )
     content_type = str(content_class.get("content_type") or "solo_piano")
 
     is_vocal_melody_route = bool(
-        sep_res is not None
+        not violin_solo_active
+        and sep_res is not None
         and sep_res.available
         and "vocals" in sep_res.stems
         and not explicit_solo
@@ -303,7 +362,31 @@ def transcribe_and_refine_audio(
         "reason": "direct_transcription",
     }
 
-    if is_vocal_melody_route and sep_res is not None:
+    if violin_solo_active:
+        exec_res, vocal_refined_notes, vocal_tracking = _run_monophonic_violin_tracker(processed_wav)
+        if not vocal_refined_notes:
+            raise TranscriptionInferenceError(
+                "NO_NOTES_DETECTED",
+                "No playable violin melody notes were detected in the audio recording (G3–E7).",
+            )
+        vocal_from_monophonic_tracker = True
+        raw_notes = list(vocal_refined_notes)
+        refined_notes = list(vocal_refined_notes)
+        refiner_stats = {
+            "raw_count": len(raw_notes),
+            "filtered_short_or_low_conf": 0,
+            "reattack_merges": vocal_tracking.get("micro_gap_bridges", 0),
+            "octave_ghosts_suppressed": vocal_tracking.get("octave_spikes_suppressed", 0),
+            "fifth_harmonics_suppressed": 0,
+            "refined_count": len(refined_notes),
+        }
+        source_selection = {
+            "selected": "original",
+            "content_type": "solo_violin",
+            "reason": "violin_solo_monophonic_pyin",
+        }
+
+    elif is_vocal_melody_route and sep_res is not None:
         raw_vocals_stem = sep_res.stems["vocals"]
         vocal_wav = tmp_path / "stems_proc_vocals.wav"
         preprocess_to_wav(raw_vocals_stem, vocal_wav, target_sr=22050, profile="vocal")
@@ -610,9 +693,10 @@ def analyze_timing_and_build_score(
     )
 
     norm_mode = normalize_transcription_mode(settings.mode)
+    violin_solo_active = is_violin_solo_mode(settings.mode)
     lead_melody_active = is_lead_melody_mode(settings.mode)
     piano_vocal_active = norm_mode == "piano_vocal"
-    sep_stems = sep_res.stems if (sep_res is not None and sep_res.available) else {}
+    sep_stems = sep_res.stems if (sep_res is not None and sep_res.available and not violin_solo_active) else {}
     bass_stem_path = sep_stems.get("bass") if ("bass" in sep_stems and Path(sep_stems["bass"]).exists()) else None
     harmonic_stem_path = None
     for cand_stem in ("piano", "other"):
@@ -630,7 +714,16 @@ def analyze_timing_and_build_score(
     playability_stats: dict[str, Any] | None = None
     eff_smoothing = normalize_playability_smoothing(getattr(settings, "playability_smoothing", "standard"))
 
-    if lead_melody_active or piano_vocal_active:
+    if violin_solo_active:
+        arranged_notes = list(melody_source_notes or refined_notes)
+        arrangement_detail_value = settings.arrangement_detail
+        arrangement_stats: dict[str, Any] = {
+            "mode": "violin_solo",
+            "monophonic": True,
+            "input_note_count": len(refined_notes),
+            "output_note_count": len(arranged_notes),
+        }
+    elif lead_melody_active or piano_vocal_active:
         vocal_range = None
         if piano_vocal_active or core_res.is_vocal_melody_route or (settings.instrument or "").strip().lower() == "vocals":
             app_cfg = get_settings()
@@ -737,18 +830,25 @@ def analyze_timing_and_build_score(
         "audio_source_type": settings.audio_source_type,
         "source_route": source_route or detect_audio_source_route(processed_wav, None, requested_source_type=settings.audio_source_type, mode=settings.mode),
         "source_selection": core_res.source_selection,
-        "enable_source_separation": bool(settings.enable_source_separation),
+        "enable_source_separation": False if violin_solo_active else bool(settings.enable_source_separation),
         "separation": {
-            "enabled": bool(settings.enable_source_separation),
-            "available": bool(sep_res and sep_res.available),
-            "backend": sep_res.backend if sep_res else "none",
+            "enabled": False if violin_solo_active else bool(settings.enable_source_separation),
+            "available": False if violin_solo_active else bool(sep_res and sep_res.available),
+            "backend": "none" if violin_solo_active else (sep_res.backend if sep_res else "none"),
             "model_name": sep_res.model_name if sep_res else settings.demucs_model,
             "device": sep_res.device if sep_res else "cpu",
-            "stems": sorted(sep_res.stems.keys()) if sep_res and sep_res.available else [],
-            "message": sep_res.message if sep_res else "Source separation disabled.",
+            "stems": [] if violin_solo_active else (sorted(sep_res.stems.keys()) if sep_res and sep_res.available else []),
+            "message": (
+                "Bypassed polyphonic source separation for Violin (Solo Monophonic) preset."
+                if violin_solo_active
+                else (sep_res.message if sep_res else "Source separation disabled.")
+            ),
         },
         "concert_pitch_hz": settings.concert_pitch_hz,
     }
+    if violin_solo_active:
+        score_analysis["preset"] = "violin_solo"
+        score_analysis["violin_tracking"] = core_res.vocal_tracking
     if core_res.vocal_tracking:
         score_analysis["vocal_tracking"] = core_res.vocal_tracking
     if melody_result is not None:
@@ -796,20 +896,22 @@ def analyze_timing_and_build_score(
         key_signature=key_sig,
         key_signature_estimated=key_est,
         duration_seconds=proc_meta.duration_seconds,
-        instrument=settings.instrument,
+        instrument="violin" if violin_solo_active else settings.instrument,
         quantization=settings.quantization,
         timing_map=timing_map,
-        clef_override="treble" if lead_melody_active else None,
-        track_name_override="Lead Melody" if lead_melody_active else None,
+        clef_override="treble" if (lead_melody_active or violin_solo_active) else None,
+        track_name_override=(
+            "Violin" if violin_solo_active else ("Lead Melody" if lead_melody_active else None)
+        ),
         chord_source_notes=(
             select_chord_source_notes(core_res.other_refined_notes, core_res.bass_refined_notes, refined_notes)
             if lead_melody_active
             else None
         ),
-        audio_path=chord_audio_path,
+        audio_path=None if violin_solo_active else chord_audio_path,
         bass_stem_path=bass_stem_path,
         harmonic_stem_path=harmonic_stem_path,
         bass_notes=core_res.bass_refined_notes or None,
-        monophonic=lead_melody_active,
+        monophonic=(lead_melody_active or violin_solo_active),
         analysis=score_analysis,
     )

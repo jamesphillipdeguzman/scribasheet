@@ -22,7 +22,7 @@ from app.transcription.base import DetectedNote
 
 PlayabilitySmoothingMode = Literal["original", "standard", "simplified"]
 
-_NON_PIANO_MODES = {"melody", "lead_melody", "vocal_melody", "satb_pdf"}
+_NON_PIANO_MODES = {"melody", "lead_melody", "vocal_melody", "violin_solo", "satb_pdf"}
 
 _NOTE_NAME_TO_PC: dict[str, int] = {
     "C": 0,

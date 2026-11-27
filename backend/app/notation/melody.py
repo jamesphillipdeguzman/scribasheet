@@ -9,7 +9,9 @@ from typing import Any
 from app.transcription.base import DetectedNote
 
 LEAD_MELODY_MODE_ALIASES = frozenset({"lead_melody", "melody"})
+VIOLIN_SOLO_MODE_ALIASES = frozenset({"violin_solo", "violin_monophonic"})
 DEFAULT_VOCAL_RANGE: tuple[int, int] = (55, 79)  # G3 - G5
+DEFAULT_VIOLIN_RANGE: tuple[int, int] = (55, 100)  # G3 - E7
 
 
 def is_lead_melody_mode(mode: str | None) -> bool:
@@ -19,6 +21,13 @@ def is_lead_melody_mode(mode: str | None) -> bool:
     return mode.strip().lower() in LEAD_MELODY_MODE_ALIASES
 
 
+def is_violin_solo_mode(mode: str | None) -> bool:
+    """Return True when the transcription mode requests Violin Solo Monophonic tracking."""
+    if not mode:
+        return False
+    return mode.strip().lower() in VIOLIN_SOLO_MODE_ALIASES
+
+
 def normalize_transcription_mode(mode: str | None, default: str = "piano_arrangement") -> str:
     """Normalize mode aliases while preserving non-melody modes."""
     cleaned = (mode or "").strip().lower()
@@ -26,6 +35,8 @@ def normalize_transcription_mode(mode: str | None, default: str = "piano_arrange
         return default
     if cleaned in LEAD_MELODY_MODE_ALIASES:
         return "melody"
+    if cleaned in VIOLIN_SOLO_MODE_ALIASES:
+        return "violin_solo"
     return cleaned
 
 

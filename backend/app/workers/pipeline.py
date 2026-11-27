@@ -412,23 +412,33 @@ def run_transcription_pipeline(job_id: str) -> None:
 
             # Stage 3: Optional Source Separation
             norm_mode_pre = normalize_transcription_mode(settings.mode)
+            violin_solo_active = norm_mode_pre == "violin_solo"
             req_source_pre = (settings.audio_source_type or "auto").strip().lower()
-            force_vocal_sep = is_lead_melody_mode(settings.mode) and req_source_pre != "solo_piano"
+            force_vocal_sep = (
+                is_lead_melody_mode(settings.mode)
+                and req_source_pre != "solo_piano"
+                and not violin_solo_active
+            )
             pre_content_class = (
                 classify_audio_content(processed_wav)
-                if (settings.enable_source_separation and not force_vocal_sep)
+                if (settings.enable_source_separation and not force_vocal_sep and not violin_solo_active)
                 else None
             )
             skip_for_clean_solo = bool(
-                not force_vocal_sep
-                and settings.enable_source_separation
-                and req_source_pre == "auto"
-                and norm_mode_pre in ("piano", "single_instrument")
-                and pre_content_class is not None
-                and pre_content_class.get("content_type") == "solo_piano"
-                and float(pre_content_class.get("solo_confidence", 0.0)) >= 0.80
+                violin_solo_active
+                or (
+                    not force_vocal_sep
+                    and settings.enable_source_separation
+                    and req_source_pre == "auto"
+                    and norm_mode_pre in ("piano", "single_instrument")
+                    and pre_content_class is not None
+                    and pre_content_class.get("content_type") == "solo_piano"
+                    and float(pre_content_class.get("solo_confidence", 0.0)) >= 0.80
+                )
             )
-            if force_vocal_sep or (settings.enable_source_separation and not skip_for_clean_solo):
+            if violin_solo_active:
+                separation_note = "Bypassed polyphonic source separation for Violin (Solo Monophonic) preset."
+            if not violin_solo_active and (force_vocal_sep or (settings.enable_source_separation and not skip_for_clean_solo)):
                 _update_job(
                     db,
                     job,

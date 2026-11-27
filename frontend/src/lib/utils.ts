@@ -253,6 +253,11 @@ export const TRANSCRIPTION_MODES = [
   { id: "piano_vocal", label: "Piano + Vocal", description: "Upper staff melody + lower staff playable piano accompaniment" },
   { id: "chords", label: "Chords & Harmony", description: "Polyphonic capture with chord detection" },
   { id: "vocal_melody", label: "Vocal Melody", description: "Optimized for singing & monophonic voice" },
+  {
+    id: "violin_solo",
+    label: "Violin (Solo Monophonic)",
+    description: "Single-staff treble monophonic violin transcription with vibrato handling (G3–E7)",
+  },
   { id: "multi_instrument", label: "Multi-Instrument", description: "Experimental polyphonic mix capture" },
 ] as const;
 

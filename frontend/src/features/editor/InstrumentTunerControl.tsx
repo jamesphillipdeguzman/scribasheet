@@ -18,6 +18,7 @@ import {
   type TunerInstrumentId,
   type TunerStringTarget,
 } from "@/utils/pitchTuner";
+import { acquireExclusiveMic, releaseExclusiveMic } from "@/utils/micCoordinator";
 
 type MicStatus = "idle" | "requesting" | "listening" | "paused_for_drone" | "error";
 type DroneWaveform = "triangle" | "sine";
@@ -182,6 +183,7 @@ export function InstrumentTunerControl() {
     smootherRef.current.reset();
     setDetectedPitch(null);
     setMicStatus("idle");
+    releaseExclusiveMic("tuner");
   }, [stopDrone]);
 
   const startDroneTone = useCallback(
@@ -272,6 +274,11 @@ export function InstrumentTunerControl() {
       setMicError("Web Audio API is unavailable in this browser.");
       return;
     }
+
+    acquireExclusiveMic("tuner", () => {
+      stopAllTunerAudio();
+      setOpen(false);
+    });
 
     setMicStatus("requesting");
 

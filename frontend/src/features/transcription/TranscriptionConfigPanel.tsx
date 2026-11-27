@@ -39,6 +39,7 @@ function normalizeModeId(mode?: string | null): string {
   const cleaned = (mode || "").trim().toLowerCase();
   if (!cleaned) return "single_instrument";
   if (cleaned === "lead_melody") return "melody";
+  if (cleaned === "violin_monophonic") return "violin_solo";
   return cleaned;
 }
 
@@ -86,16 +87,22 @@ export function TranscriptionConfigPanel({
     min_midi_pitch: 21,
     max_midi_pitch: 108,
     enable_source_separation:
-      activeJob?.settings_json?.enable_source_separation ??
-      (["melody", "vocal_melody"].includes(
-        normalizeModeId(initialMode || activeJob?.settings_json?.mode || defaultMode),
-      ) &&
-        (activeJob?.settings_json?.audio_source_type || "auto") !== "solo_piano"),
-    audio_source_type: activeJob?.settings_json?.audio_source_type || "auto",
+      normalizeModeId(initialMode || activeJob?.settings_json?.mode || defaultMode) === "violin_solo"
+        ? false
+        : (activeJob?.settings_json?.enable_source_separation ??
+          (["melody", "vocal_melody"].includes(
+            normalizeModeId(initialMode || activeJob?.settings_json?.mode || defaultMode),
+          ) &&
+            (activeJob?.settings_json?.audio_source_type || "auto") !== "solo_piano")),
+    audio_source_type:
+      normalizeModeId(initialMode || activeJob?.settings_json?.mode || defaultMode) === "violin_solo"
+        ? "solo_piano"
+        : activeJob?.settings_json?.audio_source_type || "auto",
     satb_mode: activeJob?.settings_json?.satb_mode || "auto_satb",
   });
 
   const normalizedMode = normalizeModeId(settings.mode);
+  const isViolinSolo = normalizedMode === "violin_solo";
   const isLeadMelody = normalizedMode === "melody" || normalizedMode === "vocal_melody";
 
   const isScoreImport = Boolean(
@@ -136,6 +143,7 @@ export function TranscriptionConfigPanel({
         const nextMode = restoredMode ? normalizeModeId(restoredMode) : prev.mode;
         const nextSource = restoredSourceType || prev.audio_source_type || "auto";
         const nextIsLead = nextMode === "melody" || nextMode === "vocal_melody";
+        const nextIsViolin = nextMode === "violin_solo";
         return {
           ...prev,
           ...(restoredMode ? { mode: nextMode } : {}),
@@ -143,11 +151,19 @@ export function TranscriptionConfigPanel({
           ...(restoredSmoothing ? { playability_smoothing: restoredSmoothing } : {}),
           ...(restoredQuant ? { quantization: restoredQuant } : {}),
           ...(restoredSourceType ? { audio_source_type: restoredSourceType } : {}),
-          ...(restoredSep !== undefined
-            ? { enable_source_separation: restoredSep }
-            : nextIsLead && nextSource !== "solo_piano"
-              ? { enable_source_separation: true }
-              : {}),
+          ...(nextIsViolin
+            ? {
+                instrument: "violin",
+                enable_source_separation: false,
+                audio_source_type: "solo_piano",
+                min_midi_pitch: 55,
+                max_midi_pitch: 100,
+              }
+            : restoredSep !== undefined
+              ? { enable_source_separation: restoredSep }
+              : nextIsLead && nextSource !== "solo_piano"
+                ? { enable_source_separation: true }
+                : {}),
         };
       });
     }
@@ -208,14 +224,30 @@ export function TranscriptionConfigPanel({
                 setModeManuallySet(true);
                 const nextMode = e.target.value;
                 const nextNorm = normalizeModeId(nextMode);
+                const nextIsViolinSolo = nextNorm === "violin_solo";
                 const nextIsLead = nextNorm === "melody" || nextNorm === "vocal_melody";
                 setSettings((prev) => ({
                   ...prev,
                   mode: nextMode,
-                  ...(nextIsLead && (prev.audio_source_type || "auto") !== "solo_piano"
-                    ? { enable_source_separation: true }
+                  ...(nextIsViolinSolo
+                    ? {
+                        instrument: "violin",
+                        enable_source_separation: false,
+                        audio_source_type: "solo_piano",
+                        min_midi_pitch: 55,
+                        max_midi_pitch: 100,
+                      }
+                    : {
+                        ...(prev.min_midi_pitch === 55 && prev.max_midi_pitch === 100
+                          ? { min_midi_pitch: 21, max_midi_pitch: 108 }
+                          : {}),
+                        ...(nextIsLead && (prev.audio_source_type || "auto") !== "solo_piano"
+                          ? { enable_source_separation: true }
+                          : {}),
+                      }),
+                  ...((nextIsLead || nextIsViolinSolo) && !quantizationManuallySet
+                    ? { quantization: "sixteenth" }
                     : {}),
-                  ...(nextIsLead && !quantizationManuallySet ? { quantization: "sixteenth" } : {}),
                 }));
               }}
               className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2 pr-6 text-[11px] text-[#F5F3FF]"
@@ -238,6 +270,7 @@ export function TranscriptionConfigPanel({
             <select
               id="instrument-select"
               value={settings.instrument}
+              disabled={isViolinSolo}
               onChange={(e) => {
                 const nextInst = e.target.value;
                 setSettings((prev) => {
@@ -252,7 +285,7 @@ export function TranscriptionConfigPanel({
                   return { ...prev, instrument: nextInst, mode: nextMode };
                 });
               }}
-              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2 pr-6 text-[11px] text-[#F5F3FF]"
+              className="w-full h-9 rounded-lg border border-[#27273A] bg-[#09090F] px-2 pr-6 text-[11px] text-[#F5F3FF] disabled:opacity-60"
             >
               {SUPPORTED_INSTRUMENTS.map((inst) => (
                 <option key={inst.id} value={inst.id}>
@@ -330,23 +363,44 @@ export function TranscriptionConfigPanel({
             </label>
             <label
               htmlFor="demucs-separation-toggle"
-              className="flex items-start gap-2 rounded-lg border border-stone-300 bg-white p-2.5 text-xs text-stone-800 cursor-pointer dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF]"
+              className={`flex items-start gap-2 rounded-lg border border-stone-300 bg-white p-2.5 text-xs text-stone-800 dark:border-[#27273A] dark:bg-[#09090F] dark:text-[#F5F3FF] ${
+                isViolinSolo ? "opacity-60 cursor-not-allowed" : "cursor-pointer"
+              }`}
             >
               <input
                 id="demucs-separation-toggle"
                 type="checkbox"
-                checked={settings.enable_source_separation}
+                checked={isViolinSolo ? false : settings.enable_source_separation}
+                disabled={isViolinSolo}
                 onChange={(e) => setSettings({ ...settings, enable_source_separation: e.target.checked })}
                 className="mt-0.5 shrink-0 accent-violet-600 dark:accent-[#A78BFA]"
               />
               <span className="leading-snug">
-                {settings.enable_source_separation ? "On — Separate Vocals & Accompaniment" : "Off"}
+                {isViolinSolo
+                  ? "Off — Bypassed for Solo Violin Monophonic"
+                  : settings.enable_source_separation
+                    ? "On — Separate Vocals & Accompaniment"
+                    : "Off"}
               </span>
             </label>
             <p className="text-[11px] text-[#71717A]">
-              Separates vocals, bass, drums, and other instruments before transcription. Recommended for full songs with vocals and accompaniment.
+              {isViolinSolo
+                ? "Polyphonic stem separation (Demucs) is automatically disabled for solo monophonic violin transcription."
+                : "Separates vocals, bass, drums, and other instruments before transcription. Recommended for full songs with vocals and accompaniment."}
             </p>
           </div>
+        </div>
+      )}
+
+      {!isScoreImport && isViolinSolo && (
+        <div
+          data-testid="violin-solo-preset-info"
+          className="rounded-lg border border-emerald-400/50 bg-emerald-50 p-2.5 text-xs text-emerald-950 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200"
+        >
+          <div className="font-semibold">Violin (Solo Monophonic) Preset Active</div>
+          <p className="mt-0.5 text-[11px] opacity-90">
+            Transcribes a single Treble-clef melodic violin line across G3–E7 (MIDI 55–100) using monophonic pYIN contour tracking with vibrato tolerance. Source separation is bypassed.
+          </p>
         </div>
       )}
 
@@ -498,7 +552,7 @@ export function TranscriptionConfigPanel({
               </p>
             </div>
 
-            {!isLeadMelody && (
+            {!isLeadMelody && !isViolinSolo && (
               <div className="space-y-1.5">
                 <label htmlFor="playability-smoothing-select" className="block text-xs font-medium text-[#A1A1AA]">
                   Playability Smoothing
