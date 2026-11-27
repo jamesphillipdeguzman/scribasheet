@@ -87,6 +87,7 @@ interface MediaUploaderProps {
   selectedSourceAssetId?: string | null;
   onSelectSourceAsset?: (assetId: string) => void;
   onAudioExtracted?: () => void;
+  onArchiveFileDrop?: (file: File) => void;
   hasScore?: boolean;
   isProcessing?: boolean;
   acceptPdf?: boolean;
@@ -101,6 +102,7 @@ export function MediaUploader({
   selectedSourceAssetId,
   onSelectSourceAsset,
   onAudioExtracted,
+  onArchiveFileDrop,
   hasScore = false,
   isProcessing = false,
   acceptPdf = false,
@@ -201,6 +203,10 @@ export function MediaUploader({
   const validateAndUpload = async (file: File) => {
     setError(null);
     setExtractionError(null);
+    if (file.name.toLowerCase().endsWith(".scribasheet") && onArchiveFileDrop) {
+      onArchiveFileDrop(file);
+      return;
+    }
     const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
     const allowed = acceptPdf ? SCORE_EXTENSIONS : ACCEPTED_EXTENSIONS;
     if (!allowed.includes(ext)) {

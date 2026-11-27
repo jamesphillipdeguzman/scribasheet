@@ -9,7 +9,7 @@ from app.api.v1.worker import ACTIVE_WORKER_STATUSES
 from app.audio.extraction_service import ensure_extracted_audio_asset
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models import MediaAsset, Project, ProjectScore, TranscriptionJob, User
+from app.models import Export, MediaAsset, Project, ProjectScore, TranscriptionJob, User
 from app.notation.generator import (
     apply_scribasheet_musicxml_branding,
     resolve_project_score_title,
@@ -538,25 +538,70 @@ def delete_project(
     project: Project = Depends(get_owned_project),
     db: Session = Depends(get_db),
 ):
-    keys_to_delete: list[str] = []
+    candidate_keys: list[str] = []
     for asset in project.media_assets:
         if asset.storage_path:
-            keys_to_delete.append(asset.storage_path)
+            candidate_keys.append(asset.storage_path)
     for export_row in project.exports:
         if export_row.storage_path:
-            keys_to_delete.append(export_row.storage_path)
+            candidate_keys.append(export_row.storage_path)
     if project.score:
         if project.score.musicxml_path:
-            keys_to_delete.append(project.score.musicxml_path)
+            candidate_keys.append(project.score.musicxml_path)
         if project.score.midi_path:
-            keys_to_delete.append(project.score.midi_path)
+            candidate_keys.append(project.score.midi_path)
+
+    unique_keys = [k for k in dict.fromkeys(candidate_keys) if k]
+    if unique_keys:
+        shared_media = {
+            r[0]
+            for r in db.query(MediaAsset.storage_path)
+            .filter(MediaAsset.storage_path.in_(unique_keys), MediaAsset.project_id != project.id)
+            .all()
+            if r[0]
+        }
+        shared_exports = {
+            r[0]
+            for r in db.query(Export.storage_path)
+            .filter(Export.storage_path.in_(unique_keys), Export.project_id != project.id)
+            .all()
+            if r[0]
+        }
+        shared_scores = {
+            path
+            for pair in db.query(ProjectScore.musicxml_path, ProjectScore.midi_path)
+            .filter(ProjectScore.project_id != project.id)
+            .all()
+            for path in pair
+            if path and path in unique_keys
+        }
+        shared_keys = shared_media | shared_exports | shared_scores
+    else:
+        shared_keys = set()
+
+    expected_prefix = f"users/{project.user_id}/projects/{project.id}/"
+    failed_keys: list[str] = []
+    for key in unique_keys:
+        if key in shared_keys:
+            continue
+        if not key.startswith(expected_prefix) or ".." in key or "\\" in key or key.startswith("/"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Refusing to delete unsafe or out-of-scope storage key.",
+            )
+        try:
+            storage_service.delete(key)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            failed_keys.append(key)
+
+    if failed_keys:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Project could not be fully deleted because {len(failed_keys)} storage file(s) failed to delete. Please retry deletion.",
+        )
 
     db.delete(project)
     db.commit()
-
-    for key in dict.fromkeys(keys_to_delete):
-        try:
-            storage_service.delete(key)
-        except Exception:
-            pass
     return None

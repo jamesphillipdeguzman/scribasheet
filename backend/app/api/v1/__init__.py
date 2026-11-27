@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    archives,
     auth,
     billing,
     exports,
@@ -15,6 +16,7 @@ from app.api.v1 import (
 api_v1_router = APIRouter()
 api_v1_router.include_router(auth.router)
 api_v1_router.include_router(projects.router)
+api_v1_router.include_router(archives.router)
 api_v1_router.include_router(uploads.router)
 api_v1_router.include_router(transcriptions.router)
 api_v1_router.include_router(score.router)

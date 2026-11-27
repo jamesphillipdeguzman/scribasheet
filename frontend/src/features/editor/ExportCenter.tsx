@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, FileAudio, FileMusic, FileText, Loader2, Music, Printer } from "lucide-react";
+import { AlertTriangle, Archive, CheckCircle2, Download, FileAudio, FileMusic, FileText, Loader2, Music, Printer } from "lucide-react";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { useAuth } from "@/features/auth/AuthContext";
 import { printScorePdf } from "@/lib/pdfPrint";
 import {
+  formatBytes,
   formatLocalDateTime,
   isVideoMediaAsset,
   resolveDisplayScoreTitle,
   sanitizeDownloadTitle,
 } from "@/lib/utils";
 import { api, ApiError } from "@/services/api";
-import type { ExportRecord, MediaAsset } from "@/types/api";
+import type { ArchiveSummary, ExportRecord, MediaAsset } from "@/types/api";
 
 interface ExportCenterProps {
   projectId: string;
@@ -88,6 +89,7 @@ export function ExportCenter({
 }: ExportCenterProps) {
   let user: { display_name?: string } | null = null;
   try {
+    // eslint-disable-next-line react-hooks/rules-of-hooks
     user = useAuth().user;
   } catch {
     user = null;
@@ -103,6 +105,44 @@ export function ExportCenter({
   );
   const [localIncludeTranscribedBy, setLocalIncludeTranscribedBy] = useState<boolean>(true);
   const [creditInteracted, setCreditInteracted] = useState<boolean>(false);
+  const [archiveIncludeAudio, setArchiveIncludeAudio] = useState<boolean>(true);
+  const [archiveSummary, setArchiveSummary] = useState<ArchiveSummary | null>(null);
+  const [archiveDownloadedInfo, setArchiveDownloadedInfo] = useState<{
+    filename: string;
+    sizeBytes: number;
+    includedMedia: boolean;
+  } | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getProjectArchiveSummary(projectId, archiveIncludeAudio)
+      .then((res) => {
+        if (!cancelled) setArchiveSummary(res);
+      })
+      .catch(() => {
+        if (!cancelled) setArchiveSummary(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, archiveIncludeAudio, hasScore]);
+
+  const archiveMutation = useMutation({
+    mutationFn: () => api.downloadProjectArchive(projectId, projectTitle, archiveIncludeAudio),
+    onMutate: () => {
+      setArchiveError(null);
+      setActiveFmt("archive");
+    },
+    onSuccess: (res) => {
+      setArchiveDownloadedInfo(res);
+    },
+    onError: (err) => {
+      setArchiveError(err instanceof ApiError ? err.message : "Failed to generate .scribasheet archive.");
+    },
+    onSettled: () => setActiveFmt(null),
+  });
 
   useEffect(() => {
     if (transcribedBy === undefined && !localTranscribedBy) {
@@ -302,6 +342,111 @@ export function ExportCenter({
             className="w-full h-9 rounded-lg border border-stone-300 bg-white px-3 text-xs text-stone-900 placeholder:text-stone-400 focus:border-violet-500 focus:outline-none disabled:opacity-50 dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#F5F3FF] dark:placeholder:text-[#71717A]"
           />
         </div>
+      </div>
+
+      {/* Portable Session Archive (.scribasheet) */}
+      <div
+        data-testid="export-center-archive-section"
+        className="rounded-xl border border-violet-500/35 bg-[#09090F] p-4 space-y-3"
+      >
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-sm font-semibold text-[#F5F3FF]">
+              <Archive className="h-4 w-4 text-[#A78BFA]" />
+              <span>Archive Session (.scribasheet)</span>
+            </div>
+            <p className="text-xs text-[#A1A1AA]">
+              Download a self-contained portable backup with full editable score data, settings, lyrics, chords, and SHA-256 verification.
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={activeFmt !== null}
+            data-testid="export-center-archive-btn"
+            onClick={() => archiveMutation.mutate()}
+            className="shrink-0 min-h-[40px]"
+          >
+            {activeFmt === "archive" ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Download className="h-3.5 w-3.5" />
+            )}
+            {activeFmt === "archive" ? "Archiving..." : "Archive Session (.scribasheet)"}
+          </Button>
+        </div>
+
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between border-t border-[#27273A] pt-3">
+          <div className="space-y-0.5">
+            <div className="text-xs font-medium text-[#F5F3FF]">Include Original Audio</div>
+            <p className="text-[11px] text-[#A1A1AA]">
+              Disable to save a smaller score-only archive without source audio files.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={archiveIncludeAudio}
+            aria-label="Include Original Audio"
+            data-testid="export-archive-include-audio-toggle"
+            onClick={() => setArchiveIncludeAudio((v) => !v)}
+            disabled={activeFmt !== null}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-[#27273A] transition-colors ${archiveIncludeAudio ? "bg-[#7C3AED]" : "bg-[#27273A]"
+              }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${archiveIncludeAudio ? "translate-x-6" : "translate-x-1"
+                }`}
+            />
+          </button>
+        </div>
+
+        {!archiveIncludeAudio && (
+          <div
+            data-testid="export-archive-audio-warning"
+            className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-500/10 p-2.5 text-xs text-amber-200"
+          >
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-300 mt-0.5" />
+            <span>
+              Excluding audio reduces archive size, but the original recording cannot be recovered or used for audio-based re-transcription.
+            </span>
+          </div>
+        )}
+
+        {archiveSummary && (
+          <div className="text-[11px] text-[#A1A1AA] flex flex-wrap gap-x-4 gap-y-1">
+            <span>
+              Notation: {archiveSummary.has_score ? "Canonical Score + MusicXML + MIDI" : "Metadata only"}
+            </span>
+            <span>
+              Audio:{" "}
+              {archiveSummary.included_media_count > 0
+                ? `${archiveSummary.included_media_count} file(s) (${formatBytes(archiveSummary.included_media_bytes)})`
+                : archiveSummary.available_media_count > 0
+                  ? "Omitted (score-only)"
+                  : "None"}
+            </span>
+          </div>
+        )}
+
+        {archiveError && (
+          <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-2.5 text-xs text-red-300">
+            {archiveError}
+          </div>
+        )}
+
+        {archiveDownloadedInfo && (
+          <div
+            data-testid="export-archive-success-notice"
+            className="flex items-start gap-2 rounded-lg border border-emerald-500/35 bg-emerald-500/10 p-2.5 text-xs text-emerald-200"
+          >
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400 mt-0.5" />
+            <span>
+              Downloaded {archiveDownloadedInfo.filename}. Your archive has been downloaded. The original cloud project is still stored in ScribaSheet. Delete the cloud project separately if you want to reclaim its storage.
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 min-w-0">

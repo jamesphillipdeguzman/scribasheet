@@ -100,6 +100,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUsage(null);
   };
 
+  useEffect(() => {
+    const onRefreshUsage = () => {
+      void refreshUser();
+    };
+    window.addEventListener("scribasheet:refresh-usage", onRefreshUsage);
+    return () => window.removeEventListener("scribasheet:refresh-usage", onRefreshUsage);
+  }, [refreshUser]);
+
   return (
     <AuthContext.Provider
       value={{

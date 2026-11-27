@@ -1,4 +1,7 @@
+import { sanitizeDownloadTitle } from "@/lib/utils";
 import type {
+  ArchiveSummary,
+  ArchiveValidationPreview,
   ExportRecord,
   ExtractAudioResponse,
   LyricsData,
@@ -699,6 +702,74 @@ export const api = {
     }
     const blob = await api.fetchExportBlob(record.download_url);
     return { record, blob };
+  },
+
+  // Project Archives (.scribasheet)
+  getProjectArchiveSummary: (projectId: string, includeAudio = true) =>
+    request<ArchiveSummary>(`/projects/${projectId}/archive/summary?include_audio=${includeAudio ? "true" : "false"}`),
+
+  downloadProjectArchive: async (
+    projectId: string,
+    projectTitle: string,
+    includeAudio = true,
+  ): Promise<{ filename: string; sizeBytes: number; includedMedia: boolean }> => {
+    const { accessToken } = getStoredTokens();
+    const res = await fetch(
+      `${API_BASE_URL}/projects/${projectId}/archive?include_audio=${includeAudio ? "true" : "false"}`,
+      {
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+      },
+    );
+    if (!res.ok) {
+      let detail = `Failed to export project archive (${res.status})`;
+      try {
+        const body = await res.json();
+        detail = body.detail || detail;
+      } catch {
+        // ignore
+      }
+      throw new ApiError(res.status, detail);
+    }
+    const blob = await res.blob();
+    const safeTitle = sanitizeDownloadTitle(projectTitle, "ScribaSheet-Project").replace(/\s+/g, "-") || "ScribaSheet-Project";
+    const filename = `${safeTitle}.scribasheet`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return {
+      filename,
+      sizeBytes: blob.size,
+      includedMedia: res.headers.get("X-Archive-Included-Media") !== "false" && includeAudio,
+    };
+  },
+
+  validateArchive: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return request<ArchiveValidationPreview>(
+      "/archives/validate",
+      { method: "POST", body: fd },
+      true,
+      BASE_RETRY_DELAY_MS,
+      120_000,
+    );
+  },
+
+  importArchive: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return request<Project>(
+      "/archives/import",
+      { method: "POST", body: fd },
+      true,
+      BASE_RETRY_DELAY_MS,
+      120_000,
+    );
   },
 
   // Billing & Worker

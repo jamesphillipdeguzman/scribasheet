@@ -273,3 +273,47 @@ export interface LyricsData {
   manually_edited: boolean;
   updated_at: string | null;
 }
+
+export interface ArchiveMediaFileSummary {
+  filename: string;
+  asset_type: string;
+  mime_type: string;
+  size_bytes: number;
+}
+
+export interface ArchiveSummary {
+  project_id: string;
+  title: string;
+  source_type: string;
+  has_score: boolean;
+  include_audio: boolean;
+  available_media_count: number;
+  included_media_count: number;
+  available_media_bytes: number;
+  included_media_bytes: number;
+  media_files: ArchiveMediaFileSummary[];
+}
+
+export interface ArchiveValidationPreview {
+  valid: boolean;
+  schema_version: number;
+  archive_format_version: string;
+  exported_at: string;
+  original_project_id?: string | null;
+  title: string;
+  source_type: string;
+  has_score: boolean;
+  included_media: boolean;
+  original_audio_omitted: boolean;
+  media_count: number;
+  total_media_bytes: number;
+  included_files: string[];
+  tempo_bpm?: number | null;
+  time_signature?: string | null;
+  key_signature?: string | null;
+  note_count: number;
+  chord_count: number;
+  has_lyrics: boolean;
+  checksums_verified: boolean;
+  warnings?: string[];
+}

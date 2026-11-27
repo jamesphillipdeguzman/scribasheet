@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
+  Archive,
+  ArchiveRestore,
   Clock,
   Copy,
   Edit3,
@@ -23,12 +25,14 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { useAuth } from "@/features/auth/AuthContext";
+import { ArchiveExportModal } from "@/features/projects/ArchiveExportModal";
+import { ArchiveImportModal } from "@/features/projects/ArchiveImportModal";
 import { formatBytes, formatDuration, formatLocalDateTime, SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
-import { api } from "@/services/api";
+import { api, ApiError } from "@/services/api";
 import type { Project } from "@/types/api";
 
 export function DashboardPage() {
-  const { user, usage } = useAuth();
+  const { user, usage, refreshUser } = useAuth();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -53,6 +57,9 @@ export function DashboardPage() {
   const [newMode, setNewMode] = useState("piano");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [archivingProject, setArchivingProject] = useState<Project | null>(null);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["projects", search, statusFilter, sortBy],
@@ -102,8 +109,17 @@ export function DashboardPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => api.deleteProject(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["projects"] }),
+    mutationFn: (id: string) => {
+      setActionError(null);
+      return api.deleteProject(id);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void refreshUser();
+    },
+    onError: (err) => {
+      setActionError(err instanceof ApiError ? err.message : "Failed to delete project and reclaim storage.");
+    },
   });
 
   const renameMutation = useMutation({
@@ -131,7 +147,17 @@ export function DashboardPage() {
             </p>
             <WorkerStatusBadge />
           </div>
-          <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto shrink-0">
+          <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 w-full sm:w-auto shrink-0">
+            <Button
+              variant="outline"
+              onClick={() => setShowImportModal(true)}
+              data-testid="import-archive-btn"
+              title="Restore a backed-up .scribasheet project archive."
+              className="w-full sm:w-auto min-h-[44px]"
+            >
+              <ArchiveRestore className="h-4 w-4 text-[#A78BFA]" />
+              Import Archive (.scribasheet)
+            </Button>
             <Button
               variant="secondary"
               onClick={() => createPlaygroundMutation.mutate()}
@@ -175,6 +201,18 @@ export function DashboardPage() {
         </div>
 
         <WorkerControlPanel />
+
+        {actionError && (
+          <div
+            role="alert"
+            className="rounded-lg border border-red-500/35 bg-red-500/10 p-3 text-xs text-red-300 flex items-center justify-between gap-3"
+          >
+            <span>{actionError}</span>
+            <button type="button" onClick={() => setActionError(null)} className="text-red-200 hover:text-white">
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {/* Usage Summary */}
         {usage && (() => {
@@ -388,6 +426,16 @@ export function DashboardPage() {
                       </button>
                       <button
                         type="button"
+                        title="Archive session (.scribasheet)"
+                        aria-label="Archive session (.scribasheet)"
+                        data-testid={`archive-project-${p.id}`}
+                        onClick={() => setArchivingProject(p)}
+                        className="p-2 rounded-lg text-stone-600 hover:bg-violet-50 hover:text-violet-700 border border-transparent hover:border-violet-200 transition-colors dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white dark:hover:border-white/10"
+                      >
+                        <Archive className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
                         title="Duplicate project"
                         aria-label="Duplicate project"
                         onClick={() => duplicateMutation.mutate(p.id)}
@@ -496,6 +544,24 @@ export function DashboardPage() {
           </div>
         </div>
       )}
+      <ArchiveExportModal
+        isOpen={Boolean(archivingProject)}
+        project={archivingProject}
+        onClose={() => setArchivingProject(null)}
+        onDeleteProject={async (id) => {
+          await deleteMutation.mutateAsync(id);
+        }}
+      />
+
+      <ArchiveImportModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onRestored={(restored) => {
+          void queryClient.invalidateQueries({ queryKey: ["projects"] });
+          void refreshUser();
+          navigate(`/projects/${restored.id}`);
+        }}
+      />
     </AppShell>
   );
 }

@@ -26,6 +26,7 @@ import { WorkerStatusBadge } from "@/components/WorkerStatusBadge";
 import { StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { printScorePdf } from "@/lib/pdfPrint";
+import { ArchiveImportModal } from "@/features/projects/ArchiveImportModal";
 import { ChordAndTabPanel } from "@/features/editor/ChordAndTabPanel";
 import { ExportCenter } from "@/features/editor/ExportCenter";
 import { LyricsPanel } from "@/features/editor/LyricsPanel";
@@ -70,6 +71,7 @@ export function ProjectStudioPage() {
   const { projectId = "" } = useParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [archiveImportFile, setArchiveImportFile] = useState<File | null>(null);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const autoCollapsedPlaygroundRef = useRef<string | null>(null);
@@ -1265,6 +1267,7 @@ export function ProjectStudioPage() {
                   selectedSourceAssetId={effectiveSourceAssetId}
                   onSelectSourceAsset={setSelectedSourceAssetId}
                   onAudioExtracted={() => queryClient.invalidateQueries({ queryKey: ["project", projectId] })}
+                  onArchiveFileDrop={(file) => setArchiveImportFile(file)}
                   hasScore={Boolean(scoreData)}
                   acceptPdf={project.transcription_mode === "satb_pdf"}
                   isProcessing={
@@ -1981,6 +1984,16 @@ export function ProjectStudioPage() {
           </div>
         </div>
       )}
+      <ArchiveImportModal
+        isOpen={Boolean(archiveImportFile)}
+        initialFile={archiveImportFile}
+        onClose={() => setArchiveImportFile(null)}
+        onRestored={(restored) => {
+          void queryClient.invalidateQueries({ queryKey: ["projects"] });
+          window.dispatchEvent(new CustomEvent("scribasheet:refresh-usage"));
+          navigate(`/projects/${restored.id}`);
+        }}
+      />
     </AppShell>
   );
 }
