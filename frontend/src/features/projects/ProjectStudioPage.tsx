@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft,
   Check,
@@ -66,11 +66,12 @@ import { NotationShortcutsReference } from "@/features/editor/NotationCommandPal
 import { OmrVerificationBar } from "@/features/editor/OmrVerificationBar";
 import { type ReferenceSheetSplitConfig } from "@/features/editor/ReferenceSplitLayout";
 import { SheetMusicViewer } from "@/features/editor/SheetMusicViewer";
+import type { PlaylistHandoffState } from "@/features/playlists/playlistTypes";
+import { API_BASE_URL, api, ApiError, WS_BASE_URL, getStoredTokens, isAuthError } from "@/services/api";
 import { AudioTrimPanel } from "@/features/editor/AudioTrimPanel";
 import { WaveformPlayer } from "@/features/editor/WaveformPlayer";
 import { TranscriptionConfigPanel } from "@/features/transcription/TranscriptionConfigPanel";
 import { MediaUploader } from "@/features/uploads/MediaUploader";
-import { api, ApiError, WS_BASE_URL, getStoredTokens, isAuthError } from "@/services/api";
 import {
   deriveProjectTitleFromFilename,
   isPlaceholderProjectTitle,
@@ -95,7 +96,14 @@ type StudioTab = "notation" | "pianoroll" | "chords" | "lyrics" | "exports";
 export function ProjectStudioPage() {
   const { projectId = "" } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
+  const [playlistHandoff, setPlaylistHandoff] = useState<PlaylistHandoffState | null>(() => {
+    const incoming = (location.state as { playlistHandoff?: PlaylistHandoffState } | null)
+      ?.playlistHandoff;
+    return incoming ?? null;
+  });
+  const [handoffAudioUrl, setHandoffAudioUrl] = useState<string | null>(null);
   const [archiveImportFile, setArchiveImportFile] = useState<File | null>(null);
   const [orderedImageAssetIds, setOrderedImageAssetIds] = useState<string[]>([]);
 
@@ -172,6 +180,29 @@ export function ProjectStudioPage() {
   }, []);
   const [customPickupMode, setCustomPickupMode] = useState(false);
   const [customPickupInput, setCustomPickupInput] = useState("2");
+
+  useEffect(() => {
+    if (!playlistHandoff || playlistHandoff.sourceType !== "project_audio" || !playlistHandoff.sourceMediaAssetId) {
+      setHandoffAudioUrl(null);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .getSignedMediaUrl(playlistHandoff.sourceMediaAssetId)
+      .then((res) => {
+        if (cancelled) return;
+        const url = res.url.startsWith("http")
+          ? res.url
+          : `${API_BASE_URL.replace(/\/api\/v1\/?$/, "")}${res.url}`;
+        setHandoffAudioUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setHandoffAudioUrl(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [playlistHandoff]);
 
   useEffect(() => {
     if (!isFocusMode) return;
@@ -1542,6 +1573,87 @@ export function ProjectStudioPage() {
               )}
           </div>
         </div>
+
+        {playlistHandoff && (
+          <div
+            data-testid="studio-playlist-handoff-banner"
+            className="relative z-10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-violet-300 bg-violet-50/90 px-4 py-3 text-xs text-stone-900 dark:border-violet-500/40 dark:bg-violet-500/10 dark:text-[#F5F3FF]"
+          >
+            <div className="space-y-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 font-semibold">
+                <span>
+                  {playlistHandoff.action === "playground"
+                    ? "MIDI Playground Reference"
+                    : "Playlist Transcription Handoff"}
+                  : {playlistHandoff.trackTitle}
+                </span>
+                <span className="rounded bg-white/80 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-violet-800 dark:bg-white/10 dark:text-violet-300">
+                  {playlistHandoff.sourceType === "youtube" ? "YouTube" : "Project Audio"}
+                </span>
+              </div>
+              {playlistHandoff.practiceNotes && (
+                <p className="text-stone-700 dark:text-slate-300">
+                  Practice Note: {playlistHandoff.practiceNotes}
+                </p>
+              )}
+              {playlistHandoff.sourceType === "youtube" ? (
+                <p className="text-amber-900 dark:text-amber-200">
+                  {playlistHandoff.action === "transcribe"
+                    ? "YouTube links cannot be downloaded automatically. Upload an authorized local audio file (MP3, WAV, FLAC, M4A, MP4) or use Tab Audio Capture on the left before starting transcription."
+                    : "YouTube URLs cannot be converted into downloadable audio files. Keep listening in Playlists (or enable the Mini-Player) while practicing in this Playground."}{" "}
+                  {playlistHandoff.youtubeUrl && (
+                    <a
+                      href={playlistHandoff.youtubeUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline font-medium"
+                    >
+                      Open on YouTube
+                    </a>
+                  )}
+                </p>
+              ) : (
+                <p className="text-stone-700 dark:text-[#A1A1AA]">
+                  {playlistHandoff.action === "transcribe"
+                    ? "Review your transcription settings on the left and click Transcribe when ready."
+                    : `Reference media: ${playlistHandoff.sourceMediaFilename || "Linked Project Audio"}. Open Reference Sheet to view local PDF/image scores side-by-side.`}
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {handoffAudioUrl && (
+                <audio
+                  controls
+                  preload="metadata"
+                  src={handoffAudioUrl}
+                  data-testid="studio-handoff-reference-audio"
+                  className="h-8 max-w-[240px]"
+                />
+              )}
+              {isMidiPlayground && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    if (!showReferenceSheet) toggleReferenceSheet();
+                  }}
+                >
+                  Open Reference Sheet
+                </Button>
+              )}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setPlaylistHandoff(null)}
+              >
+                Dismiss
+              </Button>
+            </div>
+          </div>
+        )}
 
         {/* Main Studio Grid */}
         <div className={`grid gap-4 min-w-0 ${sidebarOpen ? "lg:grid-cols-12" : "grid-cols-1"}`}>

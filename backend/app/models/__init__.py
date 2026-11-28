@@ -7,6 +7,7 @@ from app.models.entities import (
     TranscriptionResult,
     UsageRecord,
     User,
+    UserPlaylist,
     WorkerNode,
 )
 
@@ -20,4 +21,5 @@ __all__ = [
     "Export",
     "UsageRecord",
     "WorkerNode",
+    "UserPlaylist",
 ]

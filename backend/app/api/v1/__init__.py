@@ -6,6 +6,7 @@ from app.api.v1 import (
     billing,
     exports,
     lyrics,
+    playlists,
     projects,
     score,
     transcriptions,
@@ -24,3 +25,4 @@ api_v1_router.include_router(lyrics.router)
 api_v1_router.include_router(exports.router)
 api_v1_router.include_router(billing.router)
 api_v1_router.include_router(worker.router)
+api_v1_router.include_router(playlists.router)

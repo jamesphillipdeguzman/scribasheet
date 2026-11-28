@@ -7,6 +7,10 @@ import { ForgotPasswordPage, LoginPage, RegisterPage } from "@/features/auth/Aut
 import { SettingsPage } from "@/features/auth/SettingsPage";
 import { DashboardPage } from "@/features/dashboard/DashboardPage";
 import { LandingPage } from "@/features/landing/LandingPage";
+import { PersistentMiniPlayer } from "@/features/playlists/PersistentMiniPlayer";
+import { PlaylistProvider } from "@/features/playlists/PlaylistContext";
+import { PlaylistsPage } from "@/features/playlists/PlaylistsPage";
+import { PublicSharedPlaylistPage } from "@/features/playlists/PublicSharedPlaylistPage";
 import { ProjectStudioPage } from "@/features/projects/ProjectStudioPage";
 
 const queryClient = new QueryClient({
@@ -65,39 +69,54 @@ export function App() {
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<LandingPage />} />
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route
-              path="/dashboard"
-              element={
-                <ProtectedRoute>
-                  <DashboardPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/settings"
-              element={
-                <ProtectedRoute>
-                  <SettingsPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/projects/:projectId"
-              element={
-                <ProtectedRoute>
-                  <ProjectStudioPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route path="*" element={<NotFoundPage />} />
-          </Routes>
-        </BrowserRouter>
-      </AuthProvider>
+            <PlaylistProvider>
+              <Routes>
+                <Route path="/" element={<LandingPage />} />
+                <Route path="/login" element={<LoginPage />} />
+                <Route path="/register" element={<RegisterPage />} />
+                <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+                <Route
+                  path="/shared/playlist/:shareToken"
+                  element={<PublicSharedPlaylistPage />}
+                />
+                <Route
+                  path="/dashboard"
+                  element={
+                    <ProtectedRoute>
+                      <DashboardPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/playlists"
+                  element={
+                    <ProtectedRoute>
+                      <PlaylistsPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/settings"
+                  element={
+                    <ProtectedRoute>
+                      <SettingsPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/projects/:projectId"
+                  element={
+                    <ProtectedRoute>
+                      <ProjectStudioPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route path="*" element={<NotFoundPage />} />
+              </Routes>
+              <PersistentMiniPlayer />
+            </PlaylistProvider>
+          </BrowserRouter>
+        </AuthProvider>
     </QueryClientProvider>
   </ThemeProvider>
   );

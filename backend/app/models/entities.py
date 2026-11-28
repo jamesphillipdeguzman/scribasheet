@@ -44,6 +44,7 @@ class User(Base):
 
     projects: Mapped[list["Project"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     usage_records: Mapped[list["UsageRecord"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    playlists: Mapped[list["UserPlaylist"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Project(Base):
@@ -199,3 +200,29 @@ class WorkerNode(Base):
     active_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class UserPlaylist(Base):
+    __tablename__ = "user_playlists"
+    __table_args__ = (
+        UniqueConstraint("user_id", "record_type", "client_id", name="uq_user_playlists_user_type_client"),
+        Index("ix_user_playlists_user_pos", "user_id", "record_type", "position"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    record_type: Mapped[str] = mapped_column(String(24), default="playlist", nullable=False)
+    client_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    category_id: Mapped[str] = mapped_column(String(80), default="cat-practice-reference", nullable=False)
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tracks_json: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    is_shared: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    share_token: Mapped[str | None] = mapped_column(String(96), unique=True, index=True, nullable=True)
+    shared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="playlists")

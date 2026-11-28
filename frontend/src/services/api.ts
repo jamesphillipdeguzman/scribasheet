@@ -122,7 +122,8 @@ function isAuthPublicPath(path: string): boolean {
     clean === "/auth/register" ||
     clean === "/auth/refresh" ||
     clean === "/auth/forgot-password" ||
-    clean === "/auth/reset-password"
+    clean === "/auth/reset-password" ||
+    clean.startsWith("/playlists/shared/")
   );
 }
 
@@ -475,6 +476,7 @@ export const api = {
       video_id?: string | null;
       title?: string | null;
       author_name?: string | null;
+      thumbnail_url?: string | null;
     }>("/uploads/url-check", {
       method: "POST",
       body: JSON.stringify({ url }),
@@ -814,4 +816,110 @@ export const api = {
   getWorkerStatus: () => request<WorkerStatus>("/worker/status"),
   deleteMediaAsset: (projectId: string, assetId: string) =>
     request<void>(`/projects/${projectId}/media/${assetId}`, { method: "DELETE" }),
+
+  // Optional Playlists Neon Sync
+  getPlaylistLibrary: () =>
+    request<{
+      schemaVersion: number;
+      updatedAt: string;
+      categories: Array<{ id: string; name: string; isDefault: boolean }>;
+      playlists: Array<Record<string, unknown>>;
+      preferences: Record<string, unknown>;
+    }>("/playlists"),
+  syncPlaylistLibrary: (payload: {
+    schemaVersion: number;
+    categories: Array<{ id: string; name: string; isDefault: boolean }>;
+    playlists: unknown[];
+    preferences: Record<string, unknown>;
+  }) =>
+    request<{
+      schemaVersion: number;
+      updatedAt: string;
+      categories: Array<{ id: string; name: string; isDefault: boolean }>;
+      playlists: Array<Record<string, unknown>>;
+      preferences: Record<string, unknown>;
+    }>("/playlists/sync", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  createRemotePlaylist: (payload: {
+    id?: string;
+    title: string;
+    categoryId: string;
+    tracks: unknown[];
+  }) =>
+    request<Record<string, unknown>>("/playlists", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateRemotePlaylist: (
+    playlistId: string,
+    payload: { title?: string; categoryId?: string; position?: number; tracks?: unknown[] },
+  ) =>
+    request<Record<string, unknown>>(`/playlists/${playlistId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteRemotePlaylist: (playlistId: string) =>
+    request<void>(`/playlists/${playlistId}`, { method: "DELETE" }),
+  enablePlaylistShare: (playlistId: string) =>
+    request<{
+      playlistId: string;
+      serverId: string;
+      isShared: boolean;
+      shareToken: string | null;
+      sharedAt: string | null;
+    }>(`/playlists/${encodeURIComponent(playlistId)}/share`, { method: "POST" }),
+  regeneratePlaylistShare: (playlistId: string) =>
+    request<{
+      playlistId: string;
+      serverId: string;
+      isShared: boolean;
+      shareToken: string | null;
+      sharedAt: string | null;
+    }>(`/playlists/${encodeURIComponent(playlistId)}/share/regenerate`, { method: "POST" }),
+  disablePlaylistShare: (playlistId: string) =>
+    request<{
+      playlistId: string;
+      serverId: string;
+      isShared: boolean;
+      shareToken: string | null;
+      sharedAt: string | null;
+    }>(`/playlists/${encodeURIComponent(playlistId)}/share`, { method: "DELETE" }),
+  getPublicSharedPlaylist: async (shareToken: string) => {
+    const res = await fetch(
+      `${API_BASE_URL}/playlists/shared/${encodeURIComponent(shareToken)}`,
+      { method: "GET" },
+    );
+    if (!res.ok) {
+      let detail = `Shared playlist unavailable (${res.status})`;
+      try {
+        const body = await res.json();
+        detail = body.detail || detail;
+      } catch {
+        // ignore non-json error body
+      }
+      throw new ApiError(res.status, detail);
+    }
+    return res.json() as Promise<{
+      title: string;
+      description: string;
+      categoryName: string;
+      sharedAt: string | null;
+      updatedAt: string;
+      tracks: Array<{
+        position: number;
+        title: string;
+        artist: string;
+        sourceType: "youtube" | "project_audio";
+        thumbnailUrl: string | null;
+        practiceNotes: string;
+        loop: { aSec: number | null; bSec: number | null };
+        youtubeVideoId?: string | null;
+        youtubeUrl?: string | null;
+        playablePublicly: boolean;
+        unavailableReason?: string | null;
+      }>;
+    }>;
+  },
 };

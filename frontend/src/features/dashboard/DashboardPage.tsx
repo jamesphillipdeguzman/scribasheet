@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   ArchiveRestore,
   FolderPlus,
@@ -31,6 +31,7 @@ import {
 } from "@/features/dashboard/ProjectViews";
 import { ArchiveExportModal } from "@/features/projects/ArchiveExportModal";
 import { ArchiveImportModal } from "@/features/projects/ArchiveImportModal";
+import type { PlaylistHandoffState } from "@/features/playlists/playlistTypes";
 import { formatBytes, SUPPORTED_INSTRUMENTS, TRANSCRIPTION_MODES } from "@/lib/utils";
 import { api, ApiError } from "@/services/api";
 import type { Project } from "@/types/api";
@@ -38,6 +39,7 @@ import type { Project } from "@/types/api";
 export function DashboardPage() {
   const { user, usage, refreshUser } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
 
   const [search, setSearch] = useState("");
@@ -45,6 +47,7 @@ export function DashboardPage() {
   const [sortBy, setSortBy] = useState("updated_at");
   const [viewMode, setViewMode] = useState<DashboardViewMode>(() => loadDashboardViewMode());
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [playlistHandoff, setPlaylistHandoff] = useState<PlaylistHandoffState | null>(null);
 
   const handleViewModeChange = (nextMode: DashboardViewMode) => {
     setViewMode(nextMode);
@@ -65,6 +68,26 @@ export function DashboardPage() {
   const [newTitle, setNewTitle] = useState("");
   const [newInstrument, setNewInstrument] = useState("piano");
   const [newMode, setNewMode] = useState("piano");
+
+  useEffect(() => {
+    const incoming = (location.state as { openNewTranscription?: PlaylistHandoffState } | null)
+      ?.openNewTranscription;
+    if (!incoming) return;
+    setPlaylistHandoff(incoming);
+    setNewTitle(incoming.trackTitle || "");
+    if (incoming.categoryId === "cat-classical-violin") {
+      setNewInstrument("violin");
+      setNewMode("violin_solo");
+    } else if (incoming.categoryId === "cat-choral-satb") {
+      setNewInstrument("vocal");
+      setNewMode("satb_choir");
+    } else {
+      setNewInstrument("piano");
+      setNewMode("piano");
+    }
+    setShowCreateModal(true);
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location.state, location.pathname, navigate]);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [archivingProject, setArchivingProject] = useState<Project | null>(null);
@@ -86,14 +109,17 @@ export function DashboardPage() {
     mutationFn: () =>
       api.createProject({
         title: newTitle.trim() || "Untitled Transcription",
+        description: playlistHandoff?.practiceNotes || "",
         instrument: newInstrument,
         transcription_mode: newMode,
       }),
     onSuccess: (project) => {
+      const activeHandoff = playlistHandoff;
       queryClient.invalidateQueries({ queryKey: ["projects"] });
       setShowCreateModal(false);
       setNewTitle("");
-      navigate(`/projects/${project.id}`);
+      setPlaylistHandoff(null);
+      navigate(`/projects/${project.id}`, activeHandoff ? { state: { playlistHandoff: activeHandoff } } : undefined);
     },
   });
 
@@ -419,6 +445,23 @@ export function DashboardPage() {
               value={newTitle}
               onChange={(e) => setNewTitle(e.target.value)}
             />
+            {playlistHandoff && (
+              <div
+                data-testid="dashboard-playlist-handoff-notice"
+                className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950 space-y-1 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
+              >
+                <div className="font-semibold">
+                  Playlist Handoff ({playlistHandoff.sourceType === "youtube" ? "YouTube Reference" : "Project Audio"})
+                </div>
+                {playlistHandoff.sourceType === "youtube" ? (
+                  <p>
+                    YouTube URLs cannot be downloaded or transcribed automatically by ScribaSheet. After creating this project, upload an authorized local audio/video file (MP3, WAV, FLAC, M4A, MP4) or use Tab Audio Capture in Studio.
+                  </p>
+                ) : (
+                  <p>Review instrument and mode settings before creating your project.</p>
+                )}
+              </div>
+            )}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium text-[#A1A1AA]">Primary Instrument</label>
               <select

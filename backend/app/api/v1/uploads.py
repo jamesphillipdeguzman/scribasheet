@@ -422,7 +422,8 @@ def check_external_video_url(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Please enter a valid http/https URL.")
 
     host = parsed.netloc.lower()
-    if "youtube.com" in host or "youtu.be" in host:
+    if "youtube.com" in host or "youtu.be" in host or "youtube-nocookie.com" in host:
+        import re
         from urllib.parse import parse_qs
 
         import httpx
@@ -432,10 +433,14 @@ def check_external_video_url(
             video_id = parsed.path.strip("/").split("/")[0] or None
         elif parsed.path.startswith("/shorts/"):
             video_id = parsed.path.split("/shorts/", 1)[1].split("/")[0] or None
+        elif parsed.path.startswith("/embed/"):
+            video_id = parsed.path.split("/embed/", 1)[1].split("/")[0] or None
+        elif parsed.path.startswith("/live/"):
+            video_id = parsed.path.split("/live/", 1)[1].split("/")[0] or None
         else:
             video_id = parse_qs(parsed.query).get("v", [None])[0]
 
-        if not video_id or len(video_id) < 6:
+        if not video_id or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Please enter a valid YouTube video URL (youtube.com/watch?v=... or youtu.be/...).",
@@ -443,6 +448,7 @@ def check_external_video_url(
 
         title: str | None = None
         author_name: str | None = None
+        thumbnail_url: str | None = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
         try:
             oembed_resp = httpx.get(
                 "https://www.youtube.com/oembed",
@@ -453,6 +459,8 @@ def check_external_video_url(
                 meta = oembed_resp.json()
                 title = meta.get("title")
                 author_name = meta.get("author_name")
+                if isinstance(meta.get("thumbnail_url"), str) and meta["thumbnail_url"].startswith(("http://", "https://")):
+                    thumbnail_url = meta["thumbnail_url"]
         except Exception:
             pass
 
@@ -462,6 +470,7 @@ def check_external_video_url(
             "video_id": video_id,
             "title": title,
             "author_name": author_name,
+            "thumbnail_url": thumbnail_url,
             "reason": (
                 "Direct audio extraction from YouTube is disabled because ScribaSheet respects platform "
                 "terms of service and DRM protections. Please upload an authorized local audio/video file "

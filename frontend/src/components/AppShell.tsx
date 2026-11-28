@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { LayoutDashboard, LogOut, Menu, Music, Settings, User as UserIcon, X } from "lucide-react";
+import { LayoutDashboard, ListMusic, LogOut, Menu, Music, Settings, User as UserIcon, X } from "lucide-react";
 import { BrandMark } from "@/components/BrandMark";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/Button";
@@ -21,6 +21,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const navItems = [
     { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { to: "/playlists", label: "Playlists", icon: ListMusic },
     { to: "/settings", label: "Account", icon: Settings },
   ];
 
