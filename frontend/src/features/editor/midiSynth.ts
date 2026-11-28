@@ -93,6 +93,7 @@ export class MidiSynthesizer {
   private lastScheduledSongTime = 0;
   private lastBeatTick = -1;
   private startToken = 0;
+  private auditionSequenceId = 0;
   private activeOnPosition: ((sec: number) => void) | null = null;
   private sessionAllowPianoSampler = true;
   private sessionAllowSfSamplers = new Set<number>();
@@ -441,6 +442,96 @@ export class MidiSynthesizer {
       // Ignore in restricted environments
     }
     return this.pianoLoaded;
+  }
+
+  /**
+   * Audition one or more MIDI pitches cleanly after ensuring AudioContext is unlocked.
+   * Safe against suspended contexts, Web Audio failures, and stale async triggers.
+   */
+  public auditionNotes(
+    pitches: number[],
+    options: {
+      durationSec?: number;
+      velocity?: number;
+      volume?: number;
+      program?: number;
+    } = {},
+  ): void {
+    if (typeof window === "undefined") return;
+    const uniquePitches: number[] = [];
+    const seen = new Set<number>();
+    for (const raw of pitches) {
+      if (typeof raw !== "number" || !Number.isFinite(raw)) continue;
+      const clamped = Math.max(0, Math.min(127, Math.round(raw)));
+      if (!seen.has(clamped)) {
+        seen.add(clamped);
+        uniquePitches.push(clamped);
+      }
+    }
+    if (uniquePitches.length === 0) return;
+
+    const {
+      durationSec = 0.25,
+      velocity = 84,
+      volume = 0.7,
+      program = 0,
+    } = options;
+
+    try {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      if (!this.ctx) {
+        this.ctx = this.createInteractiveAudioContext(AudioCtx);
+      }
+      const ctx = this.ctx;
+      this.attachGestureResumeListeners();
+      this.attachVisibilityListener();
+      this.setupOutputBus(ctx);
+      this.ensureSampler(ctx, program);
+
+      const token = ++this.auditionSequenceId;
+      let triggered = false;
+      const fireOnce = () => {
+        if (triggered || this.auditionSequenceId !== token) return;
+        triggered = true;
+        for (const midi of uniquePitches) {
+          try {
+            this.triggerNote(midi, durationSec, velocity, volume, 0, program);
+          } catch {
+            // Ignore audio preview errors in restricted environments
+          }
+        }
+      };
+
+      if (ctx.state === "suspended") {
+        void Promise.resolve(ctx.resume())
+          .then(() => {
+            fireOnce();
+          })
+          .catch(() => {
+            // Ignore resume rejections without disrupting UI
+          });
+      } else {
+        fireOnce();
+      }
+    } catch {
+      // Ignore AudioContext initialization failures cleanly
+    }
+  }
+
+  public auditionNote(
+    pitchMidi: number,
+    options?: {
+      durationSec?: number;
+      velocity?: number;
+      volume?: number;
+      program?: number;
+    },
+  ): void {
+    this.auditionNotes([pitchMidi], options);
   }
 
   public triggerNote(

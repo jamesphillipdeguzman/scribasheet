@@ -18,6 +18,7 @@ import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
 import { InlineScoreTextEditor } from "@/features/editor/InlineScoreTextEditor";
 import { type MetronomeSettings } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
+import { ReferenceSplitLayout, type ReferenceSheetSplitConfig } from "@/features/editor/ReferenceSplitLayout";
 import { KeySignatureControl, type KeyChangeAction } from "@/features/editor/KeySignatureControl";
 import { type MeasureMeterChangePayload, type PendingOverflowWarning } from "@/features/editor/MeasureMeterControl";
 import {
@@ -183,6 +184,7 @@ interface SheetMusicViewerProps {
   playbackSequence?: PlaybackSequence | null;
   externalToolbarControls?: boolean;
   onSelectionStatusChange?: (status: { text: string; activeTupletActual: number | null }) => void;
+  referenceSheetSplit?: ReferenceSheetSplitConfig;
 }
 
 function buildStaffIndexMapping(xmlStr: string | null | undefined): Array<{ partIndex: number; staffNumber: number }> {
@@ -270,6 +272,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   playbackSequence = null,
   externalToolbarControls = false,
   onSelectionStatusChange,
+  referenceSheetSplit,
 }: SheetMusicViewerProps) {
   const [engine, setEngine] = useState<"alphatab" | "osmd">(() =>
     defaultEditMode || isMidiPlayground ? "osmd" : getInitialNotationEngine(defaultEngine),
@@ -2482,11 +2485,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
             });
             if (chordRes) {
               lastEnteredMidiRef.current = chordRes.midi;
-              try {
-                midiSynth.triggerNote(chordRes.midi, 0.25, 84, 0.7);
-              } catch {
-                // Ignore audio preview errors in restricted/headless environments
-              }
+              midiSynth.auditionNotes([chordRes.midi]);
               applyXmlEdit(chordRes.xml, selectedTarget, `Added chord tone ${resolved.label}`);
               return;
             }
@@ -2509,11 +2508,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
           lastEnteredTargetRef.current = res.insertedTarget;
           lastEnteredMidiRef.current = res.resolvedPitch.midi;
           if (!restInputMode) {
-            try {
-              midiSynth.triggerNote(res.resolvedPitch.midi, 0.25, 84, 0.7);
-            } catch {
-              // Ignore audio preview errors in restricted/headless environments
-            }
+            midiSynth.auditionNotes([res.resolvedPitch.midi]);
           }
           applyXmlEdit(
             res.xml,
@@ -2802,6 +2797,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     if (!session || session.pointerId !== e.pointerId) return;
 
     const deltaY = session.startClientY - e.clientY;
+    if (!Number.isFinite(deltaY)) return;
     if (!session.moved && Math.abs(deltaY) < 4) return;
     session.moved = true;
     e.preventDefault();
@@ -2892,9 +2888,57 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     manualScrollPauseUntilRef.current = performance.now() + 3000;
   };
 
+  const resolveAuditionPitchesForHit = useCallback(
+    (xml: string | null | undefined, hit: { el: Element; target: XmlNoteTarget }): number[] => {
+      const resolveSingleTargetMidi = (target: XmlNoteTarget): number | null => {
+        if (xml) {
+          const info = getXmlNoteInfo(xml, target);
+          if (info) {
+            return !info.isRest && info.pitchMidi !== null ? info.pitchMidi : null;
+          }
+        }
+        return typeof target.pitchMidi === "number" && Number.isFinite(target.pitchMidi)
+          ? target.pitchMidi
+          : null;
+      };
+
+      const isSharedChordGroup =
+        hit.el.classList?.contains("vf-stavenote") &&
+        typeof hit.el.querySelectorAll === "function";
+      if (isSharedChordGroup) {
+        const childHeads = Array.from(hit.el.querySelectorAll("g.vf-notehead"));
+        if (childHeads.length > 1) {
+          const chordMidis: number[] = [];
+          for (const head of childHeads) {
+            const headTarget = svgNoteTargetMapRef.current.get(head);
+            if (!headTarget) continue;
+            const midi = resolveSingleTargetMidi(headTarget);
+            if (midi !== null) chordMidis.push(midi);
+          }
+          if (chordMidis.length > 0) {
+            return Array.from(new Set(chordMidis));
+          }
+        }
+      }
+
+      const singleMidi = resolveSingleTargetMidi(hit.target);
+      return singleMidi !== null ? [singleMidi] : [];
+    },
+    [],
+  );
+
   const handleScoreClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (suppressNextClickRef.current) {
       suppressNextClickRef.current = false;
+      return;
+    }
+
+    const clickedEl = e.target as Element | null;
+    if (
+      clickedEl?.closest(
+        "input, textarea, select, button, [data-testid='inline-score-text-editor']",
+      )
+    ) {
       return;
     }
 
@@ -2902,9 +2946,15 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     if (inlineChordSession) setInlineChordSession(null);
     if (inlineLyricSession) setInlineLyricSession(null);
 
-    // 1. Check notehead click: seeks to the clicked note's exact beat offset and selects when paused
+    // 1. Check notehead click: seeks to the clicked note's exact beat offset, selects when paused, and auditions pitched notes
     const hit = resolveNoteTargetAtEvent(e);
     if (hit) {
+      if (!isPlaying) {
+        const auditionPitches = resolveAuditionPitchesForHit(resolvedXml ?? musicxml, hit);
+        if (auditionPitches.length > 0) {
+          midiSynth.auditionNotes(auditionPitches);
+        }
+      }
       if (!isPlaying && onMusicXmlChange) {
         setEditMode(true);
         applySelectedHighlight(hit.el);
@@ -3093,6 +3143,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         canPrintPdf={canPrintPdf}
         printError={printError}
         playbackSequence={playbackSequence}
+        referenceSheetSplit={referenceSheetSplit}
       />
     );
   }
@@ -3492,126 +3543,128 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         </div>
       )}
 
-      <div
-        ref={scrollContainerRef}
-        tabIndex={-1}
-        data-testid="sheet-music-scroll-container"
-        data-editable={onMusicXmlChange ? "true" : "false"}
-        onClick={handleScoreClick}
-        onDoubleClick={handleScoreDoubleClick}
-        onPointerDown={handleScorePointerDown}
-        onPointerMove={handleScorePointerMove}
-        onPointerUp={handleScorePointerUp}
-        onPointerCancel={handleScorePointerCancel}
-        onLostPointerCapture={handleScorePointerCancel}
-        onWheel={handleManualScrollSignal}
-        onTouchMove={handleManualScrollSignal}
-        onScroll={handleManualScrollSignal}
-        className={`relative w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 touch-pan-x touch-pan-y focus:outline-none ${dragTooltip ? "select-none touch-none" : ""
-          } ${isFocusMode ? "flex-1 min-h-0" : "min-h-[280px] max-h-[560px]"
-          } ${onSeek || editMode ? "cursor-pointer" : ""}`}
-      >
-        {isRendering && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/20 text-xs text-zinc-700 z-30">
-            Rendering notation...
-          </div>
-        )}
-        {dragTooltip && (
-          <div
-            data-testid="staff-drag-pitch-tooltip"
-            style={{ left: `${dragTooltip.x}px`, top: `${dragTooltip.y}px` }}
-            className="pointer-events-none absolute z-40 rounded-md bg-violet-700 px-2 py-0.5 text-[11px] font-mono font-semibold text-white shadow-lg"
-          >
-            {dragTooltip.text}
-          </div>
-        )}
-        <div className="relative min-w-[560px]">
-          <div ref={containerRef} />
-          {selectedMeasureNumber !== null && selectedMeasureRect && (
+      <ReferenceSplitLayout config={referenceSheetSplit} isFocusMode={isFocusMode}>
+        <div
+          ref={scrollContainerRef}
+          tabIndex={-1}
+          data-testid="sheet-music-scroll-container"
+          data-editable={onMusicXmlChange ? "true" : "false"}
+          onClick={handleScoreClick}
+          onDoubleClick={handleScoreDoubleClick}
+          onPointerDown={handleScorePointerDown}
+          onPointerMove={handleScorePointerMove}
+          onPointerUp={handleScorePointerUp}
+          onPointerCancel={handleScorePointerCancel}
+          onLostPointerCapture={handleScorePointerCancel}
+          onWheel={handleManualScrollSignal}
+          onTouchMove={handleManualScrollSignal}
+          onScroll={handleManualScrollSignal}
+          className={`relative w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 touch-pan-x touch-pan-y focus:outline-none ${dragTooltip ? "select-none touch-none" : ""
+            } ${isFocusMode ? "flex-1 min-h-0" : "min-h-[280px] max-h-[560px]"
+            } ${onSeek || editMode ? "cursor-pointer" : ""}`}
+        >
+          {isRendering && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/20 text-xs text-zinc-700 z-30">
+              Rendering notation...
+            </div>
+          )}
+          {dragTooltip && (
             <div
-              data-testid="selected-measure-highlight"
-              aria-label={`Selected Measure ${selectedMeasureNumber}`}
-              style={{
-                position: "absolute",
-                left: `${selectedMeasureRect.left}px`,
-                top: `${selectedMeasureRect.top}px`,
-                width: `${selectedMeasureRect.width}px`,
-                height: `${selectedMeasureRect.height}px`,
-                backgroundColor: "rgba(124, 58, 237, 0.10)",
-                border: "2px solid rgba(124, 58, 237, 0.72)",
-                borderRadius: "6px",
-                zIndex: 15,
-                pointerEvents: "none",
-              }}
-            />
+              data-testid="staff-drag-pitch-tooltip"
+              style={{ left: `${dragTooltip.x}px`, top: `${dragTooltip.y}px` }}
+              className="pointer-events-none absolute z-40 rounded-md bg-violet-700 px-2 py-0.5 text-[11px] font-mono font-semibold text-white shadow-lg"
+            >
+              {dragTooltip.text}
+            </div>
           )}
-          {playheadRect.visible && (
-            <div
-              data-testid="sheet-music-playhead"
-              style={{
-                position: "absolute",
-                left: `${playheadRect.left}px`,
-                top: `${playheadRect.top}px`,
-                height: `${playheadRect.height}px`,
-                width: "3px",
-                backgroundColor: "#3b82f6",
-                boxShadow: "0 0 8px rgba(59, 130, 246, 0.75)",
-                zIndex: 20,
-                pointerEvents: "none",
-              }}
-            />
-          )}
-          {inlineChordSession && (
-            <InlineScoreTextEditor
-              mode="chord"
-              anchor={inlineChordSession.anchor}
-              targetKey={`chord-${inlineChordSession.measureNumber}-${inlineChordSession.onsetWhole}`}
-              value={inlineChordSession.draft}
-              positionLabel={`m.${inlineChordSession.measureNumber}`}
-              errorMessage={inlineChordSession.error}
-              containerWidth={scrollContainerRef.current?.clientWidth || 760}
-              hasExistingValue={inlineChordSession.hasExisting}
-              onChange={(val) =>
-                setInlineChordSession((prev) => (prev ? { ...prev, draft: val, error: null } : prev))
-              }
-              onCommitAndClose={() => handleCommitChord("close")}
-              onCommitAndAdvance={(trigger) =>
-                handleCommitChord(trigger === "space" ? "space" : "tab")
-              }
-              onDelete={handleDeleteInlineChord}
-              onCancel={() => {
-                setInlineChordSession(null);
-                restoreScoreContainerFocus();
-              }}
-            />
-          )}
-          {inlineLyricSession && (
-            <InlineScoreTextEditor
-              mode="lyric"
-              anchor={inlineLyricSession.anchor}
-              targetKey={`lyric-${inlineLyricSession.target.measureNumber}-${inlineLyricSession.target.onsetWhole}-${inlineLyricSession.target.staffNumber ?? 1}`}
-              value={inlineLyricSession.draft}
-              verse={inlineLyricSession.verse}
-              inWord={inlineLyricSession.inWord}
-              positionLabel={`m.${inlineLyricSession.target.measureNumber}`}
-              errorMessage={inlineLyricSession.error}
-              containerWidth={scrollContainerRef.current?.clientWidth || 760}
-              hasExistingValue={inlineLyricSession.hasExisting}
-              onChange={(val) =>
-                setInlineLyricSession((prev) => (prev ? { ...prev, draft: val, error: null } : prev))
-              }
-              onVerseChange={handleVerseChange}
-              onCommitAndClose={handleCommitLyricClose}
-              onCommitAndAdvance={handleAdvanceLyric}
-              onDelete={handleDeleteInlineLyric}
-              onCancel={() => {
-                setInlineLyricSession(null);
-                restoreScoreContainerFocus();
-              }}
-            />
-          )}
+          <div className="relative min-w-[560px]">
+            <div ref={containerRef} />
+            {selectedMeasureNumber !== null && selectedMeasureRect && (
+              <div
+                data-testid="selected-measure-highlight"
+                aria-label={`Selected Measure ${selectedMeasureNumber}`}
+                style={{
+                  position: "absolute",
+                  left: `${selectedMeasureRect.left}px`,
+                  top: `${selectedMeasureRect.top}px`,
+                  width: `${selectedMeasureRect.width}px`,
+                  height: `${selectedMeasureRect.height}px`,
+                  backgroundColor: "rgba(124, 58, 237, 0.10)",
+                  border: "2px solid rgba(124, 58, 237, 0.72)",
+                  borderRadius: "6px",
+                  zIndex: 15,
+                  pointerEvents: "none",
+                }}
+              />
+            )}
+            {playheadRect.visible && (
+              <div
+                data-testid="sheet-music-playhead"
+                style={{
+                  position: "absolute",
+                  left: `${playheadRect.left}px`,
+                  top: `${playheadRect.top}px`,
+                  height: `${playheadRect.height}px`,
+                  width: "3px",
+                  backgroundColor: "#3b82f6",
+                  boxShadow: "0 0 8px rgba(59, 130, 246, 0.75)",
+                  zIndex: 20,
+                  pointerEvents: "none",
+                }}
+              />
+            )}
+            {inlineChordSession && (
+              <InlineScoreTextEditor
+                mode="chord"
+                anchor={inlineChordSession.anchor}
+                targetKey={`chord-${inlineChordSession.measureNumber}-${inlineChordSession.onsetWhole}`}
+                value={inlineChordSession.draft}
+                positionLabel={`m.${inlineChordSession.measureNumber}`}
+                errorMessage={inlineChordSession.error}
+                containerWidth={scrollContainerRef.current?.clientWidth || 760}
+                hasExistingValue={inlineChordSession.hasExisting}
+                onChange={(val) =>
+                  setInlineChordSession((prev) => (prev ? { ...prev, draft: val, error: null } : prev))
+                }
+                onCommitAndClose={() => handleCommitChord("close")}
+                onCommitAndAdvance={(trigger) =>
+                  handleCommitChord(trigger === "space" ? "space" : "tab")
+                }
+                onDelete={handleDeleteInlineChord}
+                onCancel={() => {
+                  setInlineChordSession(null);
+                  restoreScoreContainerFocus();
+                }}
+              />
+            )}
+            {inlineLyricSession && (
+              <InlineScoreTextEditor
+                mode="lyric"
+                anchor={inlineLyricSession.anchor}
+                targetKey={`lyric-${inlineLyricSession.target.measureNumber}-${inlineLyricSession.target.onsetWhole}-${inlineLyricSession.target.staffNumber ?? 1}`}
+                value={inlineLyricSession.draft}
+                verse={inlineLyricSession.verse}
+                inWord={inlineLyricSession.inWord}
+                positionLabel={`m.${inlineLyricSession.target.measureNumber}`}
+                errorMessage={inlineLyricSession.error}
+                containerWidth={scrollContainerRef.current?.clientWidth || 760}
+                hasExistingValue={inlineLyricSession.hasExisting}
+                onChange={(val) =>
+                  setInlineLyricSession((prev) => (prev ? { ...prev, draft: val, error: null } : prev))
+                }
+                onVerseChange={handleVerseChange}
+                onCommitAndClose={handleCommitLyricClose}
+                onCommitAndAdvance={handleAdvanceLyric}
+                onDelete={handleDeleteInlineLyric}
+                onCancel={() => {
+                  setInlineLyricSession(null);
+                  restoreScoreContainerFocus();
+                }}
+              />
+            )}
+          </div>
         </div>
-      </div>
+      </ReferenceSplitLayout>
     </div>
   );
 });

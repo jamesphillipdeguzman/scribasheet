@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
 import { type KeyChangeAction, KeySignatureControl } from "@/features/editor/KeySignatureControl";
 import { midiSynth } from "@/features/editor/midiSynth";
+import { ReferenceSplitLayout, type ReferenceSheetSplitConfig } from "@/features/editor/ReferenceSplitLayout";
 import { injectChordsIntoMusicXml } from "@/features/editor/musicXmlChords";
 import { normalizeScorePayload } from "@/features/editor/musicXmlNormalization";
 import {
@@ -45,6 +46,7 @@ export interface AlphaTabSheetViewerProps {
   keyMode?: KeyMode;
   onApplyKeySignature?: (targetFifths: number, targetMode: KeyMode, action: KeyChangeAction) => void;
   playbackSequence?: PlaybackSequence | null;
+  referenceSheetSplit?: ReferenceSheetSplitConfig;
 }
 
 const SATB_COLORS: Record<string, string> = {
@@ -109,6 +111,7 @@ export function AlphaTabSheetViewer({
   keyMode = "major",
   onApplyKeySignature,
   playbackSequence = null,
+  referenceSheetSplit,
 }: AlphaTabSheetViewerProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -808,15 +811,17 @@ export function AlphaTabSheetViewer({
         </div>
       )}
 
-      <div
-        ref={scrollContainerRef}
-        data-testid="alphatab-scroll-container"
-        className={`relative w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 touch-pan-x touch-pan-y ${
-          isFocusMode ? "flex-1 min-h-0" : "min-h-[280px] max-h-[560px]"
-        }`}
-      >
-        <div ref={surfaceRef} data-testid="alphatab-surface" className="relative min-w-[560px]" />
-      </div>
+      <ReferenceSplitLayout config={referenceSheetSplit} isFocusMode={isFocusMode}>
+        <div
+          ref={scrollContainerRef}
+          data-testid="alphatab-scroll-container"
+          className={`relative w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 touch-pan-x touch-pan-y ${
+            isFocusMode ? "flex-1 min-h-0" : "min-h-[280px] max-h-[560px]"
+          }`}
+        >
+          <div ref={surfaceRef} data-testid="alphatab-surface" className="relative min-w-[560px]" />
+        </div>
+      </ReferenceSplitLayout>
     </div>
   );
 }

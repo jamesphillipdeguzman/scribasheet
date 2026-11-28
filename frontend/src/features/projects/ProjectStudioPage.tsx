@@ -64,7 +64,7 @@ import {
 import { SATBMixerPanel } from "@/features/editor/SATBMixerPanel";
 import { NotationShortcutsReference } from "@/features/editor/NotationCommandPalette";
 import { OmrVerificationBar } from "@/features/editor/OmrVerificationBar";
-import { ReferenceSheetViewer } from "@/features/editor/ReferenceSheetViewer";
+import { type ReferenceSheetSplitConfig } from "@/features/editor/ReferenceSplitLayout";
 import { SheetMusicViewer } from "@/features/editor/SheetMusicViewer";
 import { AudioTrimPanel } from "@/features/editor/AudioTrimPanel";
 import { WaveformPlayer } from "@/features/editor/WaveformPlayer";
@@ -127,11 +127,14 @@ export function ProjectStudioPage() {
       return 50;
     }
   });
-  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const [referenceSheetCollapsed, setReferenceSheetCollapsed] = useState(false);
 
-  const toggleReferenceSheet = () => {
+  const toggleReferenceSheet = useCallback(() => {
     setShowReferenceSheet((prev) => {
       const next = !prev;
+      if (next) {
+        setReferenceSheetCollapsed(false);
+      }
       try {
         window.localStorage.setItem("scribasheet_playground_ref_split", String(next));
       } catch {
@@ -144,9 +147,21 @@ export function ProjectStudioPage() {
       }
       return next;
     });
-  };
+  }, []);
 
-  const updateReferenceSplitPct = (nextPct: number) => {
+  const toggleReferenceSheetCollapsed = useCallback(() => {
+    setReferenceSheetCollapsed((prev) => !prev);
+    if (typeof window !== "undefined") {
+      window.requestAnimationFrame(() => {
+        window.dispatchEvent(new Event("resize"));
+      });
+      window.setTimeout(() => {
+        window.dispatchEvent(new Event("resize"));
+      }, 220);
+    }
+  }, []);
+
+  const updateReferenceSplitPct = useCallback((nextPct: number) => {
     const clamped = Math.max(25, Math.min(75, Math.round(nextPct)));
     setReferenceSplitPct(clamped);
     try {
@@ -154,7 +169,7 @@ export function ProjectStudioPage() {
     } catch {
       // Ignore storage restrictions
     }
-  };
+  }, []);
   const [customPickupMode, setCustomPickupMode] = useState(false);
   const [customPickupInput, setCustomPickupInput] = useState("2");
 
@@ -1091,6 +1106,26 @@ export function ProjectStudioPage() {
     project?.transcription_mode === "midi_playground" ||
     scoreData?.analysis?.source_type === "midi_playground",
   );
+
+  const referenceSheetSplit = useMemo<ReferenceSheetSplitConfig | undefined>(() => {
+    if (!isMidiPlayground) return undefined;
+    return {
+      enabled: showReferenceSheet,
+      collapsed: referenceSheetCollapsed,
+      splitPct: referenceSplitPct,
+      onClose: toggleReferenceSheet,
+      onToggleCollapse: toggleReferenceSheetCollapsed,
+      onSplitPctChange: updateReferenceSplitPct,
+    };
+  }, [
+    isMidiPlayground,
+    showReferenceSheet,
+    referenceSheetCollapsed,
+    referenceSplitPct,
+    toggleReferenceSheet,
+    toggleReferenceSheetCollapsed,
+    updateReferenceSplitPct,
+  ]);
 
   useEffect(() => {
     if (isMidiPlayground && project?.id && autoCollapsedPlaygroundRef.current !== project.id) {
@@ -2145,125 +2180,57 @@ export function ProjectStudioPage() {
                     </p>
                   </div>
                 ) : (
-                  <div
-                    ref={splitContainerRef}
-                    data-testid="playground-split-workspace"
-                    className={
-                      isMidiPlayground && showReferenceSheet
-                        ? "flex flex-col lg:flex-row gap-3 min-w-0 items-stretch"
-                        : "min-w-0"
+                  <SheetMusicViewer
+                    musicxml={musicxml}
+                    scoreTitle={effectiveScoreTitle}
+                    notes={scoreData?.notes}
+                    chords={scoreData?.chords}
+                    showChordSymbols={showChordSymbols}
+                    onToggleChordSymbols={handleToggleChordSymbols}
+                    playheadSec={playheadSec}
+                    isPlaying={isPlaybackActive}
+                    tempoBpm={scoreData?.tempo_bpm || 120}
+                    timeSignature={scoreData?.time_signature || "4/4"}
+                    clefMode={playgroundClefMode}
+                    keyFifths={activeKeySignature.fifths}
+                    keyMode={activeKeySignature.mode}
+                    onApplyKeySignature={handleApplyKeySignature}
+                    isMidiPlayground={isMidiPlayground}
+                    defaultEditMode={isMidiPlayground}
+                    isActiveTab={activeTab === "notation"}
+                    metronomeSettings={metronomeSettings}
+                    onMetronomeSettingsChange={handleMetronomeSettingsChange}
+                    onTempoChange={(nextBpm) => handlePlaygroundConfigChange({ tempoBpm: nextBpm })}
+                    canUndo={undoStack.length > 0}
+                    canRedo={redoStack.length > 0}
+                    onUndo={handleUndo}
+                    onRedo={handleRedo}
+                    playbackRate={playbackRate}
+                    tracks={scoreData?.tracks || []}
+                    onPrintPdf={() => void handlePrintPdf()}
+                    isPrintingPdf={isPrintingPdf}
+                    canPrintPdf={canPrintSheetMusic}
+                    printError={printError}
+                    satbSoloVoice={satbSoloVoice}
+                    satbMutedVoices={satbMutedVoices}
+                    onTogglePlay={() => setTogglePlaySignal((n) => n + 1)}
+                    onStopPlay={() => setStopPlaySignal((n) => n + 1)}
+                    onSeek={(sec) =>
+                      setSeekRequest({
+                        sec,
+                        autoplay: isPlaybackActiveRef.current,
+                        nonce: Date.now(),
+                      })
                     }
-                  >
-                    {isMidiPlayground && showReferenceSheet && (
-                      <div
-                        key="reference-sheet-pane"
-                        style={{ flexBasis: `${referenceSplitPct}%` }}
-                        className="w-full lg:w-auto lg:min-w-[260px] lg:shrink-0 min-w-0"
-                      >
-                        <ReferenceSheetViewer onClose={() => toggleReferenceSheet()} />
-                      </div>
-                    )}
-
-                    {isMidiPlayground && showReferenceSheet && (
-                      <div
-                        key="reference-split-divider"
-                        role="separator"
-                        aria-orientation="vertical"
-                        aria-label="Resize reference sheet split view"
-                        aria-valuemin={25}
-                        aria-valuemax={75}
-                        aria-valuenow={referenceSplitPct}
-                        tabIndex={0}
-                        data-testid="reference-split-divider"
-                        onPointerDown={(e) => {
-                          const container = splitContainerRef.current;
-                          if (!container) return;
-                          e.preventDefault();
-                          const onMove = (ev: PointerEvent) => {
-                            const rect = container.getBoundingClientRect();
-                            if (rect.width <= 0) return;
-                            const pct = ((ev.clientX - rect.left) / rect.width) * 100;
-                            updateReferenceSplitPct(pct);
-                          };
-                          const onUp = () => {
-                            window.removeEventListener("pointermove", onMove);
-                            window.removeEventListener("pointerup", onUp);
-                            window.dispatchEvent(new Event("resize"));
-                          };
-                          window.addEventListener("pointermove", onMove);
-                          window.addEventListener("pointerup", onUp);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === "ArrowLeft") {
-                            e.preventDefault();
-                            updateReferenceSplitPct(referenceSplitPct - 5);
-                            window.dispatchEvent(new Event("resize"));
-                          } else if (e.key === "ArrowRight") {
-                            e.preventDefault();
-                            updateReferenceSplitPct(referenceSplitPct + 5);
-                            window.dispatchEvent(new Event("resize"));
-                          }
-                        }}
-                        className="hidden lg:flex w-2 shrink-0 cursor-col-resize items-center justify-center rounded bg-stone-200 hover:bg-violet-400/60 dark:bg-[#27273A] dark:hover:bg-violet-500/60 transition-colors select-none"
-                        title="Drag or use Left/Right arrows to resize panes"
-                      >
-                        <div className="h-10 w-0.5 rounded-full bg-stone-400 dark:bg-slate-500" />
-                      </div>
-                    )}
-
-                    <div key="studio-sheet-music-pane" className="min-w-0 flex-1">
-                      <SheetMusicViewer
-                        musicxml={musicxml}
-                        scoreTitle={effectiveScoreTitle}
-                        notes={scoreData?.notes}
-                        chords={scoreData?.chords}
-                        showChordSymbols={showChordSymbols}
-                        onToggleChordSymbols={handleToggleChordSymbols}
-                        playheadSec={playheadSec}
-                        isPlaying={isPlaybackActive}
-                        tempoBpm={scoreData?.tempo_bpm || 120}
-                        timeSignature={scoreData?.time_signature || "4/4"}
-                        clefMode={playgroundClefMode}
-                        keyFifths={activeKeySignature.fifths}
-                        keyMode={activeKeySignature.mode}
-                        onApplyKeySignature={handleApplyKeySignature}
-                        isMidiPlayground={isMidiPlayground}
-                        defaultEditMode={isMidiPlayground}
-                        isActiveTab={activeTab === "notation"}
-                        metronomeSettings={metronomeSettings}
-                        onMetronomeSettingsChange={handleMetronomeSettingsChange}
-                        onTempoChange={(nextBpm) => handlePlaygroundConfigChange({ tempoBpm: nextBpm })}
-                        canUndo={undoStack.length > 0}
-                        canRedo={redoStack.length > 0}
-                        onUndo={handleUndo}
-                        onRedo={handleRedo}
-                        playbackRate={playbackRate}
-                        tracks={scoreData?.tracks || []}
-                        onPrintPdf={() => void handlePrintPdf()}
-                        isPrintingPdf={isPrintingPdf}
-                        canPrintPdf={canPrintSheetMusic}
-                        printError={printError}
-                        satbSoloVoice={satbSoloVoice}
-                        satbMutedVoices={satbMutedVoices}
-                        onTogglePlay={() => setTogglePlaySignal((n) => n + 1)}
-                        onStopPlay={() => setStopPlaySignal((n) => n + 1)}
-                        onSeek={(sec) =>
-                          setSeekRequest({
-                            sec,
-                            autoplay: isPlaybackActiveRef.current,
-                            nonce: Date.now(),
-                          })
-                        }
-                        isFocusMode={isFocusMode}
-                        onToggleFocusMode={() => setIsFocusMode((v) => !v)}
-                        onMusicXmlChange={handleMusicXmlChange}
-                        skipAutoChordInfer={Boolean(scoreData?.analysis?.chords_edited)}
-                        playbackSequence={playbackSequence}
-                        externalToolbarControls={true}
-                        onSelectionStatusChange={setNotationSelectionStatus}
-                      />
-                    </div>
-                  </div>
+                    isFocusMode={isFocusMode}
+                    onToggleFocusMode={() => setIsFocusMode((v) => !v)}
+                    onMusicXmlChange={handleMusicXmlChange}
+                    skipAutoChordInfer={Boolean(scoreData?.analysis?.chords_edited)}
+                    playbackSequence={playbackSequence}
+                    externalToolbarControls={true}
+                    onSelectionStatusChange={setNotationSelectionStatus}
+                    referenceSheetSplit={referenceSheetSplit}
+                  />
                 ))}
 
               {activeTab === "pianoroll" &&

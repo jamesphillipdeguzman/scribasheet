@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ChevronLeft,
   ChevronRight,
+  ChevronsLeft,
   FileSpreadsheet,
   FileUp,
   Maximize,
@@ -32,6 +33,7 @@ export interface LoadedReferenceFile {
 
 interface ReferenceSheetViewerProps {
   onClose: () => void;
+  onCollapse?: () => void;
 }
 
 function getFileExtension(name: string): string {
@@ -104,7 +106,7 @@ function estimatePdfPageCount(buffer: ArrayBuffer): number {
   return 1;
 }
 
-export function ReferenceSheetViewer({ onClose }: ReferenceSheetViewerProps) {
+export function ReferenceSheetViewer({ onClose, onCollapse }: ReferenceSheetViewerProps) {
   const [loaded, setLoaded] = useState<LoadedReferenceFile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState<number>(1);
@@ -350,6 +352,18 @@ export function ReferenceSheetViewer({ onClose }: ReferenceSheetViewerProps) {
                 Clear
               </button>
             </>
+          )}
+          {onCollapse && (
+            <button
+              type="button"
+              data-testid="reference-collapse-btn"
+              aria-label="Collapse reference sheet"
+              title="Collapse reference sheet"
+              onClick={onCollapse}
+              className="inline-flex h-7 items-center gap-1 rounded-md border border-stone-300 bg-white px-2 text-[11px] font-medium text-stone-700 hover:bg-stone-100 dark:border-[#27273A] dark:bg-[#181825] dark:text-slate-200 dark:hover:bg-white/10"
+            >
+              <ChevronsLeft className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
           )}
           <button
             type="button"
