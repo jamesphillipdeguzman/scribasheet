@@ -1,4 +1,8 @@
+import contextlib
+import logging
 import tempfile
+import threading
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -34,18 +38,203 @@ from app.notation.omr_verification import (
     verify_omr_with_gemini_vision,
 )
 from app.notation.piano_playability import apply_piano_playability, normalize_playability_smoothing
+from app.notation.playground import build_blank_playground_score
 from app.schemas.score import (
     ArrangementRegenerateRequest,
     ProjectScoreResponse,
     ProjectScoreUpdateRequest,
     ScoreData,
     ScoreNote,
+    ScoreRecoverRequest,
+    ScoreRecoverResponse,
+    ScoreTrack,
 )
-from app.storage.service import sanitize_download_title, storage_service
+from app.storage.service import StorageError, sanitize_download_title, storage_service
 from app.transcription.base import DetectedNote
 from app.transcription.note_refiner import NoteRefinerConfig, refine_detected_notes
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Editor & Score"])
+
+_recovery_locks_guard = threading.Lock()
+_recovery_locks: dict[str, tuple[threading.Lock, int]] = {}
+
+
+@contextlib.contextmanager
+def _project_recovery_lock(project_id: str):
+    with _recovery_locks_guard:
+        lock, ref_count = _recovery_locks.get(project_id, (threading.Lock(), 0))
+        _recovery_locks[project_id] = (lock, ref_count + 1)
+    try:
+        with lock:
+            yield
+    finally:
+        with _recovery_locks_guard:
+            cur_lock, cur_count = _recovery_locks.get(project_id, (lock, 1))
+            if cur_count <= 1:
+                _recovery_locks.pop(project_id, None)
+            else:
+                _recovery_locks[project_id] = (cur_lock, cur_count - 1)
+
+
+def _validate_musicxml_document(xml_str: str, *, require_notes: bool = False) -> None:
+    cleaned = (xml_str or "").lstrip("\ufeff").strip()
+    if not cleaned:
+        raise ValueError("Generated MusicXML is empty.")
+    try:
+        root = ET.fromstring(cleaned)
+    except ET.ParseError as exc:
+        raise ValueError(f"Invalid MusicXML XML structure: {exc}") from exc
+
+    local_root = root.tag.rsplit("}", 1)[-1]
+    if local_root not in ("score-partwise", "score-timewise"):
+        raise ValueError(f"Unsupported MusicXML root element: {local_root}")
+
+    has_part = any(el.tag.rsplit("}", 1)[-1] == "part" for el in root)
+    has_measure = any(el.tag.rsplit("}", 1)[-1] == "measure" for el in root.iter())
+    if not has_part or not has_measure:
+        raise ValueError("MusicXML document is missing required <part> or <measure> elements.")
+
+    if require_notes:
+        has_pitched_note = any(
+            el.tag.rsplit("}", 1)[-1] == "note"
+            and any(child.tag.rsplit("}", 1)[-1] == "pitch" for child in el)
+            for el in root.iter()
+        )
+        if not has_pitched_note:
+            raise ValueError("Rebuilt MusicXML contains no pitched notes.")
+
+
+def _coerce_legacy_score_data(
+    raw_json: dict | None,
+    *,
+    resolved_title: str,
+    project: Project,
+) -> tuple[ScoreData, bool]:
+    """Hydrate ScoreData from DB JSON with safe defaults, returning (score_data, hydrated_from_raw_detected)."""
+    raw = dict(raw_json or {})
+    raw["title"] = resolved_title
+
+    sanitized_notes: list[dict] = []
+    for idx, n in enumerate(raw.get("notes") or []):
+        if not isinstance(n, dict):
+            continue
+        try:
+            pitch = max(0, min(127, int(n.get("pitch_midi"))))
+            onset = max(0.0, float(n.get("onset_sec", 0.0)))
+            offset = max(onset + 0.03, float(n.get("offset_sec", onset + 0.25)))
+            vel = max(1, min(127, int(n.get("velocity", 80) or 80)))
+            raw_onset = n.get("raw_onset_sec")
+            raw_offset = n.get("raw_offset_sec")
+            safe_raw_onset = max(0.0, float(raw_onset)) if raw_onset is not None else None
+            safe_raw_offset = (
+                max((safe_raw_onset or onset) + 0.01, float(raw_offset))
+                if raw_offset is not None
+                else None
+            )
+            sanitized_notes.append(
+                {
+                    "id": str(n.get("id") or f"rec_{idx}"),
+                    "pitch_midi": pitch,
+                    "onset_sec": onset,
+                    "offset_sec": offset,
+                    "raw_onset_sec": safe_raw_onset,
+                    "raw_offset_sec": safe_raw_offset,
+                    "velocity": vel,
+                    "confidence": n.get("confidence"),
+                    "track_index": max(0, int(n.get("track_index", 0) or 0)),
+                    "string_num": n.get("string_num"),
+                    "fret_num": n.get("fret_num"),
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+
+    raw["notes"] = sanitized_notes
+    score_data = ScoreData.model_validate(raw)
+
+    hydrated_from_raw = False
+    if not score_data.notes:
+        analysis = dict(score_data.analysis or {})
+        raw_detected = analysis.get("raw_detected_notes")
+        detected_notes: list[DetectedNote] = []
+        if isinstance(raw_detected, list):
+            for n in raw_detected:
+                if not isinstance(n, dict):
+                    continue
+                try:
+                    pitch = max(0, min(127, int(n["pitch_midi"])))
+                    onset = max(0.0, float(n["onset_sec"]))
+                    offset = max(onset + 0.03, float(n["offset_sec"]))
+                    detected_notes.append(
+                        DetectedNote(
+                            pitch_midi=pitch,
+                            onset_sec=onset,
+                            offset_sec=offset,
+                            velocity=max(1, min(127, int(n.get("velocity", 80) or 80))),
+                            confidence=n.get("confidence"),
+                        )
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+        if detected_notes:
+            score_data = build_score_data(
+                title=resolved_title,
+                detected_notes=detected_notes,
+                tempo_bpm=score_data.tempo_bpm,
+                tempo_estimated=score_data.tempo_estimated,
+                time_signature=score_data.time_signature,
+                time_signature_estimated=score_data.time_signature_estimated,
+                key_signature=score_data.key_signature,
+                key_signature_estimated=score_data.key_signature_estimated,
+                duration_seconds=max(
+                    float(score_data.duration_seconds or 0.0),
+                    max(n.offset_sec for n in detected_notes),
+                ),
+                instrument=project.instrument or "piano",
+                quantization=str(analysis.get("quantization") or "sixteenth"),
+                analysis=analysis,
+            )
+            hydrated_from_raw = True
+
+    if score_data.notes:
+        existing_indices = {t.index for t in score_data.tracks}
+        tracks = list(score_data.tracks)
+        if not tracks:
+            default_inst = project.instrument or "piano"
+            tracks.append(
+                ScoreTrack(
+                    index=0,
+                    name=default_inst.replace("_", " ").title(),
+                    instrument=default_inst,
+                    clef="grand" if "piano" in default_inst.lower() else "treble",
+                    program=0,
+                    muted=False,
+                )
+            )
+            existing_indices.add(0)
+        for n in score_data.notes:
+            if n.track_index not in existing_indices:
+                tracks.append(
+                    ScoreTrack(
+                        index=n.track_index,
+                        name=f"Track {n.track_index + 1}",
+                        instrument=project.instrument or "piano",
+                        clef="treble",
+                        program=0,
+                        muted=False,
+                    )
+                )
+                existing_indices.add(n.track_index)
+        max_note_end = max((n.offset_sec for n in score_data.notes), default=0.0)
+        score_data = score_data.model_copy(
+            update={
+                "tracks": tracks,
+                "duration_seconds": max(float(score_data.duration_seconds or 0.0), max_note_end),
+            }
+        )
+
+    return score_data, hydrated_from_raw
 
 
 @router.get("/projects/{project_id}/score", response_model=ProjectScoreResponse)
@@ -1036,3 +1225,244 @@ def restore_previous_project_score(
         musicxml=musicxml_str,
         updated_at=score_row.updated_at,
     )
+
+
+@router.post("/projects/{project_id}/score/recover", response_model=ScoreRecoverResponse)
+def recover_missing_score_file(
+    payload: ScoreRecoverRequest,
+    project: Project = Depends(get_owned_project),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Recover a missing MusicXML file from legacy storage or rebuild it safely from DB note events."""
+    resolved_title = resolve_project_score_title(project.title)
+
+    with _project_recovery_lock(project.id):
+        db.expire_all()
+        score_row = db.query(ProjectScore).filter(ProjectScore.project_id == project.id).first()
+        if not score_row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No transcription score exists yet for this project.",
+            )
+
+        existing_note_count = len(
+            (score_row.score_json or {}).get("notes") or []
+            if isinstance(score_row.score_json, dict)
+            else []
+        )
+
+        # 1. Never overwrite an existing valid MusicXML object already present in primary storage
+        if score_row.musicxml_path:
+            if storage_service.exists_in_primary(score_row.musicxml_path):
+                existing_xml = _read_score_musicxml_text(score_row, resolved_title)
+                if existing_xml:
+                    try:
+                        _validate_musicxml_document(existing_xml, require_notes=False)
+                        score_json_out = dict(score_row.score_json or {})
+                        score_json_out["title"] = resolved_title
+                        return ScoreRecoverResponse(
+                            status="already_available",
+                            message="A valid MusicXML file already exists in storage and was loaded without overwriting.",
+                            note_count=existing_note_count,
+                            score=ProjectScoreResponse(
+                                id=score_row.id,
+                                project_id=score_row.project_id,
+                                version=score_row.version,
+                                score_json=score_json_out,
+                                musicxml=existing_xml,
+                                updated_at=score_row.updated_at,
+                            ),
+                        )
+                    except ValueError:
+                        logger.warning(
+                            "Existing MusicXML object for project '%s' failed validation; attempting recovery.",
+                            project.id,
+                        )
+            elif storage_service.is_object_storage:
+                migrated = storage_service.try_migrate_legacy_object(
+                    score_row.musicxml_path,
+                    raise_on_upload_error=True,
+                )
+                if migrated:
+                    if score_row.midi_path and not storage_service.exists_in_primary(score_row.midi_path):
+                        storage_service.try_migrate_legacy_object(
+                            score_row.midi_path,
+                            raise_on_upload_error=False,
+                        )
+                    migrated_xml = _read_score_musicxml_text(score_row, resolved_title)
+                    if migrated_xml:
+                        try:
+                            _validate_musicxml_document(migrated_xml, require_notes=False)
+                            score_json_out = dict(score_row.score_json or {})
+                            score_json_out["title"] = resolved_title
+                            return ScoreRecoverResponse(
+                                status="migrated_from_legacy",
+                                message="Recovered original MusicXML file from legacy storage and migrated it to cloud storage.",
+                                note_count=existing_note_count,
+                                score=ProjectScoreResponse(
+                                    id=score_row.id,
+                                    project_id=score_row.project_id,
+                                    version=score_row.version,
+                                    score_json=score_json_out,
+                                    musicxml=migrated_xml,
+                                    updated_at=score_row.updated_at,
+                                ),
+                            )
+                        except ValueError:
+                            logger.warning(
+                                "Migrated legacy MusicXML for project '%s' failed validation; attempting rebuild.",
+                                project.id,
+                            )
+
+        if payload.expected_version is not None and payload.expected_version != score_row.version:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Score version conflict: expected {payload.expected_version}, current is {score_row.version}.",
+            )
+
+        target_score, hydrated_from_raw = _coerce_legacy_score_data(
+            score_row.score_json if isinstance(score_row.score_json, dict) else {},
+            resolved_title=resolved_title,
+            project=project,
+        )
+
+        # 2. Rebuild from authoritative note events when present, or require explicit blank consent
+        if target_score.notes:
+            try:
+                musicxml_str = score_data_to_musicxml(target_score)
+                _validate_musicxml_document(musicxml_str, require_notes=True)
+            except Exception as exc:
+                logger.error(
+                    "Failed to reconstruct valid MusicXML for project '%s': %s",
+                    project.id,
+                    type(exc).__name__,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="Unable to reconstruct valid MusicXML from stored note events.",
+                ) from exc
+            recovery_status = "rebuilt_from_notes"
+            recovery_message = (
+                f"Rebuilt MusicXML from {len(target_score.notes)} saved note events and saved to storage."
+            )
+        else:
+            if not payload.create_blank_if_empty:
+                return ScoreRecoverResponse(
+                    status="no_recoverable_notes",
+                    message=(
+                        "No recoverable note events were found in this project's score record. "
+                        "You can create a blank score instead, or re-run transcription."
+                    ),
+                    note_count=0,
+                    score=None,
+                )
+
+            analysis = dict(target_score.analysis or {})
+            playground_cfg = analysis.get("playground_config") if isinstance(analysis.get("playground_config"), dict) else {}
+            clef_mode_raw = playground_cfg.get("clef_mode")
+            if clef_mode_raw in ("grand", "treble", "bass"):
+                clef_mode = str(clef_mode_raw)
+            elif len(target_score.tracks) > 1 or any(t.clef == "grand" for t in target_score.tracks):
+                clef_mode = "grand"
+            elif any(t.clef == "bass" for t in target_score.tracks):
+                clef_mode = "bass"
+            else:
+                clef_mode = "treble" if target_score.tracks else "grand"
+
+            measures_val = int(playground_cfg.get("measures") or 4)
+            pickup_raw = playground_cfg.get("pickup_beats")
+            pickup_beats = float(pickup_raw) if isinstance(pickup_raw, (int, float)) and pickup_raw > 0 else None
+
+            try:
+                blank_score, musicxml_str = build_blank_playground_score(
+                    title=resolved_title,
+                    key_signature=target_score.key_signature or "C Major",
+                    time_signature=target_score.time_signature or "4/4",
+                    tempo_bpm=target_score.tempo_bpm or 120.0,
+                    clef_mode=clef_mode,
+                    measures=measures_val,
+                    pickup_beats=pickup_beats,
+                )
+                _validate_musicxml_document(musicxml_str, require_notes=False)
+                if not target_score.tracks:
+                    target_score = target_score.model_copy(update={"tracks": blank_score.tracks})
+            except Exception as exc:
+                logger.error(
+                    "Failed to create blank MusicXML for project '%s': %s",
+                    project.id,
+                    type(exc).__name__,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to generate a blank MusicXML score.",
+                ) from exc
+            recovery_status = "created_blank"
+            recovery_message = (
+                "Created a blank MusicXML score matching this project's key, meter, and tempo, "
+                "and saved it to storage."
+            )
+
+        # 3. Save MusicXML to configured storage backend and verify retrieval before committing DB changes
+        xml_bytes = musicxml_str.encode("utf-8")
+        xml_key = storage_service.build_key(current_user.id, project.id, "musicxml", "score.musicxml")
+        storage_service.save_bytes(
+            xml_key,
+            xml_bytes,
+            content_type="application/vnd.recordare.musicxml+xml",
+        )
+
+        created_midi_key: str | None = None
+        try:
+            retrieved_bytes = storage_service.read_bytes(xml_key)
+            if retrieved_bytes != xml_bytes or not retrieved_bytes:
+                raise StorageError("Saved MusicXML object verification mismatch.")
+
+            midi_key = score_row.midi_path
+            if not midi_key or not storage_service.exists(midi_key):
+                midi_bytes = score_data_to_midi_bytes(target_score)
+                created_midi_key = storage_service.build_key(current_user.id, project.id, "midi", "score.mid")
+                storage_service.save_bytes(created_midi_key, midi_bytes, content_type="audio/midi")
+                midi_key = created_midi_key
+
+            score_row.version = int(score_row.version or 1) + 1
+            score_row.musicxml_path = xml_key
+            score_row.midi_path = midi_key
+            if hydrated_from_raw:
+                score_row.score_json = target_score.model_dump()
+            db.commit()
+            db.refresh(score_row)
+        except Exception:
+            db.rollback()
+            for key_to_clean in (xml_key, created_midi_key):
+                if key_to_clean:
+                    try:
+                        storage_service.delete(key_to_clean)
+                    except Exception:
+                        pass
+            raise
+
+        score_json_out = dict(score_row.score_json or {})
+        score_json_out["title"] = resolved_title
+
+        logger.info(
+            "Recovered missing MusicXML for project '%s' via %s (version=%s, notes=%d)",
+            project.id,
+            recovery_status,
+            score_row.version,
+            len(target_score.notes),
+        )
+
+        return ScoreRecoverResponse(
+            status=recovery_status,
+            message=recovery_message,
+            note_count=len(target_score.notes),
+            score=ProjectScoreResponse(
+                id=score_row.id,
+                project_id=score_row.project_id,
+                version=score_row.version,
+                score_json=score_json_out,
+                musicxml=musicxml_str,
+                updated_at=score_row.updated_at,
+            ),
+        )

@@ -194,6 +194,20 @@ export interface ProjectScoreResponse {
   updated_at: string;
 }
 
+export type ScoreRecoverStatus =
+  | "already_available"
+  | "migrated_from_legacy"
+  | "rebuilt_from_notes"
+  | "created_blank"
+  | "no_recoverable_notes";
+
+export interface ScoreRecoverResponse {
+  status: ScoreRecoverStatus;
+  message: string;
+  note_count: number;
+  score: ProjectScoreResponse | null;
+}
+
 export interface ExportRecord {
   id: string;
   project_id: string;

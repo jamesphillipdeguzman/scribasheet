@@ -12,6 +12,7 @@ import type {
   ProjectListResponse,
   ProjectScoreResponse,
   ScoreData,
+  ScoreRecoverResponse,
   TokenResponse,
   TranscriptionJob,
   TranscriptionSettings,
@@ -584,6 +585,19 @@ export const api = {
   restorePreviousScore: (projectId: string) =>
     request<ProjectScoreResponse>(`/projects/${projectId}/score/restore-previous`, {
       method: "POST",
+    }),
+  recoverScore: (
+    projectId: string,
+    options?: { create_blank_if_empty?: boolean; expected_version?: number },
+  ) =>
+    request<ScoreRecoverResponse>(`/projects/${projectId}/score/recover`, {
+      method: "POST",
+      body: JSON.stringify({
+        create_blank_if_empty: Boolean(options?.create_blank_if_empty),
+        ...(options?.expected_version !== undefined
+          ? { expected_version: options.expected_version }
+          : {}),
+      }),
     }),
 
   // Lyrics

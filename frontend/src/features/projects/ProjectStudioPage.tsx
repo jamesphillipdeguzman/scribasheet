@@ -18,8 +18,10 @@ import {
   Pencil,
   Piano,
   Redo2,
+  RefreshCw,
   Save,
   Undo2,
+  X,
 } from "lucide-react";
 import { AmbientScoreBackdrop } from "@/components/AmbientScoreBackdrop";
 import { AppShell } from "@/components/AppShell";
@@ -242,6 +244,11 @@ export function ProjectStudioPage() {
     "idle" | "loading" | "ready" | "missing_score" | "missing_file" | "unauthorized" | "error"
   >("idle");
   const [scoreLoadError, setScoreLoadError] = useState<string | null>(null);
+  const [isRecoveringScore, setIsRecoveringScore] = useState(false);
+  const isRecoveringScoreRef = useRef(false);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [recoverySuccess, setRecoverySuccess] = useState<string | null>(null);
+  const [recoveryNoNotesMessage, setRecoveryNoNotesMessage] = useState<string | null>(null);
   const [undoStack, setUndoStack] = useState<Array<{ scoreData: ScoreData; musicxml: string | null }>>([]);
   const [redoStack, setRedoStack] = useState<Array<{ scoreData: ScoreData; musicxml: string | null }>>([]);
   const [saveStatus, setSaveStatus] = useState<"saved" | "unsaved" | "saving" | "error">("saved");
@@ -458,6 +465,8 @@ export function ProjectStudioPage() {
     const targetJobId = expectedJobId !== undefined ? expectedJobId : activeJobIdRef.current;
     setScoreLoadState("loading");
     setScoreLoadError(null);
+    setRecoveryError(null);
+    setRecoveryNoNotesMessage(null);
     try {
       const res = await api.getScore(projectId);
       if (token !== scoreLoadTokenRef.current) return;
@@ -519,6 +528,71 @@ export function ProjectStudioPage() {
       setScoreLoadError("Unexpected error while loading project score.");
     }
   }, [projectId]);
+
+  useEffect(() => {
+    setIsRecoveringScore(false);
+    isRecoveringScoreRef.current = false;
+    setRecoveryError(null);
+    setRecoverySuccess(null);
+    setRecoveryNoNotesMessage(null);
+  }, [projectId]);
+
+  const handleRecoverScore = useCallback(
+    async (createBlankIfEmpty = false) => {
+      if (!projectId || isRecoveringScoreRef.current) return;
+      isRecoveringScoreRef.current = true;
+      setIsRecoveringScore(true);
+      setRecoveryError(null);
+      setRecoverySuccess(null);
+      if (createBlankIfEmpty) {
+        setRecoveryNoNotesMessage(null);
+      }
+      try {
+        const res = await api.recoverScore(projectId, {
+          create_blank_if_empty: createBlankIfEmpty,
+          expected_version: scoreVersion,
+        });
+        if (res.status === "no_recoverable_notes" || !res.score || !res.score.musicxml) {
+          setRecoveryNoNotesMessage(
+            res.message ||
+              "No recoverable note events were found in this project. You can create a blank score instead, or re-run transcription.",
+          );
+          return;
+        }
+        const syncedScore = {
+          ...res.score.score_json,
+          title: resolveDisplayScoreTitle(projectTitleRef.current || res.score.score_json.title),
+        };
+        setScoreData(syncedScore);
+        setMusicxml(
+          applyScoreTitleToMusicXml(res.score.musicxml, syncedScore.title, {
+            deduplicateMovementTitle: false,
+          }),
+        );
+        setScoreVersion(res.score.version);
+        setUndoStack([]);
+        setRedoStack([]);
+        setSaveStatus("saved");
+        setSaveError(null);
+        setRecoveryNoNotesMessage(null);
+        setRecoverySuccess(res.message);
+        setScoreLoadError(null);
+        setScoreLoadState("ready");
+        void queryClient.invalidateQueries({ queryKey: ["score", projectId] });
+        void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      } catch (err) {
+        setRecoveryError(
+          err instanceof ApiError
+            ? err.message
+            : "Failed to rebuild and save score to storage.",
+        );
+      } finally {
+        isRecoveringScoreRef.current = false;
+        setIsRecoveringScore(false);
+      }
+    },
+    [projectId, queryClient, scoreVersion],
+  );
 
   useEffect(() => {
     if (!projectId) return;
@@ -2254,11 +2328,65 @@ export function ProjectStudioPage() {
                     )}
                   </div>
                 ) : scoreLoadState === "missing_file" ? (
-                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-6 text-center space-y-2">
-                    <div className="text-sm font-semibold text-amber-200">Score File Missing from Storage</div>
-                    <p className="text-xs text-amber-100/80">
+                  <div
+                    data-testid="score-missing-file-card"
+                    className="rounded-xl border border-amber-400/60 bg-amber-50 p-6 text-center space-y-3 dark:border-amber-500/30 dark:bg-amber-500/10"
+                  >
+                    <div className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+                      Score File Missing from Storage
+                    </div>
+                    <p className="mx-auto max-w-xl text-xs text-amber-800 dark:text-amber-100/80">
                       A score record exists in the database, but its MusicXML file could not be found in storage. You can still inspect or re-save notes from the Piano Roll, or re-run transcription.
                     </p>
+                    <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                      <Button
+                        type="button"
+                        size="sm"
+                        data-testid="rebuild-save-storage-btn"
+                        disabled={isRecoveringScore}
+                        onClick={() => void handleRecoverScore(false)}
+                      >
+                        {isRecoveringScore ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Rebuilding &amp; Saving to Storage...
+                          </>
+                        ) : (
+                          <>
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            Rebuild &amp; Save to Storage
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                    {recoveryNoNotesMessage && (
+                      <div
+                        data-testid="score-recovery-empty-notice"
+                        className="mx-auto max-w-xl rounded-lg border border-amber-300 bg-white/80 p-3 text-xs text-amber-950 space-y-2 dark:border-amber-500/30 dark:bg-[#09090F]/70 dark:text-amber-100"
+                      >
+                        <p>{recoveryNoNotesMessage}</p>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          data-testid="create-blank-score-btn"
+                          disabled={isRecoveringScore}
+                          onClick={() => void handleRecoverScore(true)}
+                        >
+                          <FileMusic className="h-3.5 w-3.5" />
+                          Create Blank Score
+                        </Button>
+                      </div>
+                    )}
+                    {recoveryError && (
+                      <div
+                        role="alert"
+                        data-testid="score-recovery-error"
+                        className="mx-auto max-w-xl rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-900 dark:border-red-500/40 dark:bg-red-500/15 dark:text-red-200"
+                      >
+                        {recoveryError}
+                      </div>
+                    )}
                   </div>
                 ) : scoreLoadState === "unauthorized" ? (
                   <div className="rounded-xl bg-red-50 border border-red-300 p-6 text-center text-xs text-red-900 font-medium break-words dark:bg-red-500/10 dark:border-red-500/30 dark:text-red-200">
@@ -2292,57 +2420,76 @@ export function ProjectStudioPage() {
                     </p>
                   </div>
                 ) : (
-                  <SheetMusicViewer
-                    musicxml={musicxml}
-                    scoreTitle={effectiveScoreTitle}
-                    notes={scoreData?.notes}
-                    chords={scoreData?.chords}
-                    showChordSymbols={showChordSymbols}
-                    onToggleChordSymbols={handleToggleChordSymbols}
-                    playheadSec={playheadSec}
-                    isPlaying={isPlaybackActive}
-                    tempoBpm={scoreData?.tempo_bpm || 120}
-                    timeSignature={scoreData?.time_signature || "4/4"}
-                    clefMode={playgroundClefMode}
-                    keyFifths={activeKeySignature.fifths}
-                    keyMode={activeKeySignature.mode}
-                    onApplyKeySignature={handleApplyKeySignature}
-                    isMidiPlayground={isMidiPlayground}
-                    defaultEditMode={isMidiPlayground}
-                    isActiveTab={activeTab === "notation"}
-                    metronomeSettings={metronomeSettings}
-                    onMetronomeSettingsChange={handleMetronomeSettingsChange}
-                    onTempoChange={(nextBpm) => handlePlaygroundConfigChange({ tempoBpm: nextBpm })}
-                    canUndo={undoStack.length > 0}
-                    canRedo={redoStack.length > 0}
-                    onUndo={handleUndo}
-                    onRedo={handleRedo}
-                    playbackRate={playbackRate}
-                    tracks={scoreData?.tracks || []}
-                    onPrintPdf={() => void handlePrintPdf()}
-                    isPrintingPdf={isPrintingPdf}
-                    canPrintPdf={canPrintSheetMusic}
-                    printError={printError}
-                    satbSoloVoice={satbSoloVoice}
-                    satbMutedVoices={satbMutedVoices}
-                    onTogglePlay={() => setTogglePlaySignal((n) => n + 1)}
-                    onStopPlay={() => setStopPlaySignal((n) => n + 1)}
-                    onSeek={(sec) =>
-                      setSeekRequest({
-                        sec,
-                        autoplay: isPlaybackActiveRef.current,
-                        nonce: Date.now(),
-                      })
-                    }
-                    isFocusMode={isFocusMode}
-                    onToggleFocusMode={() => setIsFocusMode((v) => !v)}
-                    onMusicXmlChange={handleMusicXmlChange}
-                    skipAutoChordInfer={Boolean(scoreData?.analysis?.chords_edited)}
-                    playbackSequence={playbackSequence}
-                    externalToolbarControls={true}
-                    onSelectionStatusChange={setNotationSelectionStatus}
-                    referenceSheetSplit={referenceSheetSplit}
-                  />
+                  <>
+                    {recoverySuccess && (
+                      <div
+                        role="status"
+                        data-testid="score-recovery-success"
+                        className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs text-emerald-950 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-200"
+                      >
+                        <span>{recoverySuccess}</span>
+                        <button
+                          type="button"
+                          onClick={() => setRecoverySuccess(null)}
+                          aria-label="Dismiss recovery status"
+                          className="rounded p-1 hover:bg-black/10 dark:hover:bg-white/10"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    )}
+                    <SheetMusicViewer
+                      musicxml={musicxml}
+                      scoreTitle={effectiveScoreTitle}
+                      notes={scoreData?.notes}
+                      chords={scoreData?.chords}
+                      showChordSymbols={showChordSymbols}
+                      onToggleChordSymbols={handleToggleChordSymbols}
+                      playheadSec={playheadSec}
+                      isPlaying={isPlaybackActive}
+                      tempoBpm={scoreData?.tempo_bpm || 120}
+                      timeSignature={scoreData?.time_signature || "4/4"}
+                      clefMode={playgroundClefMode}
+                      keyFifths={activeKeySignature.fifths}
+                      keyMode={activeKeySignature.mode}
+                      onApplyKeySignature={handleApplyKeySignature}
+                      isMidiPlayground={isMidiPlayground}
+                      defaultEditMode={isMidiPlayground}
+                      isActiveTab={activeTab === "notation"}
+                      metronomeSettings={metronomeSettings}
+                      onMetronomeSettingsChange={handleMetronomeSettingsChange}
+                      onTempoChange={(nextBpm) => handlePlaygroundConfigChange({ tempoBpm: nextBpm })}
+                      canUndo={undoStack.length > 0}
+                      canRedo={redoStack.length > 0}
+                      onUndo={handleUndo}
+                      onRedo={handleRedo}
+                      playbackRate={playbackRate}
+                      tracks={scoreData?.tracks || []}
+                      onPrintPdf={() => void handlePrintPdf()}
+                      isPrintingPdf={isPrintingPdf}
+                      canPrintPdf={canPrintSheetMusic}
+                      printError={printError}
+                      satbSoloVoice={satbSoloVoice}
+                      satbMutedVoices={satbMutedVoices}
+                      onTogglePlay={() => setTogglePlaySignal((n) => n + 1)}
+                      onStopPlay={() => setStopPlaySignal((n) => n + 1)}
+                      onSeek={(sec) =>
+                        setSeekRequest({
+                          sec,
+                          autoplay: isPlaybackActiveRef.current,
+                          nonce: Date.now(),
+                        })
+                      }
+                      isFocusMode={isFocusMode}
+                      onToggleFocusMode={() => setIsFocusMode((v) => !v)}
+                      onMusicXmlChange={handleMusicXmlChange}
+                      skipAutoChordInfer={Boolean(scoreData?.analysis?.chords_edited)}
+                      playbackSequence={playbackSequence}
+                      externalToolbarControls={true}
+                      onSelectionStatusChange={setNotationSelectionStatus}
+                      referenceSheetSplit={referenceSheetSplit}
+                    />
+                  </>
                 ))}
 
               {activeTab === "pianoroll" &&

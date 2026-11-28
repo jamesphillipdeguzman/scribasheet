@@ -82,3 +82,21 @@ class ArrangementRegenerateRequest(BaseModel):
     playability_smoothing: Literal["original", "standard", "simplified"] | None = None
     quantization: str | None = None
     mode: str | None = None
+
+
+class ScoreRecoverRequest(BaseModel):
+    create_blank_if_empty: bool = False
+    expected_version: int | None = None
+
+
+class ScoreRecoverResponse(BaseModel):
+    status: Literal[
+        "already_available",
+        "migrated_from_legacy",
+        "rebuilt_from_notes",
+        "created_blank",
+        "no_recoverable_notes",
+    ]
+    message: str
+    note_count: int = 0
+    score: ProjectScoreResponse | None = None
