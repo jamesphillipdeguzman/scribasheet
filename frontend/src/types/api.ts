@@ -318,3 +318,71 @@ export interface ArchiveValidationPreview {
   checksums_verified: boolean;
   warnings?: string[];
 }
+
+export interface OmrProposedFix {
+  action: "set_accidental" | "set_pitch" | "add_tie" | "add_fingering" | "add_pedal";
+  part_id?: string | null;
+  measure: number;
+  staff?: number | null;
+  voice?: string | null;
+  note_index?: number | null;
+  step?: string | null;
+  alter?: number | null;
+  octave?: number | null;
+  fingering?: string | null;
+  pedal_type?: "start" | "stop" | null;
+}
+
+export interface OmrFinding {
+  id: string;
+  source: "structural" | "ai_vision";
+  page?: number | null;
+  measure: number;
+  part_id?: string | null;
+  staff?: number | null;
+  voice?: string | null;
+  category: string;
+  severity: "high" | "medium" | "low";
+  description: string;
+  confidence?: number | null;
+  proposed_fix?: OmrProposedFix | null;
+}
+
+export interface OmrVerificationReport {
+  omr_match_score: number;
+  score_status: "preliminary" | "verified" | "ai_unavailable" | "ai_failed";
+  structural_score: number;
+  rhythm_validity_score: number;
+  structural_consistency_score: number;
+  ai_verified: boolean;
+  ai_confidence: number | null;
+  source_available: boolean;
+  source_message?: string | null;
+  formula_note: string;
+  total_measures: number;
+  valid_rhythm_measures: number;
+  flagged_measures: number[];
+  findings: OmrFinding[];
+  content_hash: string;
+  verified_at?: string | null;
+  model_used?: string | null;
+  ai_error?: string | null;
+  applied_finding_ids: string[];
+  can_revert: boolean;
+}
+
+export interface OmrVerificationStatusResponse {
+  verification: OmrVerificationReport;
+  gemini_configured: boolean;
+  source_available: boolean;
+  source_message?: string | null;
+  can_revert: boolean;
+  can_restore_previous: boolean;
+}
+
+export interface OmrApplyFixesResponse {
+  score: ProjectScoreResponse;
+  verification: OmrVerificationReport;
+  applied_ids: string[];
+  skipped_ids: string[];
+}

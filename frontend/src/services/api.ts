@@ -6,6 +6,8 @@ import type {
   ExtractAudioResponse,
   LyricsData,
   MediaAsset,
+  OmrApplyFixesResponse,
+  OmrVerificationStatusResponse,
   Project,
   ProjectListResponse,
   ProjectScoreResponse,
@@ -554,6 +556,32 @@ export const api = {
     request<ProjectScoreResponse>(`/projects/${projectId}/score/satb-assignments`, {
       method: "PUT",
       body: JSON.stringify(data),
+    }),
+  getOmrVerification: (projectId: string) =>
+    request<OmrVerificationStatusResponse>(`/projects/${projectId}/score/omr-verification`),
+  runOmrVisionVerify: (projectId: string, force = false) =>
+    request<OmrVerificationStatusResponse>(
+      `/projects/${projectId}/score/omr-verify`,
+      {
+        method: "POST",
+        body: JSON.stringify({ force }),
+      },
+      true,
+      BASE_RETRY_DELAY_MS,
+      90_000,
+    ),
+  applyOmrFixes: (projectId: string, findingIds: string[]) =>
+    request<OmrApplyFixesResponse>(`/projects/${projectId}/score/omr-apply-fixes`, {
+      method: "POST",
+      body: JSON.stringify({ finding_ids: findingIds }),
+    }),
+  revertOmrFixes: (projectId: string) =>
+    request<ProjectScoreResponse>(`/projects/${projectId}/score/omr-revert`, {
+      method: "POST",
+    }),
+  restorePreviousScore: (projectId: string) =>
+    request<ProjectScoreResponse>(`/projects/${projectId}/score/restore-previous`, {
+      method: "POST",
     }),
 
   // Lyrics

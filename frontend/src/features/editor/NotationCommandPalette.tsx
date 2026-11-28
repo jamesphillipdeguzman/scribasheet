@@ -81,6 +81,7 @@ interface NotationCommandPaletteProps {
   selectedMeasureNumber?: number | null;
   noteInfo: XmlNoteInfo | null;
   statusMessage?: string | null;
+  hideInlineMetaControls?: boolean;
   canUndo?: boolean;
   canRedo?: boolean;
   onUndo?: () => void;
@@ -108,6 +109,74 @@ interface NotationCommandPaletteProps {
   onToggleNavigationMarker?: (measureNumber: number, marker: NavigationMarkerType) => void;
 }
 
+export function formatNotationSelectionReadout(params: {
+  selectedTarget: XmlNoteTarget | null;
+  selectedMeasureNumber?: number | null;
+  currentDuration: EditableNoteType;
+  currentDotted: boolean;
+  keyFifths?: number;
+}): string {
+  const { selectedTarget, selectedMeasureNumber = null, currentDuration, currentDotted, keyFifths = 0 } = params;
+  const durLabel =
+    currentDuration === "16th" || currentDuration === "32nd" || currentDuration === "64th"
+      ? currentDuration
+      : currentDuration.charAt(0).toUpperCase() + currentDuration.slice(1);
+  if (selectedTarget) {
+    return `Selected: ${selectedTarget.pitchMidi !== null ? midiToNoteName(selectedTarget.pitchMidi, keyFifths) : "Rest"} (${durLabel}${currentDotted ? "." : ""}) • ${selectedTarget.measureNumber === 0 ? "Pickup (m.0)" : `m.${selectedTarget.measureNumber}`}`;
+  }
+  if (selectedMeasureNumber !== null && selectedMeasureNumber !== undefined) {
+    return `Selected: ${selectedMeasureNumber === 0 ? "Measure 0 (Pickup)" : `Measure ${selectedMeasureNumber}`} (Press Delete/Backspace to remove)`;
+  }
+  return "Click a notehead to edit";
+}
+
+export function NotationShortcutsReference({
+  activeTupletActual = null,
+}: {
+  activeTupletActual?: number | null;
+}) {
+  return (
+    <div
+      data-testid="notation-shortcuts-popover"
+      className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 rounded-lg border border-stone-300 bg-white p-3 text-[11px] text-stone-700 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#C4C4D4]"
+    >
+      <div className="space-y-1">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500 dark:text-[#A1A1AA]">
+          Note Durations (1–9)
+        </div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">1</kbd> 64th &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">2</kbd> 32nd &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">3</kbd> 16th</div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">4</kbd> Eighth &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">5</kbd> Quarter &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">6</kbd> Half</div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">7</kbd> Whole &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">8</kbd> Breve &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">9</kbd> Longa</div>
+      </div>
+
+      <div className="space-y-1">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500 dark:text-[#A1A1AA]">
+          Rest, Dot, Tie &amp; Scaling
+        </div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">0</kbd> Rest Mode / Convert Note to Rest</div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">.</kbd> Toggle Augmentation Dot</div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">T</kbd> / <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">+</kbd> Tie Same Pitch / Add Tied Continuation</div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">W</kbd> Double Duration &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Q</kbd> Halve Duration</div>
+      </div>
+
+      <div className="space-y-1">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500 dark:text-[#A1A1AA]">
+          Tuplets &amp; Editor Modes
+        </div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+3</kbd> Triplet (3:2) &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+2..9</kbd> Tuplets</div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">N</kbd> Note Input &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">A–G</kbd> Pitch &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Shift+A–G</kbd> Chord Tone</div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Del</kbd> / <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Backspace</kbd> Delete Note or Measure &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Esc</kbd> Exit</div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">S</kbd> Slur &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">X</kbd> Stem &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">↑/↓</kbd> Pitch &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+↑/↓</kbd> Octave &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl+Z/Y</kbd> Undo/Redo</div>
+        {activeTupletActual && (
+          <div className="text-violet-700 dark:text-violet-300 font-medium">
+            Active Tuplet Input: {activeTupletActual}-tuplet
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function NotationCommandPalette({
   isPlaying,
   noteInputMode,
@@ -122,6 +191,7 @@ export function NotationCommandPalette({
   selectedMeasureNumber = null,
   noteInfo,
   statusMessage,
+  hideInlineMetaControls = false,
   canUndo = false,
   canRedo = false,
   onUndo,
@@ -166,9 +236,13 @@ export function NotationCommandPalette({
 
   const groupSep = "flex flex-wrap items-center gap-1 border-l border-amber-300/70 pl-2 dark:border-[#27273A]";
 
-  const durLabel = currentDuration === "16th" || currentDuration === "32nd" || currentDuration === "64th"
-    ? currentDuration
-    : currentDuration.charAt(0).toUpperCase() + currentDuration.slice(1);
+  const selectionText = formatNotationSelectionReadout({
+    selectedTarget,
+    selectedMeasureNumber,
+    currentDuration,
+    currentDotted,
+    keyFifths,
+  });
 
   if (isPlaying) {
     return (
@@ -458,51 +532,50 @@ export function NotationCommandPalette({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 ml-auto">
-          <span
-            data-testid="notation-edit-readout"
-            className="font-mono text-[11px] text-amber-950 font-medium dark:text-amber-200"
-          >
-            {selectedTarget
-              ? `Selected: ${selectedTarget.pitchMidi !== null ? midiToNoteName(selectedTarget.pitchMidi, keyFifths) : "Rest"} (${durLabel}${currentDotted ? "." : ""}) • ${selectedTarget.measureNumber === 0 ? "Pickup (m.0)" : `m.${selectedTarget.measureNumber}`}`
-              : selectedMeasureNumber !== null
-                ? `Selected: ${selectedMeasureNumber === 0 ? "Measure 0 (Pickup)" : `Measure ${selectedMeasureNumber}`} (Press Delete/Backspace to remove)`
-                : "Click a notehead to edit"}
-          </span>
-          {onUndo && (
+        {!hideInlineMetaControls && (
+          <div className="flex items-center gap-2 ml-auto">
+            <span
+              data-testid="notation-edit-readout"
+              title={selectionText}
+              className="font-mono text-[11px] text-amber-950 font-medium dark:text-amber-200 max-w-[260px] truncate whitespace-nowrap"
+            >
+              {selectionText}
+            </span>
+            {onUndo && (
+              <button
+                type="button"
+                disabled={!canUndo}
+                aria-label="Undo notation edit"
+                title="Undo (Ctrl+Z)"
+                className={btnClass(false, !canUndo)}
+                onClick={onUndo}
+              >
+                <Undo2 className="h-3 w-3" />
+              </button>
+            )}
+            {onRedo && (
+              <button
+                type="button"
+                disabled={!canRedo}
+                aria-label="Redo notation edit"
+                title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
+                className={btnClass(false, !canRedo)}
+                onClick={onRedo}
+              >
+                <Redo2 className="h-3 w-3" />
+              </button>
+            )}
             <button
               type="button"
-              disabled={!canUndo}
-              aria-label="Undo notation edit"
-              title="Undo (Ctrl+Z)"
-              className={btnClass(false, !canUndo)}
-              onClick={onUndo}
+              aria-label="Toggle keyboard shortcut reference"
+              aria-expanded={showShortcuts}
+              onClick={() => setShowShortcuts((v) => !v)}
+              className={btnClass(showShortcuts, false)}
             >
-              <Undo2 className="h-3 w-3" />
+              <HelpCircle className="h-3 w-3" />
             </button>
-          )}
-          {onRedo && (
-            <button
-              type="button"
-              disabled={!canRedo}
-              aria-label="Redo notation edit"
-              title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
-              className={btnClass(false, !canRedo)}
-              onClick={onRedo}
-            >
-              <Redo2 className="h-3 w-3" />
-            </button>
-          )}
-          <button
-            type="button"
-            aria-label="Toggle keyboard shortcut reference"
-            aria-expanded={showShortcuts}
-            onClick={() => setShowShortcuts((v) => !v)}
-            className={btnClass(showShortcuts, false)}
-          >
-            <HelpCircle className="h-3 w-3" />
-          </button>
-        </div>
+          </div>
+        )}
       </div>
 
       {statusMessage && (
@@ -514,45 +587,8 @@ export function NotationCommandPalette({
         </div>
       )}
 
-      {showShortcuts && (
-        <div
-          data-testid="notation-shortcuts-popover"
-          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 rounded-lg border border-stone-300 bg-white p-3 text-[11px] text-stone-700 dark:border-[#27273A] dark:bg-[#0D0D16] dark:text-[#C4C4D4]"
-        >
-          <div className="space-y-1">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500 dark:text-[#A1A1AA]">
-              Note Durations (1–9)
-            </div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">1</kbd> 64th &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">2</kbd> 32nd &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">3</kbd> 16th</div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">4</kbd> Eighth &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">5</kbd> Quarter &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">6</kbd> Half</div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">7</kbd> Whole &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">8</kbd> Breve &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">9</kbd> Longa</div>
-          </div>
-
-          <div className="space-y-1">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500 dark:text-[#A1A1AA]">
-              Rest, Dot, Tie &amp; Scaling
-            </div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">0</kbd> Rest Mode / Convert Note to Rest</div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">.</kbd> Toggle Augmentation Dot</div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">T</kbd> / <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">+</kbd> Tie Same Pitch / Add Tied Continuation</div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">W</kbd> Double Duration &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Q</kbd> Halve Duration</div>
-          </div>
-
-          <div className="space-y-1">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500 dark:text-[#A1A1AA]">
-              Tuplets &amp; Editor Modes
-            </div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+3</kbd> Triplet (3:2) &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+2..9</kbd> Tuplets</div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">N</kbd> Note Input &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">A–G</kbd> Pitch &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Shift+A–G</kbd> Chord Tone</div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Del</kbd> / <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Backspace</kbd> Delete Note or Measure &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Esc</kbd> Exit</div>
-            <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">S</kbd> Slur &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">X</kbd> Stem &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">↑/↓</kbd> Pitch &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+↑/↓</kbd> Octave &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl+Z/Y</kbd> Undo/Redo</div>
-            {activeTupletActual && (
-              <div className="text-violet-700 dark:text-violet-300 font-medium">
-                Active Tuplet Input: {activeTupletActual}-tuplet
-              </div>
-            )}
-          </div>
-        </div>
+      {!hideInlineMetaControls && showShortcuts && (
+        <NotationShortcutsReference activeTupletActual={activeTupletActual} />
       )}
     </div>
   );

@@ -73,6 +73,17 @@ def _supersede_previous_project_results(db: Session, project_id: str, new_job_id
     if score_row:
         score_json = dict(score_row.score_json or {})
         analysis = dict(score_json.get("analysis") or {})
+        if analysis.get("is_active") is not False:
+            snapshot_json = dict(score_json)
+            snapshot_analysis = dict(snapshot_json.get("analysis") or {})
+            snapshot_analysis.pop("previous_active_snapshot", None)
+            snapshot_json["analysis"] = snapshot_analysis
+            analysis["previous_active_snapshot"] = {
+                "score_json": snapshot_json,
+                "musicxml_path": score_row.musicxml_path,
+                "midi_path": score_row.midi_path,
+                "version": int(score_row.version or 1),
+            }
         analysis["is_active"] = False
         analysis["superseded_by_job_id"] = new_job_id
         score_json["analysis"] = analysis

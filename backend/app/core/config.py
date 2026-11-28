@@ -114,6 +114,9 @@ class Settings(BaseSettings):
     ENABLE_SOURCE_SEPARATION: bool = False
     WHISPER_MODEL_SIZE: str = "auto"
     SOURCE_SEPARATION_BACKEND: str = "none"
+    GEMINI_API_KEY: str = ""
+    GEMINI_VISION_MODEL: str = "gemini-2.5-flash"
+    GEMINI_API_TIMEOUT_SECONDS: float = 45.0
 
     # Billing (Stripe)
     STRIPE_SECRET_KEY: str = ""

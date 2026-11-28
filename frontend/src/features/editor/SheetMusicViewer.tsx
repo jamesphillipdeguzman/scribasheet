@@ -19,7 +19,10 @@ import { type MetronomeSettings } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
 import { KeySignatureControl, type KeyChangeAction } from "@/features/editor/KeySignatureControl";
 import { type MeasureMeterChangePayload, type PendingOverflowWarning } from "@/features/editor/MeasureMeterControl";
-import { NotationCommandPalette } from "@/features/editor/NotationCommandPalette";
+import {
+  formatNotationSelectionReadout,
+  NotationCommandPalette,
+} from "@/features/editor/NotationCommandPalette";
 import { NotationMidiBar } from "@/features/editor/NotationMidiBar";
 import {
   addChordToneToXmlNote,
@@ -162,6 +165,8 @@ interface SheetMusicViewerProps {
   canPrintPdf?: boolean;
   printError?: string | null;
   playbackSequence?: PlaybackSequence | null;
+  externalToolbarControls?: boolean;
+  onSelectionStatusChange?: (status: { text: string; activeTupletActual: number | null }) => void;
 }
 
 function buildStaffIndexMapping(xmlStr: string | null | undefined): Array<{ partIndex: number; staffNumber: number }> {
@@ -246,6 +251,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   canPrintPdf = false,
   printError = null,
   playbackSequence = null,
+  externalToolbarControls = false,
+  onSelectionStatusChange,
 }: SheetMusicViewerProps) {
   const [engine, setEngine] = useState<"alphatab" | "osmd">(() =>
     defaultEditMode || isMidiPlayground ? "osmd" : getInitialNotationEngine(defaultEngine),
@@ -391,6 +398,61 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const [isRendering, setIsRendering] = useState(false);
   const [resolvedXml, setResolvedXml] = useState<string | null>(null);
   const [payloadStatus, setPayloadStatus] = useState<"empty" | "loading" | "ready" | "error">("empty");
+
+  useEffect(() => {
+    if (!onSelectionStatusChange) return;
+    const xmlForInfo = resolvedXml ?? musicxml ?? "";
+    const noteInfo = selectedTarget && xmlForInfo ? getXmlNoteInfo(xmlForInfo, selectedTarget) : null;
+    const text = formatNotationSelectionReadout({
+      selectedTarget,
+      selectedMeasureNumber,
+      currentDuration: noteInfo?.durationType ?? activeDuration,
+      currentDotted: noteInfo ? noteInfo.dotted : activeDotted,
+      keyFifths,
+    });
+    onSelectionStatusChange({ text, activeTupletActual });
+  }, [
+    onSelectionStatusChange,
+    selectedTarget,
+    selectedMeasureNumber,
+    resolvedXml,
+    musicxml,
+    activeDuration,
+    activeDotted,
+    keyFifths,
+    activeTupletActual,
+  ]);
+
+  // Reflow OSMD notation smoothly when pane width changes (e.g. split-pane toggle or divider drag)
+  useEffect(() => {
+    if (engine !== "osmd" || typeof ResizeObserver === "undefined") return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    let prevWidth = Math.round(el.getBoundingClientRect().width);
+    let rafId: number | null = null;
+    const observer = new ResizeObserver((entries) => {
+      const nextWidth = Math.round(entries[0]?.contentRect?.width ?? el.getBoundingClientRect().width);
+      if (nextWidth > 0 && Math.abs(nextWidth - prevWidth) >= 8) {
+        prevWidth = nextWidth;
+        if (rafId !== null) window.cancelAnimationFrame(rafId);
+        rafId = window.requestAnimationFrame(() => {
+          rafId = null;
+          if (osmdRef.current && osmdContainerElRef.current?.isConnected) {
+            try {
+              osmdRef.current.render();
+            } catch {
+              // Ignore transient resize render error
+            }
+          }
+        });
+      }
+    });
+    observer.observe(el);
+    return () => {
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+      observer.disconnect();
+    };
+  }, [engine]);
   const [playheadRect, setPlayheadRect] = useState<PlayheadRect>({
     visible: false,
     left: 0,
@@ -2366,6 +2428,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
               selectedMeasureNumber={selectedMeasureNumber}
               noteInfo={noteInfo}
               statusMessage={paletteStatusMsg}
+              hideInlineMetaControls={externalToolbarControls}
               canUndo={canUndo}
               canRedo={canRedo}
               onUndo={onUndo}

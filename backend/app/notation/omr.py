@@ -2227,6 +2227,12 @@ def process_satb_pdf(
 
         out_xml = apply_scribasheet_musicxml_branding(cleaned_xml, title=title)
 
+    from app.notation.omr_verification import evaluate_omr_structure
+
+    omr_report = evaluate_omr_structure(out_xml, source_available=True)
+    score_data.analysis["omr_verification"] = omr_report.model_dump()
+    score_data.analysis["omr_source_kind"] = "pdf"
+
     return OMRRecognitionResult(
         musicxml=out_xml,
         score_data=score_data,
@@ -2245,6 +2251,7 @@ def _finalize_omr_result(
     omr_warnings: list[str],
     satb_mode: str = "auto_satb",
     pdf_path: Path | None = None,
+    source_kind: str = "images",
 ) -> OMRRecognitionResult:
     """Run canonical ScribaSheet OMR cleanup, SATB/staff separation, ScoreData build, and branding."""
     import music21
@@ -2265,6 +2272,12 @@ def _finalize_omr_result(
         from app.notation.generator import apply_scribasheet_musicxml_branding
 
         out_xml = apply_scribasheet_musicxml_branding(cleaned_xml, title=title)
+
+    from app.notation.omr_verification import evaluate_omr_structure
+
+    omr_report = evaluate_omr_structure(out_xml, source_available=True)
+    score_data.analysis["omr_verification"] = omr_report.model_dump()
+    score_data.analysis["omr_source_kind"] = source_kind
 
     return OMRRecognitionResult(
         musicxml=out_xml,
