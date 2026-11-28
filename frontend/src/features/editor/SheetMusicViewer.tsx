@@ -455,6 +455,8 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     setSelectedTarget(null);
     setSelectedMeasureNumber(null);
     setSelectedMeasureRect(null);
+    setInlineChordSession(null);
+    setInlineLyricSession(null);
     setPaletteStatusMsg(null);
   }, [musicxml]);
   const [renderError, setRenderError] = useState<string | null>(null);
@@ -1321,11 +1323,23 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
                 }
               }
 
+              let firstPitchedMidi: number | null = null;
+              for (const gve of se.graphicalVoiceEntries || []) {
+                for (const gn of gve.notes || []) {
+                  const isR = typeof gn.sourceNote?.isRest === "function" ? gn.sourceNote.isRest() : false;
+                  const ht = gn.sourceNote?.Pitch?.halfTone;
+                  if (!isR && typeof ht === "number") {
+                    firstPitchedMidi = ht + 12;
+                    break;
+                  }
+                }
+                if (firstPitchedMidi !== null) break;
+              }
               const fallbackSeTarget: XmlNoteTarget = {
                 partIndex: staffLoc.partIndex,
                 measureNumber: mNum,
                 onsetWhole: scoreWhole,
-                pitchMidi: null,
+                pitchMidi: firstPitchedMidi,
                 staffNumber: staffLoc.staffNumber,
               };
               for (const gLyr of seGraphicalExt.LyricsEntries || []) {
@@ -1855,6 +1869,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       }
       setPaletteStatusMsg(statusMsg ?? null);
       lastEditedXmlRef.current = resultXml;
+      setResolvedXml(resultXml);
       onMusicXmlChange(resultXml, meta);
     },
     [isPlaying, onMusicXmlChange, onTogglePlay],
@@ -1932,7 +1947,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       existingHarmonyIndex?: number;
       existingSymbol?: string;
     }): boolean => {
-      const currentXml = resolvedXml ?? musicxml;
+      const currentXml = lastEditedXmlRef.current ?? resolvedXml ?? musicxml;
       if (!currentXml || !onMusicXmlChange) return false;
 
       let measureNumber: number | null = explicit?.measureNumber ?? null;
@@ -1967,7 +1982,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       setInlineLyricSession(null);
 
       const existing = getXmlHarmonyAtPosition(currentXml, { measureNumber, onsetWhole });
-      const symbol = explicit?.existingSymbol ?? existing?.symbol ?? "";
+      const symbol = existing?.symbol ?? explicit?.existingSymbol ?? "";
       setInlineChordSession({
         measureNumber,
         onsetWhole,
@@ -1989,13 +2004,15 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       timeline.segments,
       isPlaying,
       onTogglePlay,
+      effectiveShowChords,
+      onToggleChordSymbols,
       computeInlineAnchor,
     ],
   );
 
   const openLyricEditor = useCallback(
     (explicitTarget?: XmlNoteTarget | null, explicitVerse?: LyricVerseNumber): boolean => {
-      const currentXml = resolvedXml ?? musicxml;
+      const currentXml = lastEditedXmlRef.current ?? resolvedXml ?? musicxml;
       if (!currentXml || !onMusicXmlChange) return false;
 
       const resolved = resolveLyricAnchorTarget(currentXml, explicitTarget ?? selectedTarget);
@@ -2046,7 +2063,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const handleCommitChord = useCallback(
     (mode: "close" | "tab" | "space") => {
       if (!inlineChordSession) return;
-      const currentXml = resolvedXml ?? musicxml;
+      const currentXml = lastEditedXmlRef.current ?? resolvedXml ?? musicxml;
       if (!currentXml) return;
 
       const trimmed = inlineChordSession.draft.trim();
@@ -2143,7 +2160,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
 
   const handleDeleteInlineChord = useCallback(() => {
     if (!inlineChordSession) return;
-    const currentXml = resolvedXml ?? musicxml;
+    const currentXml = lastEditedXmlRef.current ?? resolvedXml ?? musicxml;
     if (!currentXml) return;
     const res = upsertXmlHarmony(
       currentXml,
@@ -2163,7 +2180,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
 
   const handleCommitLyricClose = useCallback(() => {
     if (!inlineLyricSession) return;
-    const currentXml = resolvedXml ?? musicxml;
+    const currentXml = lastEditedXmlRef.current ?? resolvedXml ?? musicxml;
     const trimmed = inlineLyricSession.draft.replace(/-+$/, "").trim();
     if (currentXml && trimmed) {
       const syllabic: LyricSyllabic =
@@ -2185,7 +2202,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const handleAdvanceLyric = useCallback(
     (trigger: "tab" | "space" | "hyphen" | "underscore") => {
       if (!inlineLyricSession) return;
-      const currentXml = resolvedXml ?? musicxml;
+      const currentXml = lastEditedXmlRef.current ?? resolvedXml ?? musicxml;
       if (!currentXml) return;
 
       const { target, verse, draft, inWord } = inlineLyricSession;
@@ -2284,7 +2301,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
 
   const handleDeleteInlineLyric = useCallback(() => {
     if (!inlineLyricSession) return;
-    const currentXml = resolvedXml ?? musicxml;
+    const currentXml = lastEditedXmlRef.current ?? resolvedXml ?? musicxml;
     if (!currentXml) return;
     const res = setXmlNoteLyric(currentXml, inlineLyricSession.target, inlineLyricSession.verse, null);
     if (res?.changed) {
@@ -2300,7 +2317,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     (nextVerse: LyricVerseNumber) => {
       setActiveLyricVerse(nextVerse);
       if (!inlineLyricSession) return;
-      const currentXml = resolvedXml ?? musicxml;
+      const currentXml = lastEditedXmlRef.current ?? resolvedXml ?? musicxml;
       const existing = currentXml ? getXmlNoteLyric(currentXml, inlineLyricSession.target, nextVerse) : null;
       setInlineLyricSession((prev) =>
         prev

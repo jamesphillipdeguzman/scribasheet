@@ -663,14 +663,19 @@ export function ProjectStudioPage() {
     return () => window.removeEventListener("beforeunload", handler);
   }, [saveStatus]);
 
+  const scoreEditGenRef = useRef(0);
+
   const persistScore = useCallback(
     async (dataToSave: ScoreData, versionToSave: number, xmlOverride?: string | null) => {
+      const capturedGen = scoreEditGenRef.current;
       setSaveStatus("saving");
       setSaveError(null);
       try {
         const updated = await api.saveScore(projectId, dataToSave, versionToSave, xmlOverride);
         setScoreVersion(updated.version);
-        setMusicxml(updated.musicxml);
+        if (capturedGen === scoreEditGenRef.current && !xmlOverride) {
+          setMusicxml(updated.musicxml);
+        }
         setSaveStatus("saved");
       } catch (err) {
         setSaveStatus("error");
@@ -682,6 +687,7 @@ export function ProjectStudioPage() {
 
   const mutateScore = (updater: (prev: ScoreData) => ScoreData, xmlOverride?: string | null) => {
     if (!scoreData) return;
+    scoreEditGenRef.current += 1;
     setUndoStack((s) => [...s.slice(-29), { scoreData, musicxml }]);
     setRedoStack([]);
     const next = updater(scoreData);
@@ -700,6 +706,7 @@ export function ProjectStudioPage() {
 
   const handleUndo = useCallback(() => {
     if (undoStack.length === 0 || !scoreData) return;
+    scoreEditGenRef.current += 1;
     const prev = undoStack[undoStack.length - 1];
     setUndoStack((s) => s.slice(0, -1));
     setRedoStack((r) => [...r, { scoreData, musicxml }]);
@@ -714,6 +721,7 @@ export function ProjectStudioPage() {
 
   const handleRedo = useCallback(() => {
     if (redoStack.length === 0 || !scoreData) return;
+    scoreEditGenRef.current += 1;
     const next = redoStack[redoStack.length - 1];
     setRedoStack((r) => r.slice(0, -1));
     setUndoStack((s) => [...s, { scoreData, musicxml }]);
