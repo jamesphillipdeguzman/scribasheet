@@ -4,6 +4,8 @@ import {
   ArrowUp,
   FlipVertical2,
   HelpCircle,
+  MessageSquareText,
+  Music2,
   Pencil,
   Plus,
   Redo2,
@@ -107,6 +109,10 @@ interface NotationCommandPaletteProps {
   onSetRepeatCount?: (measureNumber: number, repeatCount: number) => void;
   onSetVoltaEnding?: (measureNumber: number, action: "start_1" | "start_2" | "end_ending" | "clear_ending") => void;
   onToggleNavigationMarker?: (measureNumber: number, marker: NavigationMarkerType) => void;
+  onOpenChordEditor?: () => void;
+  onOpenLyricEditor?: () => void;
+  isChordEditorOpen?: boolean;
+  isLyricEditorOpen?: boolean;
 }
 
 export function formatNotationSelectionReadout(params: {
@@ -167,6 +173,7 @@ export function NotationShortcutsReference({
         <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">N</kbd> Note Input &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">A–G</kbd> Pitch &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Shift+A–G</kbd> Chord Tone</div>
         <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Del</kbd> / <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Backspace</kbd> Delete Note or Measure &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Esc</kbd> Exit</div>
         <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">S</kbd> Slur &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">X</kbd> Stem &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">↑/↓</kbd> Pitch &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+↑/↓</kbd> Octave &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl+Z/Y</kbd> Undo/Redo</div>
+        <div><kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+K</kbd> Chord Symbol &nbsp; <kbd className="rounded bg-stone-200 px-1 dark:bg-white/10">Ctrl/Cmd+L</kbd> Lyrics (<kbd>-</kbd> Syl, <kbd>Space</kbd> Word, <kbd>_</kbd> Melisma)</div>
         {activeTupletActual && (
           <div className="text-violet-700 dark:text-violet-300 font-medium">
             Active Tuplet Input: {activeTupletActual}-tuplet
@@ -217,6 +224,10 @@ export function NotationCommandPalette({
   onSetRepeatCount,
   onSetVoltaEnding,
   onToggleNavigationMarker,
+  onOpenChordEditor,
+  onOpenLyricEditor,
+  isChordEditorOpen = false,
+  isLyricEditorOpen = false,
 }: NotationCommandPaletteProps) {
   const [showShortcuts, setShowShortcuts] = useState(false);
 
@@ -530,6 +541,41 @@ export function NotationCommandPalette({
               />
             )}
           </div>
+
+          {(onOpenChordEditor || onOpenLyricEditor) && (
+            <div className={groupSep} role="group" aria-label="Chord symbols and lyrics">
+              {onOpenChordEditor && (
+                <button
+                  type="button"
+                  data-testid="palette-chord-btn"
+                  aria-label="Chord (Ctrl+K)"
+                  aria-pressed={isChordEditorOpen}
+                  title="Add or edit chord symbol (Ctrl+K / Cmd+K)"
+                  onClick={onOpenChordEditor}
+                  className={btnClass(isChordEditorOpen, false)}
+                >
+                  <Music2 className="h-3 w-3" />
+                  <span>Chord</span>
+                  <kbd className="rounded bg-black/10 px-1 text-[10px]">Ctrl+K</kbd>
+                </button>
+              )}
+              {onOpenLyricEditor && (
+                <button
+                  type="button"
+                  data-testid="palette-lyrics-btn"
+                  aria-label="Lyrics (Ctrl+L)"
+                  aria-pressed={isLyricEditorOpen}
+                  title="Add or edit inline lyrics (Ctrl+L / Cmd+L)"
+                  onClick={onOpenLyricEditor}
+                  className={btnClass(isLyricEditorOpen, false)}
+                >
+                  <MessageSquareText className="h-3 w-3" />
+                  <span>Lyrics</span>
+                  <kbd className="rounded bg-black/10 px-1 text-[10px]">Ctrl+L</kbd>
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {!hideInlineMetaControls && (

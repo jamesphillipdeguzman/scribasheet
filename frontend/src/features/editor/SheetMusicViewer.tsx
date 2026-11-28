@@ -15,6 +15,7 @@ import {
 import { Button } from "@/components/ui/Button";
 import { AlphaTabSheetViewer } from "@/features/editor/AlphaTabSheetViewer";
 import { resolveTrackVoiceRole } from "@/features/editor/cascadeUtils";
+import { InlineScoreTextEditor } from "@/features/editor/InlineScoreTextEditor";
 import { type MetronomeSettings } from "@/features/editor/metronome";
 import { midiSynth } from "@/features/editor/midiSynth";
 import { KeySignatureControl, type KeyChangeAction } from "@/features/editor/KeySignatureControl";
@@ -24,6 +25,21 @@ import {
   NotationCommandPalette,
 } from "@/features/editor/NotationCommandPalette";
 import { NotationMidiBar } from "@/features/editor/NotationMidiBar";
+import {
+  advanceChordBeatPosition,
+  getXmlHarmonyAtPosition,
+  injectChordsIntoMusicXml,
+  upsertXmlHarmony,
+} from "@/features/editor/musicXmlChords";
+import {
+  extendXmlNoteMelisma,
+  findNextLyricNoteTarget,
+  getXmlNoteLyric,
+  type LyricSyllabic,
+  type LyricVerseNumber,
+  resolveLyricAnchorTarget,
+  setXmlNoteLyric,
+} from "@/features/editor/musicXmlLyrics";
 import {
   addChordToneToXmlNote,
   addMeasureToAllParts,
@@ -64,18 +80,17 @@ import {
 } from "@/features/editor/musicXmlEditor";
 import { extractScoreStructure, type NavigationMarkerType } from "@/features/editor/musicXmlStructure";
 import {
-  mapPhysicalSecToPlaybackSec,
   mapPlaybackSecToPhysicalSec,
   type PlaybackSequence,
 } from "@/features/editor/playbackSequence";
 import { cleanDisplayScoreTitle, normalizeScorePayload, prepareDisplayMusicXml } from "@/features/editor/musicXmlNormalization";
-import { injectChordsIntoMusicXml } from "@/features/editor/musicXmlChords";
 import type { KeyMode } from "@/lib/keySignature";
 import {
   buildMusicXmlTimeline,
   findCursorSnapshotIndex,
   type OsmdCursorSnapshot,
   quarterNotesToWholeNotes,
+  resolveScoreSeekSec,
   timeSecToWholeNotes,
   wholeNotesToQuarterNotes,
   wholeNotesToTimeSec,
@@ -158,7 +173,8 @@ interface SheetMusicViewerProps {
   onSeek?: (sec: number) => void;
   isFocusMode?: boolean;
   onToggleFocusMode?: () => void;
-  onMusicXmlChange?: (nextXml: string) => void;
+  onMusicXmlChange?: (nextXml: string, meta?: { chordsModified?: boolean; lyricsModified?: boolean }) => void;
+  skipAutoChordInfer?: boolean;
   defaultEngine?: "alphatab" | "osmd";
   onPrintPdf?: () => void;
   isPrintingPdf?: boolean;
@@ -245,6 +261,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   isFocusMode = false,
   onToggleFocusMode,
   onMusicXmlChange,
+  skipAutoChordInfer = false,
   defaultEngine,
   onPrintPdf,
   isPrintingPdf = false,
@@ -307,12 +324,37 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   const staffLineSpacingMapRef = useRef<Map<string, number>>(new Map());
   interface MeasureBoundingRect {
     measureNumber: number;
+    measureIndex: number;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  }
+  interface ChordHitbox {
+    el: Element | null;
+    measureNumber: number;
+    onsetWhole: number;
+    partIndex: number;
+    harmonyIndexInMeasure?: number;
+    symbol: string;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  }
+  interface LyricHitbox {
+    el: Element | null;
+    target: XmlNoteTarget;
+    verse: LyricVerseNumber;
+    text: string;
     left: number;
     top: number;
     width: number;
     height: number;
   }
   const measureRectsRef = useRef<MeasureBoundingRect[]>([]);
+  const chordHitboxesRef = useRef<ChordHitbox[]>([]);
+  const lyricHitboxesRef = useRef<LyricHitbox[]>([]);
   const renderedEventsRef = useRef<RenderedMusicalEvent[]>([]);
   const cursorSnapshotsRef = useRef<OsmdCursorSnapshot[]>([]);
   const lastCursorWholeRef = useRef<number>(-1);
@@ -345,6 +387,27 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   selectedMeasureNumberRef.current = selectedMeasureNumber;
   const [selectedMeasureRect, setSelectedMeasureRect] = useState<MeasureBoundingRect | null>(null);
   const [pendingOverflow, setPendingOverflow] = useState<PendingOverflowWarning | null>(null);
+  const [activeLyricVerse, setActiveLyricVerse] = useState<LyricVerseNumber>(1);
+  const [inlineChordSession, setInlineChordSession] = useState<{
+    measureNumber: number;
+    onsetWhole: number;
+    partIndex: number;
+    existingHarmonyIndex?: number;
+    hasExisting: boolean;
+    draft: string;
+    error: string | null;
+    anchor: { x: number; y: number };
+  } | null>(null);
+  const [inlineLyricSession, setInlineLyricSession] = useState<{
+    target: XmlNoteTarget;
+    verse: LyricVerseNumber;
+    draft: string;
+    inWord: boolean;
+    hasExisting: boolean;
+    existingSyllabic: LyricSyllabic | null;
+    error: string | null;
+    anchor: { x: number; y: number };
+  } | null>(null);
   const lastEditedXmlRef = useRef<string | null>(null);
   const lastEnteredTargetRef = useRef<XmlNoteTarget | null>(null);
   const lastEnteredMidiRef = useRef<number | null>(null);
@@ -670,6 +733,41 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
           lastSnapshotIdxRef.current = evIdx;
         }
 
+        const activeSeg = timeline.segments.find(
+          (s) => sec >= s.secStart - 0.005 && sec <= s.secEnd + 0.005,
+        );
+        const matchingMeasureRect = activeSeg
+          ? measureRectsRef.current.find(
+              (r) => r.measureNumber === activeSeg.measureNumber || r.measureIndex === activeSeg.measureIndex,
+            )
+          : undefined;
+        const ev0InActiveMeasure =
+          !activeSeg ||
+          (ev0.onsetSec >= activeSeg.secStart - 0.05 && ev0.onsetSec <= activeSeg.secEnd + 0.05);
+
+        if (matchingMeasureRect && !ev0InActiveMeasure) {
+          const geom: PlayheadRect = {
+            visible: true,
+            left: matchingMeasureRect.left + 8,
+            top: matchingMeasureRect.top,
+            height: matchingMeasureRect.height,
+            systemIndex: matchingMeasureRect.measureIndex,
+          };
+          setPlayheadRect((prev) =>
+            prev.visible === geom.visible &&
+              prev.left === geom.left &&
+              prev.top === geom.top &&
+              prev.height === geom.height &&
+              prev.systemIndex === geom.systemIndex
+              ? prev
+              : geom,
+          );
+          if (allowAutoScroll) {
+            maybeAutoScroll(geom);
+          }
+          return;
+        }
+
         const baseLeft = resolveEventLeft(ev0);
         if (baseLeft !== null) {
           let displayLeft = baseLeft;
@@ -693,6 +791,41 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
             top: ev0.top,
             height: ev0.height,
             systemIndex: ev0.systemIndex,
+          };
+          setPlayheadRect((prev) =>
+            prev.visible === geom.visible &&
+              prev.left === geom.left &&
+              prev.top === geom.top &&
+              prev.height === geom.height &&
+              prev.systemIndex === geom.systemIndex
+              ? prev
+              : geom,
+          );
+          if (allowAutoScroll) {
+            maybeAutoScroll(geom);
+          }
+          return;
+        }
+      }
+
+      if (timeline.segments.length > 0 && measureRectsRef.current.length > 0) {
+        const activeSeg = timeline.segments.find(
+          (s) => sec >= s.secStart - 0.005 && sec <= s.secEnd + 0.005,
+        );
+        const matchingMeasureRect = activeSeg
+          ? measureRectsRef.current.find(
+              (r) => r.measureNumber === activeSeg.measureNumber || r.measureIndex === activeSeg.measureIndex,
+            )
+          : undefined;
+        if (matchingMeasureRect && sec > 0.01) {
+          const segDur = Math.max(0.01, activeSeg!.secEnd - activeSeg!.secStart);
+          const frac = Math.max(0, Math.min(0.9, (sec - activeSeg!.secStart) / segDur));
+          const geom: PlayheadRect = {
+            visible: true,
+            left: matchingMeasureRect.left + 8 + frac * Math.max(8, matchingMeasureRect.width - 16),
+            top: matchingMeasureRect.top,
+            height: matchingMeasureRect.height,
+            systemIndex: matchingMeasureRect.measureIndex,
           };
           setPlayheadRect((prev) =>
             prev.visible === geom.visible &&
@@ -995,8 +1128,14 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     // Map rendered SVG notehead elements to XmlNoteTarget AND build canonical event -> SVG notehead index
     const newMap = new WeakMap<Element, XmlNoteTarget>();
     const newHitboxes: Array<{ el: Element; target: XmlNoteTarget }> = [];
+    const newChordHitboxes: ChordHitbox[] = [];
+    const newLyricHitboxes: LyricHitbox[] = [];
     const newSpacingMap = new Map<string, number>();
-    const measureBoundsMap = new Map<number, { minX: number; minY: number; maxX: number; maxY: number }>();
+    const measureBoundsMap = new Map<
+      number,
+      { measureIndex: number; minX: number; minY: number; maxX: number; maxY: number }
+    >();
+    const containerRect = containerRef.current?.getBoundingClientRect();
     const staffMapping = buildStaffIndexMapping(resolvedXml ?? musicxml);
     const eventBuckets = new Map<number, RenderedMusicalEvent>();
     const usedNoteIds = new Set<string>();
@@ -1093,7 +1232,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
                 prevBounds.maxX = Math.max(prevBounds.maxX, rx2);
                 prevBounds.maxY = Math.max(prevBounds.maxY, ry2);
               } else {
-                measureBoundsMap.set(mNum, { minX: rx, minY: ry, maxX: rx2, maxY: ry2 });
+                measureBoundsMap.set(mNum, { measureIndex: mIdx, minX: rx, minY: ry, maxX: rx2, maxY: ry2 });
               }
             }
             let detectedSpacingPx = 10 * zoom;
@@ -1126,6 +1265,106 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
               const beatOffsetWhole = Math.max(0, rawOnsetWhole - measureOriginWhole);
               const scoreWhole = mWholeStart + beatOffsetWhole;
               const timelineSec = wholeNotesToTimeSec(activeTimeline, scoreWhole, tempoBpm);
+
+              const seGraphicalExt = se as unknown as {
+                graphicalChordContainers?: Array<{
+                  GraphicalLabel?: {
+                    Label?: { text?: string };
+                    PositionAndShape?: { AbsolutePosition?: { x?: number; y?: number }; Size?: { width?: number; height?: number } };
+                    SVGNode?: Element;
+                  };
+                }>;
+                LyricsEntries?: Array<{
+                  LyricsEntry?: { Text?: string; VerseNumber?: number };
+                  GraphicalLabel?: {
+                    Label?: { text?: string };
+                    PositionAndShape?: { AbsolutePosition?: { x?: number; y?: number }; Size?: { width?: number; height?: number } };
+                    SVGNode?: Element;
+                  };
+                }>;
+              };
+
+              for (const gChord of seGraphicalExt.graphicalChordContainers || []) {
+                const gl = gChord?.GraphicalLabel;
+                const symText = (gl?.Label?.text || "").trim();
+                const svgNode = gl?.SVGNode ?? null;
+                let left = (gl?.PositionAndShape?.AbsolutePosition?.x ?? 0) * scale;
+                let top = (gl?.PositionAndShape?.AbsolutePosition?.y ?? 0) * scale;
+                let width = Math.max(16, (gl?.PositionAndShape?.Size?.width ?? 2.4) * scale);
+                let height = Math.max(14, (gl?.PositionAndShape?.Size?.height ?? 1.6) * scale);
+                if (svgNode && containerRect && typeof svgNode.getBoundingClientRect === "function") {
+                  const r = svgNode.getBoundingClientRect();
+                  if (r.width > 0 || r.height > 0) {
+                    left = r.left - containerRect.left;
+                    top = r.top - containerRect.top;
+                    width = Math.max(16, r.width);
+                    height = Math.max(14, r.height);
+                  }
+                }
+                if (svgNode instanceof SVGElement || svgNode instanceof HTMLElement) {
+                  svgNode.setAttribute("data-mxml-chord", symText);
+                  svgNode.style.pointerEvents = "all";
+                  svgNode.style.cursor = "pointer";
+                }
+                if (symText) {
+                  newChordHitboxes.push({
+                    el: svgNode,
+                    measureNumber: mNum,
+                    onsetWhole: scoreWhole,
+                    partIndex: staffLoc.partIndex,
+                    symbol: symText,
+                    left,
+                    top,
+                    width,
+                    height,
+                  });
+                }
+              }
+
+              const fallbackSeTarget: XmlNoteTarget = {
+                partIndex: staffLoc.partIndex,
+                measureNumber: mNum,
+                onsetWhole: scoreWhole,
+                pitchMidi: null,
+                staffNumber: staffLoc.staffNumber,
+              };
+              for (const gLyr of seGraphicalExt.LyricsEntries || []) {
+                const gl = gLyr?.GraphicalLabel;
+                const lyrText = (gLyr?.LyricsEntry?.Text ?? gl?.Label?.text ?? "").trim();
+                const rawVerse = gLyr?.LyricsEntry?.VerseNumber ?? 1;
+                const verse = (rawVerse === 2 || rawVerse === 3 ? rawVerse : 1) as LyricVerseNumber;
+                const svgNode = gl?.SVGNode ?? null;
+                let left = (gl?.PositionAndShape?.AbsolutePosition?.x ?? 0) * scale;
+                let top = (gl?.PositionAndShape?.AbsolutePosition?.y ?? 0) * scale;
+                let width = Math.max(16, (gl?.PositionAndShape?.Size?.width ?? 2.4) * scale);
+                let height = Math.max(14, (gl?.PositionAndShape?.Size?.height ?? 1.6) * scale);
+                if (svgNode && containerRect && typeof svgNode.getBoundingClientRect === "function") {
+                  const r = svgNode.getBoundingClientRect();
+                  if (r.width > 0 || r.height > 0) {
+                    left = r.left - containerRect.left;
+                    top = r.top - containerRect.top;
+                    width = Math.max(16, r.width);
+                    height = Math.max(14, r.height);
+                  }
+                }
+                if (svgNode instanceof SVGElement || svgNode instanceof HTMLElement) {
+                  svgNode.setAttribute("data-mxml-lyric", lyrText);
+                  svgNode.style.pointerEvents = "all";
+                  svgNode.style.cursor = "pointer";
+                }
+                if (lyrText) {
+                  newLyricHitboxes.push({
+                    el: svgNode,
+                    target: fallbackSeTarget,
+                    verse,
+                    text: lyrText,
+                    left,
+                    top,
+                    width,
+                    height,
+                  });
+                }
+              }
 
               for (const gve of se.graphicalVoiceEntries || []) {
                 let gveNoteIdx = 0;
@@ -1240,11 +1479,61 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     } catch {
       // Ignore graphic indexing errors
     }
+    // Index explicit SVG chord / lyric markers rendered in DOM (used by tests & SVG text fallbacks)
+    if (containerRef.current && containerRect) {
+      for (const el of Array.from(containerRef.current.querySelectorAll("[data-chord-symbol]"))) {
+        if (newChordHitboxes.some((c) => c.el === el)) continue;
+        const r = el.getBoundingClientRect();
+        const mNum = Number.parseInt(el.getAttribute("data-measure") || "1", 10) || 1;
+        const onsetWhole = Number.parseFloat(el.getAttribute("data-onset-whole") || "");
+        const measureSeg = activeTimeline.segments.find((s) => s.measureNumber === mNum);
+        newChordHitboxes.push({
+          el,
+          measureNumber: mNum,
+          onsetWhole: Number.isFinite(onsetWhole) ? onsetWhole : measureSeg?.wholeNoteStart ?? 0,
+          partIndex: Number.parseInt(el.getAttribute("data-part-index") || "0", 10) || 0,
+          symbol: (el.getAttribute("data-chord-symbol") || el.textContent || "").trim(),
+          left: r.left - containerRect.left,
+          top: r.top - containerRect.top,
+          width: Math.max(16, r.width),
+          height: Math.max(14, r.height),
+        });
+      }
+      for (const el of Array.from(containerRef.current.querySelectorAll("[data-lyric-text]"))) {
+        if (newLyricHitboxes.some((l) => l.el === el)) continue;
+        const r = el.getBoundingClientRect();
+        const mNum = Number.parseInt(el.getAttribute("data-measure") || "1", 10) || 1;
+        const onsetWhole = Number.parseFloat(el.getAttribute("data-onset-whole") || "0") || 0;
+        const pitchMidiRaw = Number.parseInt(el.getAttribute("data-pitch-midi") || "", 10);
+        const verseRaw = Number.parseInt(el.getAttribute("data-lyric-verse") || "1", 10);
+        const verse = (verseRaw === 2 || verseRaw === 3 ? verseRaw : 1) as LyricVerseNumber;
+        newLyricHitboxes.push({
+          el,
+          target: {
+            partIndex: Number.parseInt(el.getAttribute("data-part-index") || "0", 10) || 0,
+            measureNumber: mNum,
+            onsetWhole,
+            pitchMidi: Number.isFinite(pitchMidiRaw) ? pitchMidiRaw : null,
+            staffNumber: Number.parseInt(el.getAttribute("data-staff") || "1", 10) || 1,
+          },
+          verse,
+          text: (el.getAttribute("data-lyric-text") || el.textContent || "").trim(),
+          left: r.left - containerRect.left,
+          top: r.top - containerRect.top,
+          width: Math.max(16, r.width),
+          height: Math.max(14, r.height),
+        });
+      }
+    }
+
     svgNoteTargetMapRef.current = newMap;
     renderedNoteHitboxesRef.current = newHitboxes;
+    chordHitboxesRef.current = newChordHitboxes;
+    lyricHitboxesRef.current = newLyricHitboxes;
     staffLineSpacingMapRef.current = newSpacingMap;
     measureRectsRef.current = Array.from(measureBoundsMap.entries()).map(([measureNumber, b]) => ({
       measureNumber,
+      measureIndex: b.measureIndex,
       left: b.minX,
       top: b.minY,
       width: Math.max(12, b.maxX - b.minX),
@@ -1301,10 +1590,14 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     renderedEventsRef.current = [];
     svgNoteTargetMapRef.current = new WeakMap();
     renderedNoteHitboxesRef.current = [];
+    chordHitboxesRef.current = [];
+    lyricHitboxesRef.current = [];
     staffLineSpacingMapRef.current = new Map();
     measureRectsRef.current = [];
     setSelectedMeasureNumber(null);
     setSelectedMeasureRect(null);
+    setInlineChordSession(null);
+    setInlineLyricSession(null);
     cursorSnapshotsRef.current = [];
     baseGeomRef.current = null;
     nextGeomRef.current = null;
@@ -1406,7 +1699,9 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         const containerEl = containerRef.current;
 
         const enrichedXml = effectiveShowChords
-          ? injectChordsIntoMusicXml(displayXml, chords, notes, tempoBpm)
+          ? injectChordsIntoMusicXml(displayXml, chords, notes, tempoBpm, {
+              skipAutoInfer: skipAutoChordInfer,
+            })
           : displayXml;
 
         setResolvedXml(enrichedXml);
@@ -1483,7 +1778,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       clearNoteheadHighlights();
       clearSelectedHighlight();
     };
-  }, [engine, musicxml, scoreTitle, zoom, effectiveShowChords, chords, notes, tempoBpm, disposeOsmdInstance]);
+  }, [engine, musicxml, scoreTitle, zoom, effectiveShowChords, chords, notes, tempoBpm, skipAutoChordInfer, disposeOsmdInstance]);
 
   // Clean up OSMD instance and listeners on unmount
   useEffect(() => {
@@ -1538,7 +1833,12 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
   }, [isPlaying, isRendering]);
 
   const applyXmlEdit = useCallback(
-    (resultXml: string | null, nextTarget?: XmlNoteTarget | null, statusMsg?: string | null) => {
+    (
+      resultXml: string | null,
+      nextTarget?: XmlNoteTarget | null,
+      statusMsg?: string | null,
+      meta?: { chordsModified?: boolean; lyricsModified?: boolean },
+    ) => {
       if (!resultXml || !onMusicXmlChange) return;
       if (isPlaying) {
         onTogglePlay?.();
@@ -1555,14 +1855,474 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       }
       setPaletteStatusMsg(statusMsg ?? null);
       lastEditedXmlRef.current = resultXml;
-      onMusicXmlChange(resultXml);
+      onMusicXmlChange(resultXml, meta);
     },
     [isPlaying, onMusicXmlChange, onTogglePlay],
   );
 
-  // Focus-scoped MuseScore keyboard shortcuts when Edit Notation is active
+  const restoreScoreContainerFocus = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      scrollContainerRef.current?.focus?.({ preventScroll: true });
+    });
+  }, []);
+
+  const computeInlineAnchor = useCallback(
+    (
+      mode: "chord" | "lyric",
+      measureNumber: number,
+      onsetWhole: number,
+      noteTarget?: XmlNoteTarget | null,
+    ): { x: number; y: number } => {
+      const containerRect = containerRef.current?.getBoundingClientRect();
+      const matchedMeasure = measureRectsRef.current.find((r) => r.measureNumber === measureNumber);
+
+      let noteRect: { left: number; top: number; bottom: number } | null = null;
+      if (containerRect) {
+        const hitboxes = renderedNoteHitboxesRef.current;
+        const matchedHb =
+          (noteTarget?.noteId
+            ? hitboxes.find((hb) => hb.target.noteId === noteTarget.noteId)
+            : undefined) ??
+          hitboxes.find(
+            (hb) =>
+              hb.target.measureNumber === measureNumber &&
+              Math.abs(hb.target.onsetWhole - onsetWhole) < 0.025 &&
+              (noteTarget?.pitchMidi === null ||
+                noteTarget?.pitchMidi === undefined ||
+                hb.target.pitchMidi === noteTarget.pitchMidi),
+          );
+        if (matchedHb && typeof matchedHb.el.getBoundingClientRect === "function") {
+          const r = matchedHb.el.getBoundingClientRect();
+          if (r.width > 0 || r.height > 0 || r.left > 0) {
+            noteRect = {
+              left: r.left - containerRect.left,
+              top: r.top - containerRect.top,
+              bottom: r.bottom - containerRect.top,
+            };
+          }
+        }
+      }
+
+      if (mode === "chord") {
+        const x = noteRect?.left ?? (matchedMeasure ? matchedMeasure.left + 14 : 40);
+        const y = matchedMeasure
+          ? Math.max(8, matchedMeasure.top - 52)
+          : noteRect
+            ? Math.max(8, noteRect.top - 64)
+            : 12;
+        return { x, y };
+      }
+
+      const x = noteRect?.left ?? (matchedMeasure ? matchedMeasure.left + 14 : 40);
+      const y = noteRect
+        ? noteRect.bottom + 14
+        : matchedMeasure
+          ? matchedMeasure.top + Math.max(28, matchedMeasure.height - 26)
+          : 96;
+      return { x, y };
+    },
+    [],
+  );
+
+  const openChordEditor = useCallback(
+    (explicit?: {
+      measureNumber: number;
+      onsetWhole: number;
+      partIndex?: number;
+      existingHarmonyIndex?: number;
+      existingSymbol?: string;
+    }): boolean => {
+      const currentXml = resolvedXml ?? musicxml;
+      if (!currentXml || !onMusicXmlChange) return false;
+
+      let measureNumber: number | null = explicit?.measureNumber ?? null;
+      let onsetWhole: number | null = explicit?.onsetWhole ?? null;
+      let partIndex = explicit?.partIndex ?? 0;
+
+      if (measureNumber === null || onsetWhole === null) {
+        if (selectedTarget) {
+          measureNumber = selectedTarget.measureNumber;
+          onsetWhole = selectedTarget.onsetWhole;
+          partIndex = selectedTarget.partIndex;
+        } else if (selectedMeasureNumber !== null) {
+          measureNumber = selectedMeasureNumber;
+          const mSeg = timeline.segments.find((s) => s.measureNumber === selectedMeasureNumber);
+          onsetWhole = mSeg?.wholeNoteStart ?? 0;
+        }
+      }
+
+      if (measureNumber === null || onsetWhole === null) {
+        setPaletteStatusMsg("Select a note, beat, or measure first to add a chord symbol (Ctrl+K).");
+        return false;
+      }
+
+      if (isPlaying) {
+        onTogglePlay?.();
+      }
+      if (!effectiveShowChords) {
+        if (onToggleChordSymbols) onToggleChordSymbols(true);
+        else setLocalShowChords(true);
+      }
+      setEditMode(true);
+      setInlineLyricSession(null);
+
+      const existing = getXmlHarmonyAtPosition(currentXml, { measureNumber, onsetWhole });
+      const symbol = explicit?.existingSymbol ?? existing?.symbol ?? "";
+      setInlineChordSession({
+        measureNumber,
+        onsetWhole,
+        partIndex,
+        existingHarmonyIndex: explicit?.existingHarmonyIndex ?? existing?.harmonyIndexInMeasure,
+        hasExisting: Boolean(existing || explicit?.existingSymbol),
+        draft: symbol,
+        error: null,
+        anchor: computeInlineAnchor("chord", measureNumber, onsetWhole, selectedTarget),
+      });
+      return true;
+    },
+    [
+      resolvedXml,
+      musicxml,
+      onMusicXmlChange,
+      selectedTarget,
+      selectedMeasureNumber,
+      timeline.segments,
+      isPlaying,
+      onTogglePlay,
+      computeInlineAnchor,
+    ],
+  );
+
+  const openLyricEditor = useCallback(
+    (explicitTarget?: XmlNoteTarget | null, explicitVerse?: LyricVerseNumber): boolean => {
+      const currentXml = resolvedXml ?? musicxml;
+      if (!currentXml || !onMusicXmlChange) return false;
+
+      const resolved = resolveLyricAnchorTarget(currentXml, explicitTarget ?? selectedTarget);
+      if (!resolved.eligible) {
+        setPaletteStatusMsg(resolved.reason);
+        return false;
+      }
+
+      if (isPlaying) {
+        onTogglePlay?.();
+      }
+      const verse = explicitVerse ?? activeLyricVerse;
+      if (explicitVerse) setActiveLyricVerse(explicitVerse);
+      setEditMode(true);
+      setInlineChordSession(null);
+      setSelectedTarget(resolved.target);
+
+      const existing = getXmlNoteLyric(currentXml, resolved.target, verse);
+      setInlineLyricSession({
+        target: resolved.target,
+        verse,
+        draft: existing?.text ?? "",
+        inWord: existing?.syllabic === "middle" || existing?.syllabic === "end",
+        hasExisting: Boolean(existing && (existing.text || existing.hasExtend)),
+        existingSyllabic: existing?.syllabic ?? null,
+        error: null,
+        anchor: computeInlineAnchor(
+          "lyric",
+          resolved.target.measureNumber,
+          resolved.target.onsetWhole,
+          resolved.target,
+        ),
+      });
+      return true;
+    },
+    [
+      resolvedXml,
+      musicxml,
+      onMusicXmlChange,
+      selectedTarget,
+      isPlaying,
+      onTogglePlay,
+      activeLyricVerse,
+      computeInlineAnchor,
+    ],
+  );
+
+  const handleCommitChord = useCallback(
+    (mode: "close" | "tab" | "space") => {
+      if (!inlineChordSession) return;
+      const currentXml = resolvedXml ?? musicxml;
+      if (!currentXml) return;
+
+      const trimmed = inlineChordSession.draft.trim();
+      if (!trimmed && !inlineChordSession.hasExisting) {
+        if (mode === "close") {
+          setInlineChordSession(null);
+          restoreScoreContainerFocus();
+          return;
+        }
+        const nextBeat = advanceChordBeatPosition(currentXml, {
+          measureNumber: inlineChordSession.measureNumber,
+          onsetWhole: inlineChordSession.onsetWhole,
+          partIndex: inlineChordSession.partIndex,
+        });
+        if (!nextBeat) {
+          setInlineChordSession(null);
+          restoreScoreContainerFocus();
+          return;
+        }
+        const nextExisting = getXmlHarmonyAtPosition(currentXml, nextBeat);
+        setInlineChordSession({
+          measureNumber: nextBeat.measureNumber,
+          onsetWhole: nextBeat.onsetWhole,
+          partIndex: nextBeat.partIndex,
+          existingHarmonyIndex: nextExisting?.harmonyIndexInMeasure,
+          hasExisting: Boolean(nextExisting),
+          draft: nextExisting?.symbol ?? "",
+          error: null,
+          anchor: computeInlineAnchor("chord", nextBeat.measureNumber, nextBeat.onsetWhole),
+        });
+        return;
+      }
+
+      const res = upsertXmlHarmony(
+        currentXml,
+        {
+          measureNumber: inlineChordSession.measureNumber,
+          onsetWhole: inlineChordSession.onsetWhole,
+          existingHarmonyIndex: inlineChordSession.existingHarmonyIndex,
+        },
+        trimmed || null,
+      );
+      if (!res) return;
+      if (res.error) {
+        setInlineChordSession((prev) => (prev ? { ...prev, error: res.error! } : prev));
+        return;
+      }
+
+      applyXmlEdit(
+        res.xml,
+        selectedTarget,
+        res.symbol ? `Chord: ${res.symbol}` : "Removed chord symbol",
+        { chordsModified: true },
+      );
+
+      if (mode === "close") {
+        setInlineChordSession(null);
+        restoreScoreContainerFocus();
+        return;
+      }
+
+      const nextBeat = advanceChordBeatPosition(res.xml, {
+        measureNumber: inlineChordSession.measureNumber,
+        onsetWhole: inlineChordSession.onsetWhole,
+        partIndex: inlineChordSession.partIndex,
+      });
+      if (!nextBeat) {
+        setInlineChordSession(null);
+        restoreScoreContainerFocus();
+        return;
+      }
+      const nextExisting = getXmlHarmonyAtPosition(res.xml, nextBeat);
+      setInlineChordSession({
+        measureNumber: nextBeat.measureNumber,
+        onsetWhole: nextBeat.onsetWhole,
+        partIndex: nextBeat.partIndex,
+        existingHarmonyIndex: nextExisting?.harmonyIndexInMeasure,
+        hasExisting: Boolean(nextExisting),
+        draft: nextExisting?.symbol ?? "",
+        error: null,
+        anchor: computeInlineAnchor("chord", nextBeat.measureNumber, nextBeat.onsetWhole),
+      });
+    },
+    [
+      inlineChordSession,
+      resolvedXml,
+      musicxml,
+      applyXmlEdit,
+      selectedTarget,
+      computeInlineAnchor,
+      restoreScoreContainerFocus,
+    ],
+  );
+
+  const handleDeleteInlineChord = useCallback(() => {
+    if (!inlineChordSession) return;
+    const currentXml = resolvedXml ?? musicxml;
+    if (!currentXml) return;
+    const res = upsertXmlHarmony(
+      currentXml,
+      {
+        measureNumber: inlineChordSession.measureNumber,
+        onsetWhole: inlineChordSession.onsetWhole,
+        existingHarmonyIndex: inlineChordSession.existingHarmonyIndex,
+      },
+      null,
+    );
+    if (res && !res.error) {
+      applyXmlEdit(res.xml, selectedTarget, "Removed chord symbol", { chordsModified: true });
+    }
+    setInlineChordSession(null);
+    restoreScoreContainerFocus();
+  }, [inlineChordSession, resolvedXml, musicxml, applyXmlEdit, selectedTarget, restoreScoreContainerFocus]);
+
+  const handleCommitLyricClose = useCallback(() => {
+    if (!inlineLyricSession) return;
+    const currentXml = resolvedXml ?? musicxml;
+    const trimmed = inlineLyricSession.draft.replace(/-+$/, "").trim();
+    if (currentXml && trimmed) {
+      const syllabic: LyricSyllabic =
+        inlineLyricSession.existingSyllabic ?? (inlineLyricSession.inWord ? "end" : "single");
+      const res = setXmlNoteLyric(currentXml, inlineLyricSession.target, inlineLyricSession.verse, {
+        text: trimmed,
+        syllabic,
+      });
+      if (res?.changed) {
+        applyXmlEdit(res.xml, res.nextTarget, `Lyric (V${inlineLyricSession.verse}): ${trimmed}`, {
+          lyricsModified: true,
+        });
+      }
+    }
+    setInlineLyricSession(null);
+    restoreScoreContainerFocus();
+  }, [inlineLyricSession, resolvedXml, musicxml, applyXmlEdit, restoreScoreContainerFocus]);
+
+  const handleAdvanceLyric = useCallback(
+    (trigger: "tab" | "space" | "hyphen" | "underscore") => {
+      if (!inlineLyricSession) return;
+      const currentXml = resolvedXml ?? musicxml;
+      if (!currentXml) return;
+
+      const { target, verse, draft, inWord } = inlineLyricSession;
+
+      if (trigger === "underscore") {
+        const res = extendXmlNoteMelisma(currentXml, target, verse, draft, inWord);
+        if (!res) {
+          setInlineLyricSession((prev) =>
+            prev ? { ...prev, error: "Type a syllable or select a note with an existing syllable to extend." } : prev,
+          );
+          return;
+        }
+        applyXmlEdit(res.xml, res.nextTarget ?? res.appliedTarget, `Extended melisma (V${verse})`, {
+          lyricsModified: true,
+        });
+        if (!res.nextTarget) {
+          setInlineLyricSession(null);
+          restoreScoreContainerFocus();
+          return;
+        }
+        const nextExisting = getXmlNoteLyric(res.xml, res.nextTarget, verse);
+        setInlineLyricSession({
+          target: res.nextTarget,
+          verse,
+          draft: nextExisting?.text ?? "",
+          inWord: false,
+          hasExisting: Boolean(nextExisting && (nextExisting.text || nextExisting.hasExtend)),
+          existingSyllabic: nextExisting?.syllabic ?? null,
+          error: null,
+          anchor: computeInlineAnchor("lyric", res.nextTarget.measureNumber, res.nextTarget.onsetWhole, res.nextTarget),
+        });
+        return;
+      }
+
+      const cleanedDraft = draft.replace(/-+$/, "").trim();
+      let latestXml = currentXml;
+      let latestTarget = target;
+
+      if (trigger === "hyphen") {
+        if (!cleanedDraft) {
+          setInlineLyricSession((prev) =>
+            prev ? { ...prev, error: "Type a syllable before '-' to continue the word." } : prev,
+          );
+          return;
+        }
+        const syllabic: LyricSyllabic = inWord ? "middle" : "begin";
+        const res = setXmlNoteLyric(latestXml, latestTarget, verse, {
+          text: cleanedDraft,
+          syllabic,
+        });
+        if (res?.changed) {
+          latestXml = res.xml;
+          latestTarget = res.nextTarget;
+          applyXmlEdit(latestXml, latestTarget, `Lyric (V${verse}): ${cleanedDraft}-`, {
+            lyricsModified: true,
+          });
+        }
+      } else if (cleanedDraft) {
+        const syllabic: LyricSyllabic = inWord ? "end" : "single";
+        const res = setXmlNoteLyric(latestXml, latestTarget, verse, {
+          text: cleanedDraft,
+          syllabic,
+        });
+        if (res?.changed) {
+          latestXml = res.xml;
+          latestTarget = res.nextTarget;
+          applyXmlEdit(latestXml, latestTarget, `Lyric (V${verse}): ${cleanedDraft}`, {
+            lyricsModified: true,
+          });
+        }
+      }
+
+      const nextNoteTarget = findNextLyricNoteTarget(latestXml, latestTarget, "next");
+      if (!nextNoteTarget) {
+        setInlineLyricSession(null);
+        setPaletteStatusMsg("Reached the last note of this voice.");
+        restoreScoreContainerFocus();
+        return;
+      }
+
+      const nextExisting = getXmlNoteLyric(latestXml, nextNoteTarget, verse);
+      setSelectedTarget(nextNoteTarget);
+      setInlineLyricSession({
+        target: nextNoteTarget,
+        verse,
+        draft: nextExisting?.text ?? "",
+        inWord: trigger === "hyphen",
+        hasExisting: Boolean(nextExisting && (nextExisting.text || nextExisting.hasExtend)),
+        existingSyllabic: nextExisting?.syllabic ?? null,
+        error: null,
+        anchor: computeInlineAnchor("lyric", nextNoteTarget.measureNumber, nextNoteTarget.onsetWhole, nextNoteTarget),
+      });
+    },
+    [inlineLyricSession, resolvedXml, musicxml, applyXmlEdit, computeInlineAnchor, restoreScoreContainerFocus],
+  );
+
+  const handleDeleteInlineLyric = useCallback(() => {
+    if (!inlineLyricSession) return;
+    const currentXml = resolvedXml ?? musicxml;
+    if (!currentXml) return;
+    const res = setXmlNoteLyric(currentXml, inlineLyricSession.target, inlineLyricSession.verse, null);
+    if (res?.changed) {
+      applyXmlEdit(res.xml, res.nextTarget, `Cleared lyric (V${inlineLyricSession.verse})`, {
+        lyricsModified: true,
+      });
+    }
+    setInlineLyricSession(null);
+    restoreScoreContainerFocus();
+  }, [inlineLyricSession, resolvedXml, musicxml, applyXmlEdit, restoreScoreContainerFocus]);
+
+  const handleVerseChange = useCallback(
+    (nextVerse: LyricVerseNumber) => {
+      setActiveLyricVerse(nextVerse);
+      if (!inlineLyricSession) return;
+      const currentXml = resolvedXml ?? musicxml;
+      const existing = currentXml ? getXmlNoteLyric(currentXml, inlineLyricSession.target, nextVerse) : null;
+      setInlineLyricSession((prev) =>
+        prev
+          ? {
+              ...prev,
+              verse: nextVerse,
+              draft: existing?.text ?? "",
+              inWord: existing?.syllabic === "middle" || existing?.syllabic === "end",
+              hasExisting: Boolean(existing && (existing.text || existing.hasExtend)),
+              existingSyllabic: existing?.syllabic ?? null,
+              error: null,
+            }
+          : prev,
+      );
+    },
+    [inlineLyricSession, resolvedXml, musicxml],
+  );
+
+  // Focus-scoped MuseScore keyboard shortcuts when Edit Notation is active (plus Ctrl/Cmd+K and Ctrl/Cmd+L)
   useEffect(() => {
-    if (!editMode || !resolvedXml || !isActiveTab) return;
+    const activeXmlForShortcuts = resolvedXml ?? musicxml;
+    if (!activeXmlForShortcuts || !isActiveTab) return;
     const shortcutDurMap: Record<string, EditableNoteType> = {
       "1": "64th",
       "2": "32nd",
@@ -1579,17 +2339,48 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       const targetEl = e.target as HTMLElement | null;
       const tag = targetEl?.tagName;
       if (
+        inlineChordSession ||
+        inlineLyricSession ||
         tag === "INPUT" ||
         tag === "SELECT" ||
         tag === "TEXTAREA" ||
         targetEl?.isContentEditable ||
-        targetEl?.closest?.('[role="dialog"]') ||
+        targetEl?.closest?.('[role="dialog"], [data-inline-score-editor="true"]') ||
         document.querySelector('[role="dialog"][aria-modal="true"]')
       ) {
         return;
       }
 
       const lower = e.key.toLowerCase();
+
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && lower === "k") {
+        const canExecute =
+          Boolean(onMusicXmlChange) &&
+          (selectedTarget !== null || selectedMeasureNumber !== null);
+        if (canExecute) {
+          e.preventDefault();
+          openChordEditor();
+        } else if (editMode && onMusicXmlChange) {
+          e.preventDefault();
+          setPaletteStatusMsg("Select a note, beat, or measure first to add a chord symbol (Ctrl+K).");
+        }
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && lower === "l") {
+        if (!onMusicXmlChange) return;
+        const resolved = resolveLyricAnchorTarget(activeXmlForShortcuts, selectedTarget);
+        if (resolved.eligible) {
+          e.preventDefault();
+          openLyricEditor(resolved.target);
+        } else if (editMode || selectedTarget !== null) {
+          e.preventDefault();
+          setPaletteStatusMsg(resolved.reason);
+        }
+        return;
+      }
+
+      if (!editMode || !resolvedXml) return;
       // Preserve standard browser & global undo/redo/print/clipboard shortcuts
       if ((e.ctrlKey || e.metaKey) && ["p", "r", "s", "c", "v", "x", "z", "y", "a"].includes(lower)) {
         return;
@@ -1856,6 +2647,12 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     applyXmlEdit,
     noteInputMode,
     isActiveTab,
+    musicxml,
+    onMusicXmlChange,
+    inlineChordSession,
+    inlineLyricSession,
+    openChordEditor,
+    openLyricEditor,
   ]);
 
   const stopPreviewAudio = useCallback(() => {
@@ -2083,13 +2880,15 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       suppressNextClickRef.current = false;
       return;
     }
-    // Direct single-notehead selection works even before Edit Notation is toggled on
-    if (onMusicXmlChange) {
-      const hit = resolveNoteTargetAtEvent(e);
-      if (hit) {
-        if (isPlaying) {
-          onTogglePlay?.();
-        }
+
+    // Close open inline editors if user clicks back onto the score surface
+    if (inlineChordSession) setInlineChordSession(null);
+    if (inlineLyricSession) setInlineLyricSession(null);
+
+    // 1. Check notehead click: seeks to the clicked note's exact beat offset and selects when paused
+    const hit = resolveNoteTargetAtEvent(e);
+    if (hit) {
+      if (!isPlaying && onMusicXmlChange) {
         setEditMode(true);
         applySelectedHighlight(hit.el);
         setSelectedTarget(hit.target);
@@ -2097,34 +2896,66 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         if (hit.target.pitchMidi !== null) lastEnteredMidiRef.current = hit.target.pitchMidi;
         setSelectedMeasureNumber(null);
         setSelectedMeasureRect(null);
-        return;
       }
-      if (editMode) {
-        clearSelectedHighlight();
-        setSelectedTarget(null);
-        if (containerRef.current) {
-          const containerRect = containerRef.current.getBoundingClientRect();
-          const clickX = e.clientX - containerRect.left;
-          const clickY = e.clientY - containerRect.top;
-          const hitMeasure = measureRectsRef.current.find(
-            (r) =>
-              clickX >= r.left - 4 &&
-              clickX <= r.left + r.width + 4 &&
-              clickY >= r.top - 8 &&
-              clickY <= r.top + r.height + 8,
-          );
-          if (hitMeasure) {
-            setSelectedMeasureNumber(hitMeasure.measureNumber);
-            setSelectedMeasureRect(hitMeasure);
-            return;
-          }
+      if (onSeek) {
+        const targetSec = resolveScoreSeekSec({
+          timeline,
+          playbackSequence,
+          measureNumber: hit.target.measureNumber,
+          onsetWhole: hit.target.onsetWhole,
+          fallbackTempoBpm: tempoBpm,
+        });
+        if (targetSec !== null) {
+          onSeek(targetSec);
         }
-        setSelectedMeasureNumber(null);
-        setSelectedMeasureRect(null);
-        return;
       }
+      return;
     }
 
+    // 2. Check empty measure area via rendered measure bounding rects
+    if (containerRef.current && measureRectsRef.current.length > 0) {
+      const containerRect = containerRef.current.getBoundingClientRect();
+      const clickX = e.clientX - containerRect.left;
+      const clickY = e.clientY - containerRect.top;
+      const hitMeasure = measureRectsRef.current.find(
+        (r) =>
+          clickX >= r.left - 4 &&
+          clickX <= r.left + r.width + 4 &&
+          clickY >= r.top - 8 &&
+          clickY <= r.top + r.height + 8,
+      );
+      if (hitMeasure) {
+        if (!isPlaying && editMode && onMusicXmlChange) {
+          clearSelectedHighlight();
+          setSelectedTarget(null);
+          setSelectedMeasureNumber(hitMeasure.measureNumber);
+          setSelectedMeasureRect(hitMeasure);
+        }
+        if (onSeek) {
+          const targetSec = resolveScoreSeekSec({
+            timeline,
+            playbackSequence,
+            measureNumber: hitMeasure.measureNumber,
+            measureIndex: hitMeasure.measureIndex,
+            fallbackTempoBpm: tempoBpm,
+          });
+          if (targetSec !== null) {
+            onSeek(targetSec);
+          }
+        }
+        return;
+      }
+      // Clicked outside any valid measure: clear selection in edit mode, never corrupt playback position
+      if (!isPlaying && editMode) {
+        clearSelectedHighlight();
+        setSelectedTarget(null);
+        setSelectedMeasureNumber(null);
+        setSelectedMeasureRect(null);
+      }
+      return;
+    }
+
+    // 3. Fallback when measureRectsRef is unpopulated (e.g. lightweight mocked OSMD GraphicSheet)
     if (!onSeek || !osmdRef.current || !containerRef.current) return;
     const measureList = osmdRef.current.GraphicSheet?.MeasureList;
     if (!measureList || measureList.length === 0) return;
@@ -2132,13 +2963,9 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
     const containerRect = containerRef.current.getBoundingClientRect();
     const clickX = e.clientX - containerRect.left;
     const clickY = e.clientY - containerRect.top;
-
     const scale = 10 * zoom;
     const osmdX = clickX / scale;
     const osmdY = clickY / scale;
-
-    let bestDist = Infinity;
-    let bestWhole = 0;
 
     for (let rowIdx = 0; rowIdx < measureList.length; rowIdx++) {
       const row = measureList[rowIdx];
@@ -2147,29 +2974,75 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
       const pos = gm.PositionAndShape.AbsolutePosition;
       const size = gm.PositionAndShape.Size;
       if (!pos || !size) continue;
-      const cx = pos.x + size.width / 2;
-      const cy = pos.y + size.height / 2;
-      const dist = Math.hypot(osmdX - cx, (osmdY - cy) * 1.5);
-      if (dist < bestDist) {
-        bestDist = dist;
+      if (osmdX >= pos.x && osmdX <= pos.x + size.width && osmdY >= pos.y - 2 && osmdY <= pos.y + size.height + 2) {
         const mNum = gm.MeasureNumber ?? gm.parentSourceMeasure?.MeasureNumber;
-        const mSeg =
-          timeline.segments.find((s) => s.measureIndex === rowIdx) ??
-          (typeof mNum === "number" ? timeline.segments.find((s) => s.measureNumber === mNum) : undefined);
-        const mStart = mSeg?.wholeNoteStart ?? gm.parentSourceMeasure?.AbsoluteTimestamp?.RealValue ?? 0;
-        const mDur =
-          mSeg !== undefined
-            ? Math.max(0, mSeg.wholeNoteEnd - mSeg.wholeNoteStart)
-            : gm.parentSourceMeasure?.Duration?.RealValue ?? 0;
-        const frac = size.width > 0 ? Math.max(0, Math.min(0.95, (osmdX - pos.x) / size.width)) : 0;
-        bestWhole = mStart + frac * mDur;
+        const targetSec = resolveScoreSeekSec({
+          timeline,
+          playbackSequence,
+          measureNumber: typeof mNum === "number" ? mNum : rowIdx + 1,
+          measureIndex: rowIdx,
+          fallbackTempoBpm: tempoBpm,
+        });
+        if (targetSec !== null) {
+          onSeek(targetSec);
+        }
+        return;
       }
     }
+  };
 
-    if (Number.isFinite(bestDist) && bestDist < Infinity) {
-      const physicalSec = wholeNotesToTimeSec(timeline, bestWhole, tempoBpm);
-      const targetSec = playbackSequence ? mapPhysicalSecToPlaybackSec(playbackSequence, physicalSec) : physicalSec;
-      onSeek(targetSec);
+  const handleScoreDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!onMusicXmlChange || !(resolvedXml ?? musicxml)) return;
+    const targetEl = e.target as Element | null;
+    const containerRect = containerRef.current?.getBoundingClientRect();
+    const clickX = containerRect ? e.clientX - containerRect.left : NaN;
+    const clickY = containerRect ? e.clientY - containerRect.top : NaN;
+
+    // 1. Double-clicked a rendered chord symbol
+    const chordHit =
+      chordHitboxesRef.current.find(
+        (c) => c.el && targetEl && (c.el === targetEl || c.el.contains(targetEl)),
+      ) ??
+      (Number.isFinite(clickX) && Number.isFinite(clickY)
+        ? chordHitboxesRef.current.find(
+            (c) =>
+              clickX >= c.left - 8 &&
+              clickX <= c.left + c.width + 8 &&
+              clickY >= c.top - 8 &&
+              clickY <= c.top + c.height + 8,
+          )
+        : undefined);
+    if (chordHit) {
+      e.preventDefault();
+      e.stopPropagation();
+      openChordEditor({
+        measureNumber: chordHit.measureNumber,
+        onsetWhole: chordHit.onsetWhole,
+        partIndex: chordHit.partIndex,
+        existingHarmonyIndex: chordHit.harmonyIndexInMeasure,
+        existingSymbol: chordHit.symbol,
+      });
+      return;
+    }
+
+    // 2. Double-clicked a rendered lyric syllable
+    const lyricHit =
+      lyricHitboxesRef.current.find(
+        (l) => l.el && targetEl && (l.el === targetEl || l.el.contains(targetEl)),
+      ) ??
+      (Number.isFinite(clickX) && Number.isFinite(clickY)
+        ? lyricHitboxesRef.current.find(
+            (l) =>
+              clickX >= l.left - 8 &&
+              clickX <= l.left + l.width + 8 &&
+              clickY >= l.top - 8 &&
+              clickY <= l.top + l.height + 8,
+          )
+        : undefined);
+    if (lyricHit) {
+      e.preventDefault();
+      e.stopPropagation();
+      openLyricEditor(lyricHit.target, lyricHit.verse);
     }
   };
 
@@ -2202,6 +3075,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         isPrintingPdf={isPrintingPdf}
         canPrintPdf={canPrintPdf}
         printError={printError}
+        playbackSequence={playbackSequence}
       />
     );
   }
@@ -2456,6 +3330,14 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
                 if (!res) return;
                 applyXmlEdit(res.xml, selectedTarget, res.warning ?? null);
               }}
+              onOpenChordEditor={() => {
+                openChordEditor();
+              }}
+              onOpenLyricEditor={() => {
+                openLyricEditor();
+              }}
+              isChordEditorOpen={Boolean(inlineChordSession)}
+              isLyricEditorOpen={Boolean(inlineLyricSession)}
               onSelectDuration={(dur) => {
                 setActiveDuration(dur);
                 if (!selectedTarget) return;
@@ -2595,9 +3477,11 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
 
       <div
         ref={scrollContainerRef}
+        tabIndex={-1}
         data-testid="sheet-music-scroll-container"
         data-editable={onMusicXmlChange ? "true" : "false"}
         onClick={handleScoreClick}
+        onDoubleClick={handleScoreDoubleClick}
         onPointerDown={handleScorePointerDown}
         onPointerMove={handleScorePointerMove}
         onPointerUp={handleScorePointerUp}
@@ -2606,7 +3490,7 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
         onWheel={handleManualScrollSignal}
         onTouchMove={handleManualScrollSignal}
         onScroll={handleManualScrollSignal}
-        className={`relative w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 touch-pan-x touch-pan-y ${dragTooltip ? "select-none touch-none" : ""
+        className={`relative w-full max-w-full overflow-auto rounded-xl border border-[#27273A] bg-[#F8FAFC] p-2 sm:p-4 touch-pan-x touch-pan-y focus:outline-none ${dragTooltip ? "select-none touch-none" : ""
           } ${isFocusMode ? "flex-1 min-h-0" : "min-h-[280px] max-h-[560px]"
           } ${onSeek || editMode ? "cursor-pointer" : ""}`}
       >
@@ -2657,6 +3541,55 @@ export const SheetMusicViewer = memo(function SheetMusicViewer({
                 boxShadow: "0 0 8px rgba(59, 130, 246, 0.75)",
                 zIndex: 20,
                 pointerEvents: "none",
+              }}
+            />
+          )}
+          {inlineChordSession && (
+            <InlineScoreTextEditor
+              mode="chord"
+              anchor={inlineChordSession.anchor}
+              targetKey={`chord-${inlineChordSession.measureNumber}-${inlineChordSession.onsetWhole}`}
+              value={inlineChordSession.draft}
+              positionLabel={`m.${inlineChordSession.measureNumber}`}
+              errorMessage={inlineChordSession.error}
+              containerWidth={scrollContainerRef.current?.clientWidth || 760}
+              hasExistingValue={inlineChordSession.hasExisting}
+              onChange={(val) =>
+                setInlineChordSession((prev) => (prev ? { ...prev, draft: val, error: null } : prev))
+              }
+              onCommitAndClose={() => handleCommitChord("close")}
+              onCommitAndAdvance={(trigger) =>
+                handleCommitChord(trigger === "space" ? "space" : "tab")
+              }
+              onDelete={handleDeleteInlineChord}
+              onCancel={() => {
+                setInlineChordSession(null);
+                restoreScoreContainerFocus();
+              }}
+            />
+          )}
+          {inlineLyricSession && (
+            <InlineScoreTextEditor
+              mode="lyric"
+              anchor={inlineLyricSession.anchor}
+              targetKey={`lyric-${inlineLyricSession.target.measureNumber}-${inlineLyricSession.target.onsetWhole}-${inlineLyricSession.target.staffNumber ?? 1}`}
+              value={inlineLyricSession.draft}
+              verse={inlineLyricSession.verse}
+              inWord={inlineLyricSession.inWord}
+              positionLabel={`m.${inlineLyricSession.target.measureNumber}`}
+              errorMessage={inlineLyricSession.error}
+              containerWidth={scrollContainerRef.current?.clientWidth || 760}
+              hasExistingValue={inlineLyricSession.hasExisting}
+              onChange={(val) =>
+                setInlineLyricSession((prev) => (prev ? { ...prev, draft: val, error: null } : prev))
+              }
+              onVerseChange={handleVerseChange}
+              onCommitAndClose={handleCommitLyricClose}
+              onCommitAndAdvance={handleAdvanceLyric}
+              onDelete={handleDeleteInlineLyric}
+              onCancel={() => {
+                setInlineLyricSession(null);
+                restoreScoreContainerFocus();
               }}
             />
           )}

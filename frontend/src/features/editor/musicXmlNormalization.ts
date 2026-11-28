@@ -138,7 +138,8 @@ function sanitizeDocumentFooterLyrics(doc: Document): void {
           const rawY = lyrEl.getAttribute("default-y");
           const dy = rawY !== null ? Number.parseFloat(rawY) : NaN;
 
-          if ((Number.isFinite(dy) && dy < -150) || FOOTER_PHRASE_RE.test(txt) || isSectionLabelText(txt) || !txt) {
+          const hasExtend = lyrEl.getElementsByTagName("extend").length > 0;
+          if ((Number.isFinite(dy) && dy < -150) || FOOTER_PHRASE_RE.test(txt) || isSectionLabelText(txt) || (!txt && !hasExtend)) {
             lyrEl.parentNode?.removeChild(lyrEl);
             continue;
           }

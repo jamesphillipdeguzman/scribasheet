@@ -52,6 +52,9 @@ import {
   mapPlaybackSecToPhysicalSec,
 } from "@/features/editor/playbackSequence";
 import { parseKeySignature, respellChordSymbol, type KeyMode } from "@/lib/keySignature";
+import { parseChordSymbolStrict } from "@/lib/chordParser";
+import { extractChordsFromMusicXml, upsertXmlHarmony } from "@/features/editor/musicXmlChords";
+import { extractLyricsDataFromMusicXml } from "@/features/editor/musicXmlLyrics";
 import { applyScoreTitleToMusicXml } from "@/features/editor/musicXmlNormalization";
 import {
   loadMetronomeSettings,
@@ -77,6 +80,7 @@ import {
   resolveDisplayScoreTitle,
 } from "@/lib/utils";
 import type {
+  LyricsData,
   OmrVerificationReport,
   Project,
   ProjectScoreResponse,
@@ -165,6 +169,8 @@ export function ProjectStudioPage() {
   const [showPartMixerOverride, setShowPartMixerOverride] = useState<boolean | null>(null);
   const [playheadSec, setPlayheadSec] = useState(0);
   const [isPlaybackActive, setIsPlaybackActive] = useState(false);
+  const isPlaybackActiveRef = useRef(isPlaybackActive);
+  isPlaybackActiveRef.current = isPlaybackActive;
   const [playbackRate, setPlaybackRate] = useState(1.0);
   const [loopPlayback, setLoopPlayback] = useState(false);
   const [togglePlaySignal, setTogglePlaySignal] = useState(0);
@@ -754,19 +760,49 @@ export function ProjectStudioPage() {
     mutateScore((prev) => ({ ...prev, notes: newNotes }));
   };
 
-  const handleMusicXmlChange = (nextXml: string) => {
+  const handleMusicXmlChange = (
+    nextXml: string,
+    meta?: { chordsModified?: boolean; lyricsModified?: boolean },
+  ) => {
     if (!scoreData) return;
     const structure = extractScoreStructure(nextXml, scoreData.time_signature);
     const synced = musicXmlToScoreNotes(nextXml, scoreData.tracks, scoreData.tempo_bpm);
+    const extractedChords = extractChordsFromMusicXml(nextXml, scoreData.tempo_bpm);
+    const shouldSyncChords = Boolean(meta?.chordsModified || extractedChords.length > 0);
+    const prevLyrics = (scoreData.analysis?.lyrics as LyricsData | undefined) ?? null;
+    const extractedLyrics = extractLyricsDataFromMusicXml(nextXml, scoreData.tempo_bpm, prevLyrics);
+    const shouldSyncLyrics = Boolean(meta?.lyricsModified || extractedLyrics !== null);
+    const emptyLyrics: LyricsData = {
+      text: "",
+      segments: [],
+      language: prevLyrics?.language ?? null,
+      language_probability: prevLyrics?.language_probability ?? null,
+      source_used: prevLyrics?.source_used ?? "manual",
+      demucs_requested: prevLyrics?.demucs_requested ?? false,
+      demucs_fallback_used: prevLyrics?.demucs_fallback_used ?? false,
+      model_name: prevLyrics?.model_name ?? "manual",
+      device: prevLyrics?.device ?? "browser",
+      has_word_timestamps: false,
+      uncertain_segments: [],
+      alignment_uncertain_segments: [],
+      original_text: prevLyrics?.original_text ?? null,
+      processing_metadata: prevLyrics?.processing_metadata ?? {},
+      manually_edited: true,
+      updated_at: new Date().toISOString(),
+    };
+
     mutateScore(
       (prev) => ({
         ...prev,
         time_signature: structure.baseTimeSignature || prev.time_signature,
         notes: synced.notes,
+        ...(shouldSyncChords ? { chords: extractedChords } : {}),
         duration_seconds: Math.max(synced.durationSeconds, 0.5),
         analysis: {
           ...prev.analysis,
           structure,
+          ...(meta?.chordsModified ? { chords_edited: true } : {}),
+          ...(shouldSyncLyrics ? { lyrics: extractedLyrics ?? emptyLyrics } : {}),
         },
       }),
       nextXml,
@@ -774,10 +810,47 @@ export function ProjectStudioPage() {
   };
 
   const handleUpdateChord = (chordId: string, symbol: string) => {
-    mutateScore((prev) => ({
-      ...prev,
-      chords: prev.chords.map((c) => (c.id === chordId ? { ...c, symbol } : c)),
-    }));
+    if (!scoreData) return;
+    const targetChord = scoreData.chords.find((c) => c.id === chordId);
+    let nextXmlOverride: string | undefined;
+    let nextRoot = targetChord?.root;
+    let nextQuality = targetChord?.quality;
+    if (targetChord && musicxml) {
+      const parsed = parseChordSymbolStrict(symbol);
+      if (parsed.ok) {
+        nextRoot = parsed.chord.rootDisplay;
+        nextQuality = parsed.chord.kind;
+        const onsetWhole = (targetChord.onset_sec * ((scoreData.tempo_bpm || 120) / 60)) / 4;
+        const xmlRes = upsertXmlHarmony(
+          musicxml,
+          { measureNumber: targetChord.measure, onsetWhole },
+          parsed.chord.normalizedSymbol,
+        );
+        if (xmlRes && !xmlRes.error) {
+          nextXmlOverride = xmlRes.xml;
+        }
+      }
+    }
+    mutateScore(
+      (prev) => ({
+        ...prev,
+        chords: prev.chords.map((c) =>
+          c.id === chordId
+            ? {
+                ...c,
+                symbol,
+                ...(nextRoot ? { root: nextRoot } : {}),
+                ...(nextQuality ? { quality: nextQuality } : {}),
+              }
+            : c,
+        ),
+        analysis: {
+          ...prev.analysis,
+          chords_edited: true,
+        },
+      }),
+      nextXmlOverride,
+    );
   };
 
   const handleUpdateNoteTab = (noteId: string, stringNum: number, fretNum: number) => {
@@ -2166,10 +2239,17 @@ export function ProjectStudioPage() {
                         satbMutedVoices={satbMutedVoices}
                         onTogglePlay={() => setTogglePlaySignal((n) => n + 1)}
                         onStopPlay={() => setStopPlaySignal((n) => n + 1)}
-                        onSeek={(sec) => setSeekRequest({ sec, autoplay: isPlaybackActive, nonce: Date.now() })}
+                        onSeek={(sec) =>
+                          setSeekRequest({
+                            sec,
+                            autoplay: isPlaybackActiveRef.current,
+                            nonce: Date.now(),
+                          })
+                        }
                         isFocusMode={isFocusMode}
                         onToggleFocusMode={() => setIsFocusMode((v) => !v)}
                         onMusicXmlChange={handleMusicXmlChange}
+                        skipAutoChordInfer={Boolean(scoreData?.analysis?.chords_edited)}
                         playbackSequence={playbackSequence}
                         externalToolbarControls={true}
                         onSelectionStatusChange={setNotationSelectionStatus}
@@ -2265,6 +2345,7 @@ export function ProjectStudioPage() {
                   projectTitle={effectiveProjectTitle}
                   hasMedia={Boolean(originalAsset)}
                   activeJob={activeJob}
+                  scoreLyrics={(scoreData?.analysis?.lyrics as LyricsData | undefined) ?? null}
                   onJobStarted={(job) => setActiveJob(job)}
                   onSeek={(sec) => setSeekRequest({ sec, autoplay: true, nonce: Date.now() })}
                   onLyricsSaved={() => loadScore()}

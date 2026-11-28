@@ -1404,7 +1404,8 @@ def sanitize_omr_musicxml(
                 dy = float(raw_y) if raw_y is not None else None
             except ValueError:
                 dy = None
-            if _is_footer_or_metadata_text(txt, default_y=dy, pdf_footer_texts=pdf_footers) or _is_section_label_text(txt) or not txt:
+            has_extend = lyr.find("extend") is not None
+            if _is_footer_or_metadata_text(txt, default_y=dy, pdf_footer_texts=pdf_footers) or _is_section_label_text(txt) or (not txt and not has_extend):
                 note_el.remove(lyr)
                 removed_lyrics += 1
 

@@ -7,6 +7,12 @@ import { type KeyChangeAction, KeySignatureControl } from "@/features/editor/Key
 import { midiSynth } from "@/features/editor/midiSynth";
 import { injectChordsIntoMusicXml } from "@/features/editor/musicXmlChords";
 import { normalizeScorePayload } from "@/features/editor/musicXmlNormalization";
+import {
+  buildMusicXmlTimeline,
+  getMeasureTimeRange,
+  resolveScoreSeekSec,
+} from "@/features/editor/musicXmlTimeline";
+import type { PlaybackSequence } from "@/features/editor/playbackSequence";
 import type { KeyMode } from "@/lib/keySignature";
 import { getStoredTokens } from "@/services/api";
 import type { ScoreChord, ScoreNote, ScoreTrack } from "@/types/api";
@@ -38,6 +44,7 @@ export interface AlphaTabSheetViewerProps {
   keyFifths?: number;
   keyMode?: KeyMode;
   onApplyKeySignature?: (targetFifths: number, targetMode: KeyMode, action: KeyChangeAction) => void;
+  playbackSequence?: PlaybackSequence | null;
 }
 
 const SATB_COLORS: Record<string, string> = {
@@ -101,6 +108,7 @@ export function AlphaTabSheetViewer({
   keyFifths = 0,
   keyMode = "major",
   onApplyKeySignature,
+  playbackSequence = null,
 }: AlphaTabSheetViewerProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -148,6 +156,16 @@ export function AlphaTabSheetViewer({
   soloRef.current = satbSoloVoice;
   const mutedRef = useRef(satbMutedVoices);
   mutedRef.current = satbMutedVoices;
+  const tempoBpmRef = useRef(tempoBpm);
+  tempoBpmRef.current = tempoBpm;
+  const playbackSequenceRef = useRef(playbackSequence);
+  playbackSequenceRef.current = playbackSequence;
+  const timeline = useMemo(
+    () => buildMusicXmlTimeline(musicxml, tempoBpm),
+    [musicxml, tempoBpm],
+  );
+  const timelineRef = useRef(timeline);
+  timelineRef.current = timeline;
 
   const durationMs = useMemo(() => {
     const maxNote = notes.reduce((m, n) => Math.max(m, n.offset_sec), 0);
@@ -378,6 +396,27 @@ export function AlphaTabSheetViewer({
       unsubs.push(
         api.beatMouseDown.on((beat) => {
           if (!onSeekRef.current) return;
+          const barIdx = beat.voice?.bar?.index;
+          if (typeof barIdx === "number" && timelineRef.current.segments.length > 0) {
+            const range = getMeasureTimeRange(timelineRef.current, -1, barIdx);
+            if (range) {
+              const beatOffsetWhole =
+                typeof beat.playbackStart === "number" && Number.isFinite(beat.playbackStart)
+                  ? Math.max(0, beat.playbackStart / (960 * 4))
+                  : 0;
+              const targetSec = resolveScoreSeekSec({
+                timeline: timelineRef.current,
+                playbackSequence: playbackSequenceRef.current,
+                measureIndex: barIdx,
+                onsetWhole: Math.min(range.wholeEnd, range.wholeStart + beatOffsetWhole),
+                fallbackTempoBpm: tempoBpmRef.current,
+              });
+              if (targetSec !== null) {
+                onSeekRef.current(targetSec);
+                return;
+              }
+            }
+          }
           const startMs = beat.playbackStart;
           if (typeof startMs === "number" && Number.isFinite(startMs)) {
             onSeekRef.current(Math.max(0, startMs / 1000));
@@ -568,9 +607,7 @@ export function AlphaTabSheetViewer({
 
   // Sync AlphaTab cursor when paused/seeking/stopped
   useEffect(() => {
-    if (!isPlaying) {
-      pushExternalPosition(playheadSec);
-    }
+    pushExternalPosition(playheadSec);
   }, [playheadSec, isPlaying, pushExternalPosition]);
 
   // Smooth rAF sync to authoritative playback clock during active playback

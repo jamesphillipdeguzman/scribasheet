@@ -1125,3 +1125,31 @@ def test_put_score_persists_direct_musicxml_edits(client, db_session) -> None:
     assert "<text>Amen</text>" in data["musicxml"]
     assert "<work-title>Edited Hymn</work-title>" in data["musicxml"]
     assert '<creator type="composer">ScribaSheet</creator>' in data["musicxml"]
+
+
+def test_sanitize_omr_preserves_lyric_melisma_extend_elements():
+    melisma_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Soprano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note>
+        <pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><syllabic>single</syllabic><text>Grace</text><extend type="start"/></lyric>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type>
+        <lyric number="1"><extend type="continue"/></lyric>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>5</octave></pitch><duration>2</duration><type>half</type>
+        <lyric number="1"><extend type="stop"/></lyric>
+      </note>
+    </measure>
+  </part>
+</score-partwise>"""
+    cleaned, _ = sanitize_omr_musicxml(melisma_xml)
+    assert '<extend type="start"' in cleaned
+    assert '<extend type="continue"' in cleaned
+    assert '<extend type="stop"' in cleaned

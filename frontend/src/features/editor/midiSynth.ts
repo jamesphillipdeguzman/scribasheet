@@ -93,6 +93,7 @@ export class MidiSynthesizer {
   private lastScheduledSongTime = 0;
   private lastBeatTick = -1;
   private startToken = 0;
+  private activeOnPosition: ((sec: number) => void) | null = null;
   private sessionAllowPianoSampler = true;
   private sessionAllowSfSamplers = new Set<number>();
   private gestureListenersAttached = false;
@@ -790,6 +791,7 @@ export class MidiSynthesizer {
     this.startPerfMs = performance.now();
     this.startOffsetSec = options.fromSec;
     this.currentPlaybackRate = options.playbackRate || 1;
+    this.activeOnPosition = options.onPosition;
     this.scheduledNotes.clear();
     this.lastBeatTick = -1;
     this.activeSortedNotes = [...options.notes].sort((a, b) => a.onset_sec - b.onset_sec);
@@ -891,12 +893,46 @@ export class MidiSynthesizer {
 
   private stopPlaybackOnly() {
     this.isPlaying = false;
+    this.activeOnPosition = null;
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
     this.activeOscs.forEach((o) => o.stop());
     this.activeOscs.clear();
+  }
+
+  /**
+   * Seek seamlessly in-place during active MIDI synthesis without tearing down AudioContext,
+   * samplers, or the rAF scheduler loop.
+   */
+  public seek(toSec: number): boolean {
+    const target = Math.max(0, toSec);
+    if (!this.isPlaying) {
+      this.startOffsetSec = target;
+      return false;
+    }
+    this.activeOscs.forEach((o) => o.stop());
+    this.activeOscs.clear();
+    this.startPerfMs = performance.now();
+    this.startOffsetSec = target;
+    this.scheduledNotes.clear();
+    this.lastBeatTick = -1;
+    this.lastScheduledSongTime = target;
+    this.nextNoteIndex = 0;
+    while (
+      this.nextNoteIndex < this.activeSortedNotes.length &&
+      this.activeSortedNotes[this.nextNoteIndex].onset_sec < target - 0.01
+    ) {
+      this.nextNoteIndex += 1;
+    }
+    this.activeOnPosition?.(target);
+    return true;
+  }
+
+  /** Update the stored paused playback position without starting audio synthesis. */
+  public setPausedPosition(toSec: number): void {
+    this.startOffsetSec = Math.max(0, toSec);
   }
 
   public stop() {

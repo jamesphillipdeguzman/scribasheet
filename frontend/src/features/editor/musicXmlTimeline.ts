@@ -1,3 +1,5 @@
+import { mapPhysicalSecToPlaybackSec, type PlaybackSequence } from "@/features/editor/playbackSequence";
+
 export interface MusicXmlTimeSegment {
   wholeNoteStart: number;
   wholeNoteEnd: number;
@@ -360,4 +362,74 @@ export function findCursorSnapshotIndex(
     }
   }
   return best;
+}
+
+/**
+ * Return the full whole-note and second span of a measure from the MusicXML timeline,
+ * combining multiple intra-measure segments across tempo changes.
+ */
+export function getMeasureTimeRange(
+  timeline: MusicXmlTimeline,
+  measureNumber: number,
+  measureIndex?: number,
+): { wholeStart: number; wholeEnd: number; secStart: number; secEnd: number } | null {
+  const matching = timeline.segments.filter((seg) =>
+    typeof measureIndex === "number" && measureIndex >= 0
+      ? seg.measureIndex === measureIndex
+      : seg.measureNumber === measureNumber,
+  );
+  if (matching.length === 0) return null;
+  let wholeStart = matching[0].wholeNoteStart;
+  let wholeEnd = matching[0].wholeNoteEnd;
+  let secStart = matching[0].secStart;
+  let secEnd = matching[0].secEnd;
+  for (let i = 1; i < matching.length; i += 1) {
+    const seg = matching[i];
+    wholeStart = Math.min(wholeStart, seg.wholeNoteStart);
+    wholeEnd = Math.max(wholeEnd, seg.wholeNoteEnd);
+    secStart = Math.min(secStart, seg.secStart);
+    secEnd = Math.max(secEnd, seg.secEnd);
+  }
+  return { wholeStart, wholeEnd, secStart, secEnd };
+}
+
+/**
+ * Resolve the canonical playback target time (in seconds) for a clicked measure or notehead,
+ * accounting for pickups, time signature changes, tempo segments, note-level beat offsets,
+ * and repeats/navigation jumps.
+ */
+export function resolveScoreSeekSec(params: {
+  timeline: MusicXmlTimeline;
+  playbackSequence?: PlaybackSequence | null;
+  measureNumber?: number;
+  measureIndex?: number;
+  onsetWhole?: number | null;
+  fallbackTempoBpm?: number;
+}): number | null {
+  const {
+    timeline,
+    playbackSequence = null,
+    measureNumber,
+    measureIndex,
+    onsetWhole,
+    fallbackTempoBpm = 120,
+  } = params;
+
+  let physicalSec: number | null = null;
+  if (typeof onsetWhole === "number" && Number.isFinite(onsetWhole)) {
+    physicalSec = wholeNotesToTimeSec(timeline, onsetWhole, fallbackTempoBpm);
+  } else if (typeof measureIndex === "number" || typeof measureNumber === "number") {
+    const range = getMeasureTimeRange(timeline, measureNumber ?? -1, measureIndex);
+    if (!range) return null;
+    physicalSec = range.secStart;
+  }
+
+  if (physicalSec === null || !Number.isFinite(physicalSec)) {
+    return null;
+  }
+
+  const mapped = playbackSequence
+    ? mapPhysicalSecToPlaybackSec(playbackSequence, physicalSec)
+    : physicalSec;
+  return Math.max(0, Number(mapped.toFixed(4)));
 }

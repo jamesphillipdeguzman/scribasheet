@@ -1,4 +1,11 @@
-import { buildMusicXmlTimeline } from "@/features/editor/musicXmlTimeline";
+import {
+  formatHarmonyElementToSymbol,
+  parseChordSymbolStrict,
+  parsePitchTokenStrict,
+  type ParsedChord,
+} from "@/lib/chordParser";
+import { extractScoreStructure, getBeatUnitQuarters, getMeasureNumber } from "@/features/editor/musicXmlStructure";
+import { buildMusicXmlTimeline, wholeNotesToTimeSec } from "@/features/editor/musicXmlTimeline";
 import { respellChordSymbol, spellPitchClass } from "@/lib/keySignature";
 import type { ScoreChord, ScoreNote } from "@/types/api";
 
@@ -23,93 +30,36 @@ const CHORD_TEMPLATES: ChordTemplate[] = [
   { suffix: "sus2", kind: "suspended-second", kindText: "sus2", intervals: [0, 2, 7] },
 ];
 
-const KIND_MAP: Array<[RegExp, { kind: string; kindText: string; degrees?: Array<{ value: number; alter: number; type: string }> }]> = [
-  [/^(maj9|M9|\u03949)$/, { kind: "major-ninth", kindText: "maj9" }],
-  [/^(m9|min9|-9)$/, { kind: "minor-ninth", kindText: "m9" }],
-  [/^(9|dom9)$/, { kind: "dominant-ninth", kindText: "9" }],
-  [/^(7sus4|7sus|sus4-7|suspended-fourth-seventh)$/i, { kind: "suspended-fourth", kindText: "7sus4", degrees: [{ value: 7, alter: -1, type: "add" }] }],
-  [/^(add9|add2)$/i, { kind: "major", kindText: "add9", degrees: [{ value: 9, alter: 0, type: "add" }] }],
-  [/^(madd9|minadd9|madd2)$/i, { kind: "minor", kindText: "madd9", degrees: [{ value: 9, alter: 0, type: "add" }] }],
-  [/^(6)$/, { kind: "major-sixth", kindText: "6" }],
-  [/^(m6|min6|-6)$/, { kind: "minor-sixth", kindText: "m6" }],
-  [/^(maj7|M7|\u03947?)$/, { kind: "major-seventh", kindText: "maj7" }],
-  [/^(m7b5|\u00f87?)$/, { kind: "half-diminished", kindText: "m7b5" }],
-  [/^(dim7|\u00b07)$/, { kind: "diminished-seventh", kindText: "dim7" }],
-  [/^(m7|min7|-7)$/, { kind: "minor-seventh", kindText: "m7" }],
-  [/^(7|dom7)$/, { kind: "dominant", kindText: "7" }],
-  [/^(m|min|-|minor)$/i, { kind: "minor", kindText: "m" }],
-  [/^(dim|\u00b0|diminished)$/i, { kind: "diminished", kindText: "dim" }],
-  [/^(aug|\+|augmented)$/i, { kind: "augmented", kindText: "aug" }],
-  [/^(sus4|sus)$/i, { kind: "suspended-fourth", kindText: "sus4" }],
-  [/^(sus2)$/i, { kind: "suspended-second", kindText: "sus2" }],
-  [/^(maj|major|M)?$/i, { kind: "major", kindText: "" }],
-];
-
-function parsePitchClassName(raw: string): { step: string; alter: number } | null {
-  const m = raw.trim().match(/^([A-Ga-g])([#b\u266f\u266d]?)/);
-  if (!m) return null;
-  const step = m[1].toUpperCase();
-  const acc = m[2];
-  const alter = acc === "#" || acc === "\u266f" ? 1 : acc === "b" || acc === "\u266d" ? -1 : 0;
-  return { step, alter };
+export interface XmlHarmonyEntry {
+  measureNumber: number;
+  measureIndex: number;
+  partIndex: number;
+  onsetWhole: number;
+  beat: number;
+  symbol: string;
+  root: string;
+  quality: string;
+  harmonyIndexInMeasure: number;
 }
 
-function parseChordSymbol(symbol: string, fallbackRoot?: string, fallbackQuality?: string): {
-  rootStep: string;
-  rootAlter: number;
-  kind: string;
-  kindText: string;
-  degrees: Array<{ value: number; alter: number; type: string }>;
-  bassStep?: string;
-  bassAlter?: number;
-} | null {
-  const clean = symbol.trim();
-  if (!clean) return null;
+function parseChordWithFallback(
+  symbol: string,
+  fallbackRoot?: string,
+  fallbackQuality?: string,
+): ParsedChord | null {
+  const strict = parseChordSymbolStrict(symbol);
+  if (strict.ok) return strict.chord;
 
-  const [mainPart, bassPart] = clean.split("/");
-  const m = mainPart.match(/^([A-Ga-g])([#b\u266f\u266d]?)(.*)$/);
-  let rootStep: string;
-  let rootAlter = 0;
-  let rest = "";
-
-  if (m) {
-    rootStep = m[1].toUpperCase();
-    const acc = m[2];
-    rootAlter = acc === "#" || acc === "\u266f" ? 1 : acc === "b" || acc === "\u266d" ? -1 : 0;
-    rest = m[3].trim();
-  } else if (fallbackRoot) {
-    const parsedRoot = parsePitchClassName(fallbackRoot);
-    if (!parsedRoot) return null;
-    rootStep = parsedRoot.step;
-    rootAlter = parsedRoot.alter;
-    rest = fallbackQuality || "";
-  } else {
-    return null;
-  }
-
-  let kind = "major";
-  let kindText = "";
-  let degrees: Array<{ value: number; alter: number; type: string }> = [];
-  for (const [re, mapped] of KIND_MAP) {
-    if (re.test(rest)) {
-      kind = mapped.kind;
-      kindText = mapped.kindText;
-      degrees = mapped.degrees ?? [];
-      break;
+  if (fallbackRoot) {
+    const parsedRoot = parsePitchTokenStrict(fallbackRoot);
+    if (parsedRoot) {
+      const q = fallbackQuality?.trim() || "";
+      const combined = `${parsedRoot.display}${q === "major" ? "" : q === "minor" ? "m" : q}`;
+      const reParsed = parseChordSymbolStrict(combined);
+      if (reParsed.ok) return reParsed.chord;
     }
   }
-
-  let bassStep: string | undefined;
-  let bassAlter: number | undefined;
-  if (bassPart) {
-    const parsedBass = parsePitchClassName(bassPart);
-    if (parsedBass) {
-      bassStep = parsedBass.step;
-      bassAlter = parsedBass.alter;
-    }
-  }
-
-  return { rootStep, rootAlter, kind, kindText, degrees, bassStep, bassAlter };
+  return null;
 }
 
 function inferChordFromPitches(
@@ -131,7 +81,6 @@ function inferChordFromPitches(
       const matched = tpl.intervals.filter((iv) => relSet.has(iv)).length;
       if (matched < 2) continue;
       if (pitchClasses.length >= 3 && matched < 3) continue;
-      // Score: matched template tones - unmatched extra tones + small bonus if bass is root
       const extra = pitchClasses.length - matched;
       const rootBonus = rootPc === bassPc ? 0.35 : 0;
       const triadBonus = tpl.intervals.length === 3 && matched === 3 ? 0.15 : 0;
@@ -143,7 +92,6 @@ function inferChordFromPitches(
     }
   }
 
-  // Dyad fallback (root + 3rd) only when 2 pitch classes are present
   if (!bestSymbol && pitchClasses.length === 2) {
     for (const rootPc of pitchClasses) {
       const other = pitchClasses.find((pc) => pc !== rootPc)!;
@@ -156,7 +104,7 @@ function inferChordFromPitches(
   return bestSymbol ? { symbol: bestSymbol } : null;
 }
 
-function findTargetPart(doc: Document): Element | null {
+function findPrimaryHarmonyPart(doc: Document): { partEl: Element; partIndex: number } | null {
   const parts = Array.from(doc.getElementsByTagName("part"));
   if (parts.length === 0) return null;
 
@@ -165,11 +113,71 @@ function findTargetPart(doc: Document): Element | null {
     const id = sp.getAttribute("id");
     const name = sp.getElementsByTagName("part-name")[0]?.textContent?.trim() || "";
     if (id && /\bsoprano\b/i.test(name)) {
-      const matched = parts.find((p) => p.getAttribute("id") === id);
-      if (matched) return matched;
+      const idx = parts.findIndex((p) => p.getAttribute("id") === id);
+      if (idx >= 0) return { partEl: parts[idx], partIndex: idx };
     }
   }
-  return parts[0];
+  return { partEl: parts[0], partIndex: 0 };
+}
+
+function buildHarmonyElement(doc: Document, parsed: ParsedChord, offsetDiv?: number): Element {
+  const harmonyEl = doc.createElement("harmony");
+  const rootEl = doc.createElement("root");
+  const stepEl = doc.createElement("root-step");
+  stepEl.textContent = parsed.rootStep;
+  rootEl.appendChild(stepEl);
+  if (parsed.rootAlter !== 0) {
+    const alterEl = doc.createElement("root-alter");
+    alterEl.textContent = String(parsed.rootAlter);
+    rootEl.appendChild(alterEl);
+  }
+  harmonyEl.appendChild(rootEl);
+
+  const kindEl = doc.createElement("kind");
+  kindEl.setAttribute("text", parsed.kindText);
+  kindEl.textContent = parsed.kind;
+  harmonyEl.appendChild(kindEl);
+
+  if (parsed.bassStep) {
+    const bassEl = doc.createElement("bass");
+    const bassStepEl = doc.createElement("bass-step");
+    bassStepEl.textContent = parsed.bassStep;
+    bassEl.appendChild(bassStepEl);
+    if (parsed.bassAlter && parsed.bassAlter !== 0) {
+      const bassAlterEl = doc.createElement("bass-alter");
+      bassAlterEl.textContent = String(parsed.bassAlter);
+      bassEl.appendChild(bassAlterEl);
+    }
+    harmonyEl.appendChild(bassEl);
+  }
+
+  for (const deg of parsed.degrees) {
+    const degEl = doc.createElement("degree");
+    const valEl = doc.createElement("degree-value");
+    valEl.textContent = String(deg.value);
+    const altEl = doc.createElement("degree-alter");
+    altEl.textContent = String(deg.alter);
+    const typeEl = doc.createElement("degree-type");
+    typeEl.textContent = deg.type;
+    degEl.appendChild(valEl);
+    degEl.appendChild(altEl);
+    degEl.appendChild(typeEl);
+    harmonyEl.appendChild(degEl);
+  }
+
+  if (typeof offsetDiv === "number" && Number.isFinite(offsetDiv) && Math.round(offsetDiv) !== 0) {
+    const offEl = doc.createElement("offset");
+    offEl.textContent = String(Math.round(offsetDiv));
+    harmonyEl.appendChild(offEl);
+  }
+
+  return harmonyEl;
+}
+
+function serializeXmlDocument(doc: Document): string {
+  const serialized = new XMLSerializer().serializeToString(doc).replace(/^\uFEFF/, "").trim();
+  if (serialized.startsWith("<?xml")) return serialized;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n${serialized}`;
 }
 
 interface PlacementTarget {
@@ -190,6 +198,7 @@ export function injectChordsIntoMusicXml(
   chords: ScoreChord[] = [],
   notes: ScoreNote[] = [],
   tempoBpm = 120,
+  options?: { skipAutoInfer?: boolean },
 ): string {
   if (!xml || !xml.includes("<score-") || typeof DOMParser === "undefined" || typeof XMLSerializer === "undefined") {
     return xml;
@@ -199,8 +208,9 @@ export function injectChordsIntoMusicXml(
     const doc = new DOMParser().parseFromString(xml, "application/xml");
     if (doc.querySelector("parsererror")) return xml;
 
-    const targetPart = findTargetPart(doc);
-    if (!targetPart) return xml;
+    const target = findPrimaryHarmonyPart(doc);
+    if (!target) return xml;
+    const targetPart = target.partEl;
 
     const measures = Array.from(targetPart.getElementsByTagName("measure"));
     if (measures.length === 0) return xml;
@@ -211,7 +221,6 @@ export function injectChordsIntoMusicXml(
 
     const timeline = buildMusicXmlTimeline(xml, tempoBpm);
 
-    // Collect existing <harmony> positions and <note> insertion anchors per measure
     const existingHarmonyOffsets = new Map<number, number[]>();
     const measureNoteAnchors = new Map<number, Array<{ el: Element; quarterOffset: number }>>();
     const measureNumberToIdx = new Map<number, number>();
@@ -237,7 +246,9 @@ export function injectChordsIntoMusicXml(
       for (const child of Array.from(mEl.children)) {
         const tag = child.tagName.toLowerCase();
         if (tag === "harmony") {
-          harmOffsets.push(cursorDivs / divisions);
+          const explicitOff = Number.parseFloat(child.getElementsByTagName("offset")[0]?.textContent || "0");
+          const effDivs = cursorDivs + (Number.isFinite(explicitOff) ? explicitOff : 0);
+          harmOffsets.push(effDivs / divisions);
         } else if (tag === "note") {
           if (child.getElementsByTagName("grace").length > 0) continue;
           const durText = child.getElementsByTagName("duration")[0]?.textContent?.trim();
@@ -301,8 +312,7 @@ export function injectChordsIntoMusicXml(
           quality: ch.quality,
         });
       }
-    } else if (notes.length > 0 && timeline.segments.length > 0) {
-      // Infer chords from simultaneous SATB notes at beat positions
+    } else if (!options?.skipAutoInfer && notes.length > 0 && timeline.segments.length > 0) {
       let prevSymbol = "";
       for (let sIdx = 0; sIdx < timeline.segments.length; sIdx += 1) {
         const seg = timeline.segments[sIdx];
@@ -345,7 +355,7 @@ export function injectChordsIntoMusicXml(
         continue;
       }
 
-      const parsed = parseChordSymbol(p.symbol, p.root, p.quality);
+      const parsed = parseChordWithFallback(p.symbol, p.root, p.quality);
       if (!parsed) continue;
 
       const mEl = measures[p.measureIdx];
@@ -360,50 +370,7 @@ export function injectChordsIntoMusicXml(
         }
       }
 
-      const harmonyEl = doc.createElement("harmony");
-      const rootEl = doc.createElement("root");
-      const stepEl = doc.createElement("root-step");
-      stepEl.textContent = parsed.rootStep;
-      rootEl.appendChild(stepEl);
-      if (parsed.rootAlter !== 0) {
-        const alterEl = doc.createElement("root-alter");
-        alterEl.textContent = String(parsed.rootAlter);
-        rootEl.appendChild(alterEl);
-      }
-      harmonyEl.appendChild(rootEl);
-
-      const kindEl = doc.createElement("kind");
-      kindEl.setAttribute("text", parsed.kindText);
-      kindEl.textContent = parsed.kind;
-      harmonyEl.appendChild(kindEl);
-
-      if (parsed.bassStep) {
-        const bassEl = doc.createElement("bass");
-        const bassStepEl = doc.createElement("bass-step");
-        bassStepEl.textContent = parsed.bassStep;
-        bassEl.appendChild(bassStepEl);
-        if (parsed.bassAlter && parsed.bassAlter !== 0) {
-          const bassAlterEl = doc.createElement("bass-alter");
-          bassAlterEl.textContent = String(parsed.bassAlter);
-          bassEl.appendChild(bassAlterEl);
-        }
-        harmonyEl.appendChild(bassEl);
-      }
-
-      for (const deg of parsed.degrees) {
-        const degEl = doc.createElement("degree");
-        const valEl = doc.createElement("degree-value");
-        valEl.textContent = String(deg.value);
-        const altEl = doc.createElement("degree-alter");
-        altEl.textContent = String(deg.alter);
-        const typeEl = doc.createElement("degree-type");
-        typeEl.textContent = deg.type;
-        degEl.appendChild(valEl);
-        degEl.appendChild(altEl);
-        degEl.appendChild(typeEl);
-        harmonyEl.appendChild(degEl);
-      }
-
+      const harmonyEl = buildHarmonyElement(doc, parsed);
       if (anchorEl && anchorEl.parentNode === mEl) {
         mEl.insertBefore(harmonyEl, anchorEl);
       } else {
@@ -415,10 +382,391 @@ export function injectChordsIntoMusicXml(
     }
 
     if (!inserted) return xml;
-    const serialized = new XMLSerializer().serializeToString(doc).replace(/^\uFEFF/, "").trim();
-    if (serialized.startsWith("<?xml")) return serialized;
-    return `<?xml version="1.0" encoding="UTF-8"?>\n${serialized}`;
+    return serializeXmlDocument(doc);
   } catch {
     return xml;
   }
+}
+
+/** Extract all MusicXML `<harmony>` symbols with exact measure, beat, whole-note, and timeline second positions. */
+export function extractHarmoniesFromMusicXml(
+  xmlStr: string | null | undefined,
+  fallbackTempoBpm = 120,
+): Array<XmlHarmonyEntry & { onsetSec: number }> {
+  if (!xmlStr || typeof DOMParser === "undefined" || !xmlStr.includes("<score-")) return [];
+  let doc: Document;
+  try {
+    doc = new DOMParser().parseFromString(xmlStr, "application/xml");
+    if (doc.querySelector("parsererror")) return [];
+  } catch {
+    return [];
+  }
+
+  const timeline = buildMusicXmlTimeline(xmlStr, fallbackTempoBpm);
+  const measureStartWholeByIdx = new Map<number, number>();
+  for (const seg of timeline.segments) {
+    if (typeof seg.measureIndex === "number" && !measureStartWholeByIdx.has(seg.measureIndex)) {
+      measureStartWholeByIdx.set(seg.measureIndex, seg.wholeNoteStart);
+    }
+  }
+
+  const parts = Array.from(doc.getElementsByTagName("part"));
+  const primary = findPrimaryHarmonyPart(doc);
+  const targetPart = primary?.partEl ?? parts[0];
+  const partIndex = primary?.partIndex ?? 0;
+  if (!targetPart) return [];
+
+  const measures = Array.from(targetPart.getElementsByTagName("measure"));
+  const results: Array<XmlHarmonyEntry & { onsetSec: number }> = [];
+  let divisions = 1;
+  let beatType = 4;
+  let fallbackCurWhole = 0;
+
+  for (let mIdx = 0; mIdx < measures.length; mIdx += 1) {
+    const mEl = measures[mIdx];
+    const mNum = getMeasureNumber(mEl, mIdx);
+    const mStartWhole = measureStartWholeByIdx.get(mIdx) ?? fallbackCurWhole;
+    let cursorDivs = 0;
+    let maxDivs = 0;
+    let harmonyIdx = 0;
+
+    for (const child of Array.from(mEl.children)) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === "attributes") {
+        const divTxt = child.getElementsByTagName("divisions")[0]?.textContent;
+        const d = divTxt ? Number.parseFloat(divTxt) : NaN;
+        if (Number.isFinite(d) && d > 0) divisions = d;
+        const btTxt = child.getElementsByTagName("time")[0]?.getElementsByTagName("beat-type")[0]?.textContent;
+        const bt = btTxt ? Number.parseInt(btTxt, 10) : NaN;
+        if (Number.isFinite(bt) && bt > 0) beatType = bt;
+      } else if (tag === "backup") {
+        const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+        if (Number.isFinite(d) && d > 0) cursorDivs = Math.max(0, cursorDivs - d);
+      } else if (tag === "forward") {
+        const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+        if (Number.isFinite(d) && d > 0) {
+          cursorDivs += d;
+          maxDivs = Math.max(maxDivs, cursorDivs);
+        }
+      } else if (tag === "note") {
+        const isChord = child.getElementsByTagName("chord").length > 0;
+        const isGrace = child.getElementsByTagName("grace").length > 0;
+        if (!isChord && !isGrace) {
+          const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+          if (Number.isFinite(d) && d > 0) {
+            cursorDivs += d;
+            maxDivs = Math.max(maxDivs, cursorDivs);
+          }
+        }
+      } else if (tag === "harmony") {
+        const curHIdx = harmonyIdx++;
+        const explicitOff = Number.parseFloat(child.getElementsByTagName("offset")[0]?.textContent || "0");
+        const effDivs = Math.max(0, cursorDivs + (Number.isFinite(explicitOff) ? explicitOff : 0));
+        const onsetWhole = mStartWhole + effDivs / (divisions * 4);
+        const beatUnitQ = getBeatUnitQuarters(beatType);
+        const beat = Math.max(1, Number((1 + effDivs / divisions / beatUnitQ).toFixed(3)));
+        const formatted = formatHarmonyElementToSymbol(child);
+        if (formatted) {
+          const onsetSec = Number(wholeNotesToTimeSec(timeline, onsetWhole, fallbackTempoBpm).toFixed(4));
+          results.push({
+            measureNumber: mNum,
+            measureIndex: mIdx,
+            partIndex,
+            onsetWhole: Math.round(onsetWhole * 10000) / 10000,
+            beat,
+            symbol: formatted.symbol,
+            root: formatted.root,
+            quality: formatted.quality,
+            harmonyIndexInMeasure: curHIdx,
+            onsetSec,
+          });
+        }
+      }
+    }
+
+    fallbackCurWhole += (maxDivs > 0 ? maxDivs : divisions * 4) / (divisions * 4);
+  }
+
+  return results;
+}
+
+/** Derive canonical ScoreChord[] directly from MusicXML `<harmony>` tags. */
+export function extractChordsFromMusicXml(
+  xmlStr: string | null | undefined,
+  fallbackTempoBpm = 120,
+): ScoreChord[] {
+  return extractHarmoniesFromMusicXml(xmlStr, fallbackTempoBpm).map((h, idx) => ({
+    id: `chord_m${h.measureNumber}_${idx}_${Math.round(h.onsetWhole * 1000)}`,
+    measure: h.measureNumber,
+    beat: h.beat,
+    onset_sec: h.onsetSec,
+    symbol: h.symbol,
+    root: h.root,
+    quality: h.quality,
+  }));
+}
+
+/** Find an existing `<harmony>` at a specific measure and beat offset. */
+export function getXmlHarmonyAtPosition(
+  xmlStr: string | null | undefined,
+  target: { measureNumber: number; onsetWhole: number; toleranceWhole?: number },
+): XmlHarmonyEntry | null {
+  const harmonies = extractHarmoniesFromMusicXml(xmlStr);
+  const tol = target.toleranceWhole ?? 0.032; // ~1/32nd whole note tolerance
+  let best: XmlHarmonyEntry | null = null;
+  let bestDist = Infinity;
+  for (const h of harmonies) {
+    if (h.measureNumber !== target.measureNumber) continue;
+    const d = Math.abs(h.onsetWhole - target.onsetWhole);
+    if (d <= tol && d < bestDist) {
+      bestDist = d;
+      best = h;
+    }
+  }
+  return best;
+}
+
+/**
+ * Insert, update, or delete a MusicXML `<harmony>` symbol at an exact measure and whole-note beat
+ * without altering any note durations, voices, or measure timing.
+ */
+export function upsertXmlHarmony(
+  xmlStr: string,
+  target: { measureNumber: number; onsetWhole: number; existingHarmonyIndex?: number },
+  chordSymbol: string | null,
+): { xml: string; symbol: string | null; parsed: ParsedChord | null; error?: string } | null {
+  if (!xmlStr || typeof DOMParser === "undefined" || typeof XMLSerializer === "undefined") {
+    return null;
+  }
+  let doc: Document;
+  try {
+    doc = new DOMParser().parseFromString(xmlStr, "application/xml");
+    if (doc.querySelector("parsererror")) return null;
+  } catch {
+    return null;
+  }
+
+  const trimmed = (chordSymbol ?? "").trim();
+  let parsedChord: ParsedChord | null = null;
+  if (trimmed.length > 0) {
+    const res = parseChordSymbolStrict(trimmed);
+    if (!res.ok) {
+      return { xml: xmlStr, symbol: null, parsed: null, error: res.error };
+    }
+    parsedChord = res.chord;
+  }
+
+  const primary = findPrimaryHarmonyPart(doc);
+  if (!primary) return null;
+  const targetPart = primary.partEl;
+  const measures = Array.from(targetPart.getElementsByTagName("measure"));
+  const timeline = buildMusicXmlTimeline(xmlStr, 120);
+  const measureStartWholeByIdx = new Map<number, number>();
+  for (const seg of timeline.segments) {
+    if (typeof seg.measureIndex === "number" && !measureStartWholeByIdx.has(seg.measureIndex)) {
+      measureStartWholeByIdx.set(seg.measureIndex, seg.wholeNoteStart);
+    }
+  }
+
+  let divisions = 1;
+  let fallbackCurWhole = 0;
+
+  for (let mIdx = 0; mIdx < measures.length; mIdx += 1) {
+    const mEl = measures[mIdx];
+    const mNum = getMeasureNumber(mEl, mIdx);
+    const mStartWhole = measureStartWholeByIdx.get(mIdx) ?? fallbackCurWhole;
+
+    let maxDivs = 0;
+    let scanDivs = 0;
+    for (const ch of Array.from(mEl.children)) {
+      const tag = ch.tagName.toLowerCase();
+      if (tag === "attributes") {
+        const divTxt = ch.getElementsByTagName("divisions")[0]?.textContent;
+        const d = divTxt ? Number.parseFloat(divTxt) : NaN;
+        if (Number.isFinite(d) && d > 0) divisions = d;
+      } else if (tag === "backup") {
+        const d = Number.parseFloat(ch.getElementsByTagName("duration")[0]?.textContent || "0");
+        if (Number.isFinite(d) && d > 0) scanDivs = Math.max(0, scanDivs - d);
+      } else if (tag === "forward") {
+        const d = Number.parseFloat(ch.getElementsByTagName("duration")[0]?.textContent || "0");
+        if (Number.isFinite(d) && d > 0) {
+          scanDivs += d;
+          maxDivs = Math.max(maxDivs, scanDivs);
+        }
+      } else if (tag === "note") {
+        const isChord = ch.getElementsByTagName("chord").length > 0;
+        const isGrace = ch.getElementsByTagName("grace").length > 0;
+        if (!isChord && !isGrace) {
+          const d = Number.parseFloat(ch.getElementsByTagName("duration")[0]?.textContent || "0");
+          if (Number.isFinite(d) && d > 0) {
+            scanDivs += d;
+            maxDivs = Math.max(maxDivs, scanDivs);
+          }
+        }
+      }
+    }
+
+    if (mNum !== target.measureNumber) {
+      fallbackCurWhole += (maxDivs > 0 ? maxDivs : divisions * 4) / (divisions * 4);
+      continue;
+    }
+
+    const desiredLocalWhole = Math.max(0, target.onsetWhole - mStartWhole);
+    const desiredLocalDivs = Math.round(desiredLocalWhole * divisions * 4);
+
+    // Track first pass through the measure to find existing <harmony> & anchor <note>/<forward> positions
+    let cursorDivs = 0;
+    let passedFirstVoice = false;
+    let matchedHarmony: Element | null = null;
+    let bestHarmonyDist = Infinity;
+    let harmonyCounter = 0;
+    let insertBeforeNode: Element | null = null;
+    let anchorDivsAtInsert = 0;
+
+    for (const child of Array.from(mEl.children)) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === "harmony") {
+        const hIdx = harmonyCounter++;
+        const explicitOff = Number.parseFloat(child.getElementsByTagName("offset")[0]?.textContent || "0");
+        const effDivs = cursorDivs + (Number.isFinite(explicitOff) ? explicitOff : 0);
+        if (target.existingHarmonyIndex !== undefined && hIdx === target.existingHarmonyIndex) {
+          matchedHarmony = child;
+          anchorDivsAtInsert = cursorDivs;
+        } else {
+          const dist = Math.abs(effDivs - desiredLocalDivs);
+          if (dist <= Math.max(1, divisions * 0.125) && dist < bestHarmonyDist) {
+            bestHarmonyDist = dist;
+            matchedHarmony = child;
+            anchorDivsAtInsert = cursorDivs;
+          }
+        }
+      } else if (tag === "backup") {
+        passedFirstVoice = true;
+        if (!insertBeforeNode) {
+          insertBeforeNode = child;
+          anchorDivsAtInsert = cursorDivs;
+        }
+        const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+        if (Number.isFinite(d) && d > 0) cursorDivs = Math.max(0, cursorDivs - d);
+      } else if (!passedFirstVoice && (tag === "note" || tag === "forward")) {
+        const isChord = tag === "note" && child.getElementsByTagName("chord").length > 0;
+        const isGrace = tag === "note" && child.getElementsByTagName("grace").length > 0;
+        if (!isChord && !isGrace) {
+          const d = Number.parseFloat(child.getElementsByTagName("duration")[0]?.textContent || "0");
+          const safeDur = Number.isFinite(d) && d > 0 ? d : 0;
+          if (!insertBeforeNode && cursorDivs + 0.01 >= desiredLocalDivs) {
+            insertBeforeNode = child;
+            anchorDivsAtInsert = cursorDivs;
+          }
+          // If desired position falls INSIDE this note (after start, before end), anchor BEFORE this note with positive <offset>
+          if (
+            !insertBeforeNode &&
+            desiredLocalDivs > cursorDivs &&
+            desiredLocalDivs < cursorDivs + safeDur
+          ) {
+            insertBeforeNode = child;
+            anchorDivsAtInsert = cursorDivs;
+          }
+          cursorDivs += safeDur;
+        }
+      } else if (!passedFirstVoice && tag === "barline" && !insertBeforeNode) {
+        insertBeforeNode = child;
+        anchorDivsAtInsert = cursorDivs;
+      }
+    }
+
+    if (!insertBeforeNode) {
+      anchorDivsAtInsert = cursorDivs;
+    }
+
+    if (!parsedChord) {
+      if (matchedHarmony) {
+        matchedHarmony.parentNode?.removeChild(matchedHarmony);
+      }
+      return { xml: serializeXmlDocument(doc), symbol: null, parsed: null };
+    }
+
+    if (matchedHarmony) {
+      const explicitOff = Number.parseFloat(matchedHarmony.getElementsByTagName("offset")[0]?.textContent || "0");
+      const preservedOffset = Number.isFinite(explicitOff) && Math.round(explicitOff) !== 0 ? explicitOff : undefined;
+      const replacement = buildHarmonyElement(doc, parsedChord, preservedOffset);
+      mEl.insertBefore(replacement, matchedHarmony);
+      matchedHarmony.parentNode?.removeChild(matchedHarmony);
+      return {
+        xml: serializeXmlDocument(doc),
+        symbol: parsedChord.normalizedSymbol,
+        parsed: parsedChord,
+      };
+    }
+
+    const offsetDiv = desiredLocalDivs - anchorDivsAtInsert;
+    const nextHarmony = buildHarmonyElement(
+      doc,
+      parsedChord,
+      Math.abs(offsetDiv) >= Math.max(1, divisions * 0.05) ? offsetDiv : undefined,
+    );
+    if (insertBeforeNode && insertBeforeNode.parentNode === mEl) {
+      mEl.insertBefore(nextHarmony, insertBeforeNode);
+    } else {
+      mEl.appendChild(nextHarmony);
+    }
+    return {
+      xml: serializeXmlDocument(doc),
+      symbol: parsedChord.normalizedSymbol,
+      parsed: parsedChord,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Advance to the next beat position in the score (respecting measure beat units, pickup lengths,
+ * and meter changes) for Tab / Space chord-entry progression.
+ */
+export function advanceChordBeatPosition(
+  xmlStr: string,
+  current: { measureNumber: number; onsetWhole: number; partIndex?: number },
+): { measureNumber: number; onsetWhole: number; partIndex: number } | null {
+  const structure = extractScoreStructure(xmlStr);
+  const timeline = buildMusicXmlTimeline(xmlStr, 120);
+  if (structure.measures.length === 0) return null;
+
+  const measureRanges = new Map<number, { wholeStart: number; wholeEnd: number }>();
+  for (const seg of timeline.segments) {
+    const prev = measureRanges.get(seg.measureNumber);
+    if (!prev) {
+      measureRanges.set(seg.measureNumber, { wholeStart: seg.wholeNoteStart, wholeEnd: seg.wholeNoteEnd });
+    } else {
+      prev.wholeEnd = Math.max(prev.wholeEnd, seg.wholeNoteEnd);
+    }
+  }
+
+  const mIdx = structure.measures.findIndex((m) => m.measureNumber === current.measureNumber);
+  if (mIdx < 0) return null;
+  const curMeasure = structure.measures[mIdx];
+  const range = measureRanges.get(curMeasure.measureNumber);
+  if (!range) return null;
+
+  const beatWhole = getBeatUnitQuarters(curMeasure.timeBeatType) / 4;
+  const nextBeatWhole = Math.round((current.onsetWhole + beatWhole) * 10000) / 10000;
+
+  if (nextBeatWhole < range.wholeEnd - 0.015) {
+    return {
+      measureNumber: curMeasure.measureNumber,
+      onsetWhole: nextBeatWhole,
+      partIndex: current.partIndex ?? 0,
+    };
+  }
+
+  const nextMeasure = structure.measures[mIdx + 1];
+  if (!nextMeasure) return null;
+  const nextRange = measureRanges.get(nextMeasure.measureNumber);
+  if (!nextRange) return null;
+
+  return {
+    measureNumber: nextMeasure.measureNumber,
+    onsetWhole: Math.round(nextRange.wholeStart * 10000) / 10000,
+    partIndex: current.partIndex ?? 0,
+  };
 }

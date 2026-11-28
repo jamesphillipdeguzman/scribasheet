@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -22,6 +22,7 @@ interface Props {
   projectTitle: string;
   hasMedia: boolean;
   activeJob: TranscriptionJob | null;
+  scoreLyrics?: LyricsData | null;
   onJobStarted?: (job: TranscriptionJob) => void;
   onSeek?: (sec: number) => void;
   onLyricsSaved?: () => void;
@@ -39,6 +40,7 @@ export function LyricsPanel({
   projectTitle,
   hasMedia,
   activeJob,
+  scoreLyrics = null,
   onJobStarted,
   onSeek,
   onLyricsSaved,
@@ -63,22 +65,41 @@ export function LyricsPanel({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  const scoreLyricsRef = useRef(scoreLyrics);
+  scoreLyricsRef.current = scoreLyrics;
+
   const loadLyrics = async () => {
     setLoading(true);
     setError(null);
     try {
       const data = await api.getLyrics(projectId);
-      setLyrics(data);
-      setDraftText(data.text || "");
-      setDraftSegments(data.segments || []);
+      const localCanonical = scoreLyricsRef.current;
+      const serverTs = data.updated_at ? Date.parse(data.updated_at) : 0;
+      const localTs = localCanonical?.updated_at ? Date.parse(localCanonical.updated_at) : 0;
+      const preferred =
+        localCanonical &&
+        (localCanonical.text.trim() || (localCanonical.segments?.length ?? 0) > 0) &&
+        (!data.text.trim() || localTs > serverTs)
+          ? localCanonical
+          : data;
+      setLyrics(preferred);
+      setDraftText(preferred.text || "");
+      setDraftSegments(preferred.segments || []);
       setSegmentsDirty(false);
       setBoundaryMismatch(false);
       setEditingSegmentId(null);
-      if (data.language) {
-        setSelectedLang(data.language);
+      if (preferred.language) {
+        setSelectedLang(preferred.language);
       }
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Failed to load lyrics.");
+      if (scoreLyricsRef.current) {
+        const local = scoreLyricsRef.current;
+        setLyrics(local);
+        setDraftText(local.text || "");
+        setDraftSegments(local.segments || []);
+      } else {
+        setError(err instanceof ApiError ? err.message : "Failed to load lyrics.");
+      }
     } finally {
       setLoading(false);
     }
@@ -87,6 +108,17 @@ export function LyricsPanel({
   useEffect(() => {
     loadLyrics();
   }, [projectId]);
+
+  useEffect(() => {
+    if (!scoreLyrics) return;
+    setLyrics(scoreLyrics);
+    setDraftText(scoreLyrics.text || "");
+    setDraftSegments(scoreLyrics.segments || []);
+    setSegmentsDirty(false);
+    setBoundaryMismatch(false);
+    setEditingSegmentId(null);
+    setLoading(false);
+  }, [scoreLyrics]);
 
   const isLyricsJobRunning = Boolean(
     activeJob &&

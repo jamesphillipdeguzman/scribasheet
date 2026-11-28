@@ -94,6 +94,10 @@ export function WaveformPlayer({
     !isScoreOnly && mediaAssetId ? "original" : "midi",
   );
   const [isPlaying, setIsPlaying] = useState(false);
+  const playheadSecRef = useRef(playheadSec);
+  playheadSecRef.current = playheadSec;
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
   const [playbackRate, setPlaybackRate] = useState(1.0);
   const [volume, setVolume] = useState(0.8);
   const [loop, setLoop] = useState(false);
@@ -261,7 +265,7 @@ export function WaveformPlayer({
 
   const playAttemptRef = useRef(0);
 
-  const startMidiPlayback = async (fromSec: number) => {
+  const startMidiPlayback = async (fromSec: number, opts?: { skipCountIn?: boolean }) => {
     const attemptId = ++playAttemptRef.current;
     if (wsRef.current?.isPlaying()) wsRef.current.pause();
 
@@ -294,6 +298,7 @@ export function WaveformPlayer({
     };
 
     if (
+      !opts?.skipCountIn &&
       metronomeSettings.enabled &&
       (metronomeSettings.countInBars === 1 || metronomeSettings.countInBars === 2)
     ) {
@@ -316,17 +321,26 @@ export function WaveformPlayer({
   useEffect(() => {
     if (!seekRequest) return;
     const target = Math.max(0, seekRequest.sec);
+    playheadSecRef.current = target;
     onPlayheadChange(target);
     if (sourceMode === "original" && wsRef.current) {
       const dur = wsRef.current.getDuration() || durationSeconds || 1;
       wsRef.current.seekTo(Math.min(1, target / Math.max(0.01, dur)));
       if (seekRequest.autoplay) {
         midiSynth.stop();
-        void wsRef.current.play();
+        if (!wsRef.current.isPlaying()) {
+          void wsRef.current.play();
+        }
         setIsPlaying(true);
       }
     } else if (seekRequest.autoplay) {
-      startMidiPlayback(target);
+      if (midiSynth.getPlaybackClock().isPlaying && midiSynth.seek(target)) {
+        setIsPlaying(true);
+      } else {
+        void startMidiPlayback(target, { skipCountIn: true });
+      }
+    } else {
+      midiSynth.setPausedPosition(target);
     }
   }, [seekRequest?.nonce]);
 
@@ -341,7 +355,7 @@ export function WaveformPlayer({
   };
 
   const togglePlay = () => {
-    if (isPlaying) {
+    if (isPlayingRef.current) {
       stopAll();
       return;
     }
@@ -351,7 +365,7 @@ export function WaveformPlayer({
       wsRef.current.play();
       setIsPlaying(true);
     } else {
-      void startMidiPlayback(playheadSec);
+      void startMidiPlayback(playheadSecRef.current);
     }
   };
 
@@ -370,7 +384,7 @@ export function WaveformPlayer({
           target.tagName === "SELECT" ||
           target.isContentEditable ||
           (typeof target.closest === "function" &&
-            target.closest('input, textarea, select, [contenteditable="true"]') !== null))
+            target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"], [data-inline-score-editor="true"]') !== null))
       ) {
         return;
       }
