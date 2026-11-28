@@ -34,6 +34,29 @@ export interface YouTubeMetadataResult {
   error?: string;
 }
 
+export interface YouTubeBatchValidItem {
+  rawUrl: string;
+  videoId: string;
+  canonicalUrl: string;
+  thumbnailUrl: string;
+}
+
+export interface YouTubeBatchInvalidItem {
+  rawUrl: string;
+  error: string;
+}
+
+export interface YouTubeBatchDuplicateItem {
+  rawUrl: string;
+  videoId: string;
+}
+
+export interface YouTubeBatchParseResult {
+  validItems: YouTubeBatchValidItem[];
+  duplicateInBatch: YouTubeBatchDuplicateItem[];
+  invalidItems: YouTubeBatchInvalidItem[];
+}
+
 export function isValidYouTubeVideoId(videoId: string | null | undefined): videoId is string {
   return typeof videoId === "string" && YOUTUBE_VIDEO_ID_REGEX.test(videoId.trim());
 }
@@ -43,9 +66,17 @@ export function getDefaultYouTubeThumbnail(videoId: string): string {
 }
 
 export function extractYouTubeVideoId(rawInput: string): YouTubeUrlParseResult {
-  const trimmed = rawInput.trim();
+  let trimmed = rawInput.trim().replace(/^[[(<"']+|[)\]>,"';]+$/g, "");
   if (!trimmed) {
     return { valid: false, error: "Please enter a YouTube video URL." };
+  }
+
+  // Allow protocol-less YouTube URLs such as youtu.be/<id> or www.youtube.com/watch?v=<id>
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+    const firstSegment = trimmed.split("/")[0].toLowerCase();
+    if (ALLOWED_YOUTUBE_HOSTS.has(firstSegment)) {
+      trimmed = `https://${trimmed}`;
+    }
   }
 
   let parsed: URL;
@@ -98,6 +129,39 @@ export function extractYouTubeVideoId(rawInput: string): YouTubeUrlParseResult {
     canonicalUrl: `https://www.youtube.com/watch?v=${cleanId}`,
     thumbnailUrl: getDefaultYouTubeThumbnail(cleanId),
   };
+}
+
+export function parseYouTubeUrlsBatch(rawInput: string): YouTubeBatchParseResult {
+  const tokens = rawInput
+    .split(/[\s,]+/)
+    .map((t) => t.trim().replace(/^[[(<"']+|[)\]>,"';]+$/g, ""))
+    .filter(Boolean);
+
+  const validItems: YouTubeBatchValidItem[] = [];
+  const duplicateInBatch: YouTubeBatchDuplicateItem[] = [];
+  const invalidItems: YouTubeBatchInvalidItem[] = [];
+  const seenIds = new Set<string>();
+
+  for (const token of tokens) {
+    const res = extractYouTubeVideoId(token);
+    if (!res.valid) {
+      invalidItems.push({ rawUrl: token, error: res.error });
+      continue;
+    }
+    if (seenIds.has(res.videoId)) {
+      duplicateInBatch.push({ rawUrl: token, videoId: res.videoId });
+      continue;
+    }
+    seenIds.add(res.videoId);
+    validItems.push({
+      rawUrl: token,
+      videoId: res.videoId,
+      canonicalUrl: res.canonicalUrl,
+      thumbnailUrl: res.thumbnailUrl,
+    });
+  }
+
+  return { validItems, duplicateInBatch, invalidItems };
 }
 
 export async function fetchYouTubeMetadata(videoId: string): Promise<YouTubeMetadataResult> {
@@ -174,4 +238,38 @@ export async function fetchYouTubeMetadata(videoId: string): Promise<YouTubeMeta
     thumbnailUrl: defaultThumb,
     error: "Metadata could not be fetched automatically. You can enter title and composer details manually.",
   };
+}
+
+export async function fetchYouTubeMetadataBatch(
+  videoIds: string[],
+  concurrency = 3,
+): Promise<Map<string, YouTubeMetadataResult>> {
+  const uniqueIds = Array.from(new Set(videoIds.filter((id) => isValidYouTubeVideoId(id))));
+  const results = new Map<string, YouTubeMetadataResult>();
+  if (uniqueIds.length === 0) return results;
+
+  let cursor = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), uniqueIds.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (cursor < uniqueIds.length) {
+      const idx = cursor++;
+      const vid = uniqueIds[idx];
+      try {
+        const meta = await fetchYouTubeMetadata(vid);
+        results.set(vid, meta);
+      } catch {
+        results.set(vid, {
+          fetched: false,
+          videoId: vid,
+          title: null,
+          authorName: null,
+          thumbnailUrl: getDefaultYouTubeThumbnail(vid),
+          error: "Metadata unavailable; using default title.",
+        });
+      }
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
 }

@@ -50,7 +50,38 @@ export interface TrackDraftInput {
   durationSec?: number | null;
 }
 
-export type SyncStatus = "local" | "syncing" | "synced" | "offline";
+export type SyncStatus = "local" | "syncing" | "synced" | "pending";
+
+export interface BatchAddTracksResult {
+  ok: boolean;
+  addedTracks: PlaylistTrack[];
+  skippedDuplicates: string[];
+  failedItems: Array<{ title: string; reason: string }>;
+  error?: string;
+}
+
+const PENDING_SYNC_KEY = "scribasheet_playlists_pending_sync";
+
+function readPendingSyncFlag(): boolean {
+  try {
+    return window.localStorage?.getItem?.(PENDING_SYNC_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writePendingSyncFlag(pending: boolean): void {
+  try {
+    if (typeof window.localStorage?.setItem !== "function") return;
+    if (pending) {
+      window.localStorage.setItem(PENDING_SYNC_KEY, "true");
+    } else {
+      window.localStorage.removeItem(PENDING_SYNC_KEY);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 export interface PlaylistContextValue {
   library: PlaylistLibraryState;
@@ -60,6 +91,8 @@ export interface PlaylistContextValue {
   storageNotice: string | null;
   dismissStorageNotice: () => void;
   syncStatus: SyncStatus;
+  lastSyncError: string | null;
+  retrySyncNow: () => Promise<boolean>;
 
   // Category CRUD
   addCategory: (name: string) => PlaylistCategory | null;
@@ -82,6 +115,11 @@ export interface PlaylistContextValue {
     draft: TrackDraftInput,
     options?: { allowDuplicate?: boolean },
   ) => { ok: boolean; track?: PlaylistTrack; duplicate?: boolean; error?: string };
+  addTracksToPlaylist: (
+    playlistId: string,
+    drafts: TrackDraftInput[],
+    options?: { allowDuplicate?: boolean },
+  ) => BatchAddTracksResult;
   updateTrack: (
     playlistId: string,
     trackId: string,
@@ -153,7 +191,10 @@ export function PlaylistProvider({ children }: { children: React.ReactNode }) {
     }
     return null;
   });
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>("local");
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(() =>
+    readPendingSyncFlag() ? "pending" : "local",
+  );
+  const [lastSyncError, setLastSyncError] = useState<string | null>(null);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(
     () => initialLoad.library.playlists[0]?.id ?? null,
   );
@@ -198,6 +239,8 @@ export function PlaylistProvider({ children }: { children: React.ReactNode }) {
 
   const syncTimerRef = useRef<number | null>(null);
   const hasHydratedRemoteRef = useRef<string | null>(null);
+  const mutationVersionRef = useRef(0);
+  const pendingSyncRef = useRef<boolean>(readPendingSyncFlag());
 
   const activePlaylist = useMemo(
     () => library.playlists.find((p) => p.id === activePlaylistId) ?? null,
@@ -227,148 +270,268 @@ export function PlaylistProvider({ children }: { children: React.ReactNode }) {
     }
   }, [library.playlists, selectedPlaylistId]);
 
-  const scheduleRemoteSync = useCallback(
-    (nextLib: PlaylistLibraryState) => {
-      if (!user) return;
-      if (syncTimerRef.current) {
-        window.clearTimeout(syncTimerRef.current);
-      }
+  const executeRemoteSync = useCallback(
+    async (snapshot: PlaylistLibraryState, versionAtEnqueue: number): Promise<boolean> => {
+      if (!user) return false;
       setSyncStatus("syncing");
-      syncTimerRef.current = window.setTimeout(() => {
-        void api
-          .syncPlaylistLibrary({
-            schemaVersion: nextLib.schemaVersion,
-            categories: nextLib.categories,
-            playlists: nextLib.playlists,
-            preferences: nextLib.preferences as unknown as Record<string, unknown>,
-          })
-          .then((remote) => {
-            setSyncStatus("synced");
-            const remoteByClientId = new Map(
-              (remote.playlists || []).map((rp) => [String(rp.id || ""), rp]),
-            );
-            setLibrary((curr) => {
-              let changed = false;
-              const nextPlaylists = curr.playlists.map((pl) => {
-                const matched = remoteByClientId.get(pl.id);
-                if (!matched) return pl;
-                const nextServerId =
-                  typeof matched.serverId === "string" ? matched.serverId : pl.serverId ?? null;
-                const nextIsShared = Boolean(matched.isShared && matched.shareToken);
-                const nextToken =
-                  nextIsShared && typeof matched.shareToken === "string"
-                    ? matched.shareToken
-                    : null;
-                const nextSharedAt =
-                  nextIsShared && typeof matched.sharedAt === "string" ? matched.sharedAt : null;
-                if (
-                  pl.serverId !== nextServerId ||
-                  Boolean(pl.isShared) !== nextIsShared ||
-                  (pl.shareToken ?? null) !== nextToken
-                ) {
-                  changed = true;
-                  return {
-                    ...pl,
-                    serverId: nextServerId,
-                    isShared: nextIsShared,
-                    shareToken: nextToken,
-                    sharedAt: nextSharedAt,
-                  };
-                }
-                return pl;
-              });
-              if (!changed) return curr;
-              const updated = { ...curr, playlists: nextPlaylists };
-              savePlaylistLibrary(updated);
-              return updated;
-            });
-          })
-          .catch(() => {
-            setSyncStatus("local");
-          });
-      }, 450);
+      try {
+        const remote = await api.syncPlaylistLibrary({
+          schemaVersion: snapshot.schemaVersion,
+          categories: snapshot.categories,
+          playlists: snapshot.playlists,
+          preferences: snapshot.preferences as unknown as Record<string, unknown>,
+        });
+
+        const remoteByClientId = new Map(
+          (remote.playlists || []).map((rp) => [String(rp.id || ""), rp]),
+        );
+        const latest = libraryRef.current;
+        let metaChanged = false;
+        const reconciledPlaylists = latest.playlists.map((pl) => {
+          const matched = remoteByClientId.get(pl.id);
+          if (!matched) return pl;
+          const nextServerId =
+            typeof matched.serverId === "string" ? matched.serverId : pl.serverId ?? null;
+          const nextIsShared = Boolean(matched.isShared && matched.shareToken);
+          const nextToken =
+            nextIsShared && typeof matched.shareToken === "string" ? matched.shareToken : null;
+          const nextSharedAt =
+            nextIsShared && typeof matched.sharedAt === "string" ? matched.sharedAt : null;
+          if (
+            pl.serverId !== nextServerId ||
+            Boolean(pl.isShared) !== nextIsShared ||
+            (pl.shareToken ?? null) !== nextToken
+          ) {
+            metaChanged = true;
+            return {
+              ...pl,
+              serverId: nextServerId,
+              isShared: nextIsShared,
+              shareToken: nextToken,
+              sharedAt: nextSharedAt,
+            };
+          }
+          return pl;
+        });
+        if (metaChanged) {
+          const reconciled: PlaylistLibraryState = {
+            ...latest,
+            playlists: reconciledPlaylists,
+          };
+          libraryRef.current = reconciled;
+          setLibrary(reconciled);
+          savePlaylistLibrary(reconciled);
+        }
+
+        if (versionAtEnqueue >= mutationVersionRef.current) {
+          pendingSyncRef.current = false;
+          writePendingSyncFlag(false);
+          setLastSyncError(null);
+          setSyncStatus("synced");
+        }
+        return true;
+      } catch (err) {
+        pendingSyncRef.current = true;
+        writePendingSyncFlag(true);
+        setLastSyncError(
+          err instanceof Error
+            ? err.message
+            : "Cloud sync temporarily unavailable; saved locally.",
+        );
+        setSyncStatus("pending");
+        return false;
+      }
     },
     [user],
   );
+
+  const scheduleRemoteSync = useCallback(
+    (nextLib: PlaylistLibraryState, versionAtEnqueue: number, immediate = false) => {
+      if (!user) {
+        setSyncStatus("local");
+        return;
+      }
+      if (syncTimerRef.current) {
+        window.clearTimeout(syncTimerRef.current);
+      }
+      if (immediate) {
+        void executeRemoteSync(nextLib, versionAtEnqueue);
+        return;
+      }
+      setSyncStatus("syncing");
+      syncTimerRef.current = window.setTimeout(() => {
+        syncTimerRef.current = null;
+        void executeRemoteSync(libraryRef.current, versionAtEnqueue);
+      }, 300);
+    },
+    [user, executeRemoteSync],
+  );
+
+  const retrySyncNow = useCallback(async (): Promise<boolean> => {
+    if (!user) return false;
+    if (syncTimerRef.current) {
+      window.clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
+    return executeRemoteSync(libraryRef.current, mutationVersionRef.current);
+  }, [user, executeRemoteSync]);
 
   const commitLibrary = useCallback(
     (
       updater: (prev: PlaylistLibraryState) => PlaylistLibraryState,
       options: { skipRemote?: boolean } = {},
-    ) => {
-      setLibrary((prev) => {
-        const nextRaw = updater(prev);
-        const next: PlaylistLibraryState = {
-          ...nextRaw,
-          schemaVersion: PLAYLISTS_SCHEMA_VERSION,
-          updatedAt: new Date().toISOString(),
-        };
-        const saveRes = savePlaylistLibrary(next);
-        if (!saveRes.ok && saveRes.error) {
-          setStorageNotice(saveRes.error);
+    ): { ok: boolean; error: string | null; library: PlaylistLibraryState } => {
+      const nextRaw = updater(libraryRef.current);
+      const next: PlaylistLibraryState = {
+        ...nextRaw,
+        schemaVersion: PLAYLISTS_SCHEMA_VERSION,
+        updatedAt: new Date().toISOString(),
+      };
+      libraryRef.current = next;
+      setLibrary(next);
+
+      const saveRes = savePlaylistLibrary(next);
+      if (!saveRes.ok && saveRes.error) {
+        setStorageNotice(saveRes.error);
+      }
+
+      if (!options.skipRemote) {
+        const nextVersion = ++mutationVersionRef.current;
+        if (user) {
+          pendingSyncRef.current = true;
+          writePendingSyncFlag(true);
+          scheduleRemoteSync(next, nextVersion);
+        } else {
+          setSyncStatus("local");
         }
-        if (!options.skipRemote) {
-          scheduleRemoteSync(next);
-        }
-        return next;
-      });
+      }
+
+      return { ok: saveRes.ok, error: saveRes.error, library: next };
     },
-    [scheduleRemoteSync],
+    [user, scheduleRemoteSync],
   );
 
-  // Optional Neon PostgreSQL hydration on login (localStorage remains authoritative fallback)
+  // Automatic retry when browser connectivity is restored
+  useEffect(() => {
+    if (!user || typeof window === "undefined") return;
+    const onOnline = () => {
+      if (pendingSyncRef.current) {
+        void retrySyncNow();
+      }
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [user, retrySyncNow]);
+
+  // Optional Neon PostgreSQL hydration on login (localStorage remains authoritative fallback; never drops local additions)
   useEffect(() => {
     if (!user) {
       hasHydratedRemoteRef.current = null;
-      setSyncStatus("local");
+      setSyncStatus(pendingSyncRef.current ? "pending" : "local");
       return;
     }
     if (hasHydratedRemoteRef.current === user.id) return;
     hasHydratedRemoteRef.current = user.id;
 
     let cancelled = false;
+    const startVersion = mutationVersionRef.current;
+
     void api
       .getPlaylistLibrary()
       .then((remote) => {
         if (cancelled) return;
-        const remotePlaylists = Array.isArray(remote.playlists) ? remote.playlists : [];
+        const remoteLib = migrateAndSanitizeLibrary({
+          ...remote,
+          preferences: { ...libraryRef.current.preferences, ...remote.preferences },
+        });
         const localLib = libraryRef.current;
 
-        if (remotePlaylists.length > 0 && localLib.playlists.length === 0) {
-          const hydrated = migrateAndSanitizeLibrary({
-            ...remote,
-            preferences: { ...localLib.preferences, ...remote.preferences },
-          });
-          setLibrary(hydrated);
-          savePlaylistLibrary(hydrated);
-          setSyncStatus("synced");
-        } else if (localLib.playlists.length > 0 && remotePlaylists.length === 0) {
-          scheduleRemoteSync(localLib);
-        } else {
-          // Reconcile serverId & server sharing metadata into matching local playlists
-          const remoteByClient = new Map(
-            remotePlaylists.map((rp) => [String(rp.id || ""), rp]),
+        const remoteById = new Map(remoteLib.playlists.map((p) => [p.id, p]));
+        const mergedPlaylists: Playlist[] = [];
+        const seenPlaylistIds = new Set<string>();
+        let localDiffersFromRemote = pendingSyncRef.current || mutationVersionRef.current > startVersion;
+
+        // Keep all local playlists and all local tracks; union any missing remote tracks safely
+        for (const localPl of localLib.playlists) {
+          seenPlaylistIds.add(localPl.id);
+          const remotePl = remoteById.get(localPl.id);
+          if (!remotePl) {
+            localDiffersFromRemote = true;
+            mergedPlaylists.push(localPl);
+            continue;
+          }
+
+          const localTrackIds = new Set(localPl.tracks.map((t) => t.id));
+          const localTrackSigs = new Set(localPl.tracks.map((t) => getTrackSignature(t)));
+          const extraRemoteTracks = remotePl.tracks.filter(
+            (rt) => !localTrackIds.has(rt.id) && !localTrackSigs.has(getTrackSignature(rt)),
           );
-          const mergedPlaylists = localLib.playlists.map((pl) => {
-            const matched = remoteByClient.get(pl.id);
-            if (!matched) return pl;
-            const isShared = Boolean(matched.isShared && matched.shareToken);
-            return {
-              ...pl,
-              serverId: typeof matched.serverId === "string" ? matched.serverId : pl.serverId ?? null,
-              isShared,
-              shareToken: isShared && typeof matched.shareToken === "string" ? matched.shareToken : null,
-              sharedAt: isShared && typeof matched.sharedAt === "string" ? matched.sharedAt : null,
-            };
+          const combinedTracks = [...localPl.tracks, ...extraRemoteTracks];
+          if (localPl.tracks.length !== remotePl.tracks.length) {
+            localDiffersFromRemote = true;
+          }
+
+          mergedPlaylists.push({
+            ...localPl,
+            serverId: remotePl.serverId ?? localPl.serverId ?? null,
+            isShared: Boolean(remotePl.isShared && remotePl.shareToken),
+            shareToken:
+              remotePl.isShared && remotePl.shareToken ? remotePl.shareToken : null,
+            sharedAt: remotePl.isShared ? (remotePl.sharedAt ?? null) : null,
+            tracks: combinedTracks,
           });
-          const updated = { ...localLib, playlists: mergedPlaylists };
-          setLibrary(updated);
-          savePlaylistLibrary(updated);
+        }
+
+        // Bring down any remote-only playlists not present locally
+        for (const remotePl of remoteLib.playlists) {
+          if (!seenPlaylistIds.has(remotePl.id)) {
+            mergedPlaylists.push(remotePl);
+          }
+        }
+
+        // Union categories cleanly without losing custom local ones
+        const catIds = new Set(localLib.categories.map((c) => c.id));
+        const mergedCategories = [
+          ...localLib.categories,
+          ...remoteLib.categories.filter((c) => !catIds.has(c.id)),
+        ];
+
+        const merged: PlaylistLibraryState = {
+          schemaVersion: PLAYLISTS_SCHEMA_VERSION,
+          updatedAt: new Date().toISOString(),
+          categories: mergedCategories,
+          playlists: mergedPlaylists,
+          preferences: localLib.preferences,
+        };
+        libraryRef.current = merged;
+        setLibrary(merged);
+        savePlaylistLibrary(merged);
+
+        if (localDiffersFromRemote) {
+          pendingSyncRef.current = true;
+          writePendingSyncFlag(true);
+          setSyncStatus("pending");
+          scheduleRemoteSync(merged, mutationVersionRef.current, true);
+        } else {
+          pendingSyncRef.current = false;
+          writePendingSyncFlag(false);
+          setLastSyncError(null);
           setSyncStatus("synced");
         }
       })
-      .catch(() => {
-        if (!cancelled) {
+      .catch((err) => {
+        if (cancelled) return;
+        const hasUnsyncedLocal =
+          pendingSyncRef.current ||
+          libraryRef.current.playlists.some((p) => !p.serverId || p.tracks.length > 0);
+        if (hasUnsyncedLocal) {
+          setLastSyncError(
+            err instanceof Error
+              ? err.message
+              : "Backend unreachable; changes remain saved in local storage.",
+          );
+          setSyncStatus("pending");
+        } else {
           setSyncStatus("local");
         }
       });
@@ -1412,67 +1575,133 @@ export function PlaylistProvider({ children }: { children: React.ReactNode }) {
     [applyShareStatus],
   );
 
+  const addTracksToPlaylist = useCallback(
+    (
+      playlistId: string,
+      drafts: TrackDraftInput[],
+      options: { allowDuplicate?: boolean } = {},
+    ): BatchAddTracksResult => {
+      const targetPl = libraryRef.current.playlists.find((p) => p.id === playlistId);
+      if (!targetPl) {
+        return {
+          ok: false,
+          addedTracks: [],
+          skippedDuplicates: [],
+          failedItems: [],
+          error: "Select or create a playlist before adding tracks.",
+        };
+      }
+      if (drafts.length === 0) {
+        return {
+          ok: false,
+          addedTracks: [],
+          skippedDuplicates: [],
+          failedItems: [],
+          error: "Provide at least one valid track to add.",
+        };
+      }
+
+      const existingSigs = new Set(targetPl.tracks.map((t) => getTrackSignature(t)));
+      const batchSigs = new Set<string>();
+      const addedTracks: PlaylistTrack[] = [];
+      const skippedDuplicates: string[] = [];
+      const failedItems: Array<{ title: string; reason: string }> = [];
+      const nowIso = new Date().toISOString();
+
+      for (const draft of drafts) {
+        const cleanTitle = draft.title.trim().slice(0, 200);
+        if (!cleanTitle) {
+          failedItems.push({ title: draft.youtubeVideoId || "Untitled", reason: "Track title is required." });
+          continue;
+        }
+        const sig = getTrackSignature(draft);
+        if (!options.allowDuplicate && (existingSigs.has(sig) || batchSigs.has(sig))) {
+          skippedDuplicates.push(cleanTitle);
+          continue;
+        }
+        batchSigs.add(sig);
+        addedTracks.push({
+          id: createPlaylistId("trk"),
+          sourceType: draft.sourceType,
+          title: cleanTitle,
+          artist: (draft.artist || "").trim().slice(0, 160),
+          categoryId: draft.categoryId || targetPl.categoryId || "cat-practice-reference",
+          thumbnailUrl: draft.thumbnailUrl ?? null,
+          practiceNotes: (draft.practiceNotes || "").slice(0, 2000),
+          loop: { aSec: null, bSec: null },
+          youtubeVideoId: draft.youtubeVideoId ?? null,
+          youtubeUrl: draft.youtubeUrl ?? null,
+          projectId: draft.projectId ?? null,
+          mediaAssetId: draft.mediaAssetId ?? null,
+          projectTitle: draft.projectTitle ?? null,
+          mediaFilename: draft.mediaFilename ?? null,
+          mediaMimeType: draft.mediaMimeType ?? null,
+          durationSec: draft.durationSec ?? null,
+          addedAt: nowIso,
+          updatedAt: nowIso,
+        });
+      }
+
+      if (addedTracks.length === 0) {
+        const msg =
+          skippedDuplicates.length > 0
+            ? `"${skippedDuplicates[0]}" is already in this playlist. Click "Add Anyway" to add a duplicate copy.`
+            : failedItems[0]?.reason || "No valid new tracks to add.";
+        return {
+          ok: false,
+          addedTracks: [],
+          skippedDuplicates,
+          failedItems,
+          error: msg,
+        };
+      }
+
+      const commitRes = commitLibrary((prev) => ({
+        ...prev,
+        playlists: prev.playlists.map((pl) =>
+          pl.id !== playlistId
+            ? pl
+            : { ...pl, updatedAt: nowIso, tracks: [...pl.tracks, ...addedTracks] },
+        ),
+      }));
+
+      if (!commitRes.ok) {
+        return {
+          ok: false,
+          addedTracks: [],
+          skippedDuplicates,
+          failedItems,
+          error: commitRes.error || "Unable to save tracks to browser storage.",
+        };
+      }
+
+      return {
+        ok: true,
+        addedTracks,
+        skippedDuplicates,
+        failedItems,
+      };
+    },
+    [commitLibrary],
+  );
+
   const addTrackToPlaylist = useCallback(
     (
       playlistId: string,
       draft: TrackDraftInput,
       options: { allowDuplicate?: boolean } = {},
     ): { ok: boolean; track?: PlaylistTrack; duplicate?: boolean; error?: string } => {
-      const targetPl = libraryRef.current.playlists.find((p) => p.id === playlistId);
-      if (!targetPl) {
-        return { ok: false, error: "Select or create a playlist before adding a track." };
+      const res = addTracksToPlaylist(playlistId, [draft], options);
+      if (!res.ok) {
+        return {
+          ok: false,
+          duplicate: res.skippedDuplicates.length > 0,
+          error: res.error,
+        };
       }
-      const cleanTitle = draft.title.trim().slice(0, 200);
-      if (!cleanTitle) {
-        return { ok: false, error: "Track title is required." };
-      }
-
-      const incomingSig = getTrackSignature(draft);
-      if (!options.allowDuplicate) {
-        const dup = targetPl.tracks.find((t) => getTrackSignature(t) === incomingSig);
-        if (dup) {
-          return {
-            ok: false,
-            duplicate: true,
-            error: `"${dup.title}" is already in this playlist. Click "Add Anyway" to add a duplicate copy.`,
-          };
-        }
-      }
-
-      const nowIso = new Date().toISOString();
-      const createdTrack: PlaylistTrack = {
-        id: createPlaylistId("trk"),
-        sourceType: draft.sourceType,
-        title: cleanTitle,
-        artist: (draft.artist || "").trim().slice(0, 160),
-        categoryId: draft.categoryId || targetPl.categoryId || "cat-practice-reference",
-        thumbnailUrl: draft.thumbnailUrl ?? null,
-        practiceNotes: (draft.practiceNotes || "").slice(0, 2000),
-        loop: { aSec: null, bSec: null },
-        youtubeVideoId: draft.youtubeVideoId ?? null,
-        youtubeUrl: draft.youtubeUrl ?? null,
-        projectId: draft.projectId ?? null,
-        mediaAssetId: draft.mediaAssetId ?? null,
-        projectTitle: draft.projectTitle ?? null,
-        mediaFilename: draft.mediaFilename ?? null,
-        mediaMimeType: draft.mediaMimeType ?? null,
-        durationSec: draft.durationSec ?? null,
-        addedAt: nowIso,
-        updatedAt: nowIso,
-      };
-
-      commitLibrary((prev) => ({
-        ...prev,
-        playlists: prev.playlists.map((pl) =>
-          pl.id !== playlistId
-            ? pl
-            : { ...pl, updatedAt: nowIso, tracks: [...pl.tracks, createdTrack] },
-        ),
-      }));
-
-      return { ok: true, track: createdTrack };
+      return { ok: true, track: res.addedTracks[0] };
     },
-    [commitLibrary],
+    [addTracksToPlaylist],
   );
 
   const reorderTrack = useCallback(
@@ -1547,6 +1776,8 @@ export function PlaylistProvider({ children }: { children: React.ReactNode }) {
       storageNotice,
       dismissStorageNotice,
       syncStatus,
+      lastSyncError,
+      retrySyncNow,
       addCategory,
       deleteCategory,
       createPlaylist,
@@ -1559,6 +1790,7 @@ export function PlaylistProvider({ children }: { children: React.ReactNode }) {
       regeneratePlaylistSharing,
       disablePlaylistSharing,
       addTrackToPlaylist,
+      addTracksToPlaylist,
       updateTrack,
       reorderTrack,
       removeTrack,
@@ -1599,6 +1831,8 @@ export function PlaylistProvider({ children }: { children: React.ReactNode }) {
       storageNotice,
       dismissStorageNotice,
       syncStatus,
+      lastSyncError,
+      retrySyncNow,
       addCategory,
       deleteCategory,
       createPlaylist,
@@ -1611,6 +1845,7 @@ export function PlaylistProvider({ children }: { children: React.ReactNode }) {
       regeneratePlaylistSharing,
       disablePlaylistSharing,
       addTrackToPlaylist,
+      addTracksToPlaylist,
       updateTrack,
       reorderTrack,
       removeTrack,

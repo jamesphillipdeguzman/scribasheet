@@ -51,7 +51,7 @@ export function PlaylistShareModal({
   const isShared = Boolean(playlist.isShared && playlist.shareToken);
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   const shareUrl = isShared && playlist.shareToken ? `${origin}/shared/playlist/${playlist.shareToken}` : "";
-  const isLocalOnly = !playlist.serverId || syncStatus === "local" || syncStatus === "offline";
+  const isLocalOnly = !playlist.serverId || syncStatus === "local" || syncStatus === "pending";
 
   const handleSaveDescription = () => {
     if (descDraft !== (playlist.description ?? "")) {

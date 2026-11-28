@@ -4,10 +4,12 @@ import {
   AlertCircle,
   CheckCircle2,
   Cloud,
+  CloudOff,
   Download,
   HardDrive,
   ListMusic,
   Loader2,
+  RefreshCw,
   Upload,
   X,
 } from "lucide-react";
@@ -33,6 +35,8 @@ export function PlaylistsPage() {
     storageNotice,
     dismissStorageNotice,
     syncStatus,
+    lastSyncError,
+    retrySyncNow,
     addCategory,
     deleteCategory,
     createPlaylist,
@@ -45,6 +49,7 @@ export function PlaylistsPage() {
     regeneratePlaylistSharing,
     disablePlaylistSharing,
     addTrackToPlaylist,
+    addTracksToPlaylist,
     updateTrack,
     reorderTrack,
     removeTrack,
@@ -160,7 +165,12 @@ export function PlaylistsPage() {
               </h1>
               <span
                 data-testid="playlists-sync-badge"
-                className="inline-flex items-center gap-1 rounded-full border border-stone-300 bg-stone-100 px-2.5 py-0.5 text-[11px] font-medium text-stone-700 dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#A1A1AA]"
+                title={lastSyncError || undefined}
+                className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
+                  syncStatus === "pending"
+                    ? "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-300"
+                    : "border-stone-300 bg-stone-100 text-stone-700 dark:border-[#27273A] dark:bg-[#11111B] dark:text-[#A1A1AA]"
+                }`}
               >
                 {syncStatus === "syncing" ? (
                   <>
@@ -172,6 +182,11 @@ export function PlaylistsPage() {
                     <Cloud className="h-3 w-3 text-emerald-500" />
                     Local + Cloud Synced
                   </>
+                ) : syncStatus === "pending" ? (
+                  <>
+                    <CloudOff className="h-3 w-3 text-amber-500" />
+                    Saved Locally • Sync Pending
+                  </>
                 ) : (
                   <>
                     <HardDrive className="h-3 w-3 text-[#A78BFA]" />
@@ -179,6 +194,17 @@ export function PlaylistsPage() {
                   </>
                 )}
               </span>
+              {syncStatus === "pending" && (
+                <button
+                  type="button"
+                  data-testid="retry-playlist-sync-btn"
+                  onClick={() => void retrySyncNow()}
+                  className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-white px-2.5 py-0.5 text-[11px] font-medium text-amber-900 hover:bg-amber-50 dark:border-amber-500/40 dark:bg-[#181825] dark:text-amber-200 dark:hover:bg-amber-500/20"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  Retry Sync
+                </button>
+              )}
             </div>
             <p className="text-xs sm:text-sm text-stone-600 dark:text-[#A1A1AA]">
               Organize YouTube recordings and your ScribaSheet audio, practice with speed and A–B loops, and launch Studio workflows.
@@ -337,6 +363,8 @@ export function PlaylistsPage() {
               activeTrackId={activeTrackId}
               isPlaying={isPlaying}
               onAddTrack={addTrackToPlaylist}
+              onAddTracks={addTracksToPlaylist}
+              onNotify={(kind, text) => setBannerStatus({ kind, text })}
               onUpdateTrack={updateTrack}
               onReorderTrack={reorderTrack}
               onRemoveTrack={removeTrack}
